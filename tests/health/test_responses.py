@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import json
+
+from agora.health.responses import HealthResponseBuilder
+from agora.metrics.collector import MetricsCollector
+
+
+class _FakeExporter:
+    content_type = "text/plain"
+
+    def render(self) -> str:
+        return "metric 1\n"
+
+
+def test_root_redirect_response() -> None:
+    builder = HealthResponseBuilder(
+        collector=MetricsCollector(),
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build("GET", "/")
+    assert response.location == "/health"
+    assert response.body == b""
+
+
+def test_health_response_includes_timestamp_and_json_payload() -> None:
+    collector = MetricsCollector()
+    builder = HealthResponseBuilder(
+        collector=collector,
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build_health()
+    payload = json.loads(response.body.decode("utf-8"))
+    assert response.content_type == "application/json"
+    assert payload["status"] == "idle"
+    assert "timestamp" in payload
+
+
+def test_metrics_response_uses_exporter_content_type() -> None:
+    builder = HealthResponseBuilder(
+        collector=MetricsCollector(),
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build_metrics()
+    assert response.content_type == "text/plain"
+    assert response.body == b"metric 1\n"
+
+
+def test_ready_response_is_service_unavailable_when_collector_is_failing() -> None:
+    import asyncio
+
+    collector = MetricsCollector()
+    asyncio.get_event_loop().run_until_complete(
+        collector.record_run("pipe", summary=None, error=RuntimeError("boom"))
+    )
+    builder = HealthResponseBuilder(
+        collector=collector,
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build_ready()
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload == {"ready": False, "status": "failing"}
+
+
+def test_unknown_path_returns_not_found_response() -> None:
+    builder = HealthResponseBuilder(
+        collector=MetricsCollector(),
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build("GET", "/missing")
+    assert response.body == b"Not found"

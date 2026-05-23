@@ -1,0 +1,147 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agora-etl"
+version = "0.1.0"
+description = "Agora — async-first ETL framework for Python."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tham Tra" }]
+requires-python = ">=3.11"
+keywords = ["etl", "pipeline", "async", "kafka", "data-engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = [
+    # Config
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    # Logging
+    "logstruct>=0.2.1,<0.3",
+    # CLI
+    "rich>=13.0,<16",
+    "httpx>=0.27,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/thanhtham010891/agora-etl"
+Repository = "https://github.com/thanhtham010891/agora-etl"
+BugTracker = "https://github.com/thanhtham010891/agora-etl/issues"
+
+[project.optional-dependencies]
+file = [
+    "pyarrow>=18.0,<20",
+]
+dev = [
+    "pytest==9.0.3",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.13",
+    "mypy==2.1.0",
+    "hatch>=1.14,<2",
+]
+all = [
+    "agora-etl[file]",
+]
+
+[project.scripts]
+agora = "agora.cli.main:main"
+
+# ======================================================================
+# Plugin entry-point groups
+# ======================================================================
+# Third-party packages register plugins by adding matching groups in
+# their own pyproject.toml, e.g.:
+#
+#   [project.entry-points."agora.sources"]
+#   my_source = "my_package.sources:MySource"
+#
+# agora discovers these at runtime via:
+#   source_registry.load_entrypoints("agora.sources")
+# ======================================================================
+
+[project.entry-points."agora.sources"]
+# Built-in sources (self-registration for symmetry / testing)
+http = "agora.sources.http.http:HTTPSource"
+jsonl = "agora.sources.file.jsonlines:JsonLinesSource"
+parquet = "agora.sources.file.parquet:ParquetSource"
+csv = "agora.sources.file.csv:CsvSource"
+
+[project.entry-points."agora.sinks"]
+stdout = "agora.sinks.io.stdout:StdoutSink"
+jsonl = "agora.sinks.file.jsonlines:JsonLinesSink"
+csv = "agora.sinks.file.csv:CsvSink"
+parquet = "agora.sinks.file.parquet:ParquetSink"
+log = "agora.sinks.io.log:LogSink"
+webhook = "agora.sinks.http.webhook:WebhookSink"
+
+[project.entry-points."agora.middlewares"]
+validate = "agora.middlewares.validate:ValidateMiddleware"
+enrich = "agora.middlewares.enrich:EnrichMiddleware"
+# AI-powered middlewares (require agora-etl AI extras)
+ai_enrich = "agora.middlewares.ai.enrich:AIEnrichMiddleware"
+ai_classify = "agora.middlewares.ai.classify:AIClassifyMiddleware"
+ai_extract = "agora.middlewares.ai.extract:AIExtractMiddleware"
+ai_validate = "agora.middlewares.ai.validate:AIValidateMiddleware"
+ai_translate = "agora.middlewares.ai.translate:AITranslateMiddleware"
+ai_batch = "agora.middlewares.ai.batch:AIBatchMiddleware"
+
+[project.entry-points."agora.ai.providers"]
+# Intentionally empty — provider plugins register here
+# Third-party providers register here
+
+[project.entry-points."agora.ai.caches"]
+# Intentionally empty — cache plugins register here
+
+[project.entry-points."agora.metrics.exporters"]
+# Intentionally empty — metrics exporter plugins register here
+
+[project.entry-points."agora.runner"]
+scheduled = "agora.runner.scheduled:ScheduledPipeline"
+worker_pool = "agora.runner.worker:WorkerPool"
+
+[project.entry-points."agora.middlewares.dedup.stores"]
+memory = "agora.middlewares.dedup.stores.memory:InMemoryStore"
+
+[project.entry-points."agora.middlewares.dedup.strategies"]
+exact = "agora.middlewares.dedup.strategies.exact:ExactMatchStrategy"
+fuzzy = "agora.middlewares.dedup.strategies.fuzzy:FuzzyMatchStrategy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agora"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".git", ".venv", "__pycache__", "dist", "build"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "N", "SIM", "TCH", "TRY", "G", "PIE", "RET", "RUF"]
+ignore = ["E501", "TRY003", "TRY300", "TRY301", "RET504"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires external services such as Kafka, Postgres, or Redis",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

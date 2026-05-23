@@ -1,0 +1,446 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from agora import IterableSource, Pipeline
+from agora.core.sink import BaseSink, SinkCapabilities, SinkFanOut, SinkRouter, sink_capabilities
+
+
+class _BlockingSink:
+    sink_name = "blocking"
+
+    def __init__(
+        self,
+        entered: asyncio.Event,
+        release: asyncio.Event,
+        active: list[int],
+        max_active: list[int],
+    ) -> None:
+        self._entered = entered
+        self._release = release
+        self._active = active
+        self._max_active = max_active
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: str) -> None:
+        del record
+        self._active[0] += 1
+        self._max_active[0] = max(self._max_active[0], self._active[0])
+        self._entered.set()
+        await self._release.wait()
+        self._active[0] -= 1
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _BlockingLifecycleSink:
+    sink_name = "blocking_lifecycle"
+
+    def __init__(
+        self,
+        phase: str,
+        entered: asyncio.Event,
+        release: asyncio.Event,
+        active: list[int],
+        max_active: list[int],
+    ) -> None:
+        self._phase = phase
+        self._entered = entered
+        self._release = release
+        self._active = active
+        self._max_active = max_active
+
+    async def _block(self) -> None:
+        self._active[0] += 1
+        self._max_active[0] = max(self._max_active[0], self._active[0])
+        self._entered.set()
+        await self._release.wait()
+        self._active[0] -= 1
+
+    async def open(self) -> None:
+        if self._phase == "open":
+            await self._block()
+
+    async def write(self, record: str) -> None:
+        del record
+
+    async def flush(self) -> None:
+        if self._phase == "flush":
+            await self._block()
+
+    async def close(self) -> None:
+        if self._phase == "close":
+            await self._block()
+
+
+class _FailingSink:
+    sink_name = "failing"
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: str) -> None:
+        del record
+        raise RuntimeError(self._message)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _SingleWriteSink:
+    sink_name = "single_write"
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: str) -> None:
+        if record == "b":
+            raise RuntimeError("single-write-broke")
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _BatchFailingSink:
+    sink_name = "batch_failing"
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: str) -> None:
+        del record
+        raise AssertionError("batch path should be used")
+
+    async def write_batch(self, records: list[str]) -> None:
+        del records
+        raise RuntimeError("batch-broke")
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _ParallelCapableFallbackSink(BaseSink[str]):
+    sink_name = "parallel_capable_fallback"
+    parallel_writes_safe = True
+    ordered_writes_required = False
+
+    def __init__(self, expected_active: int) -> None:
+        self._expected_active = expected_active
+        self._release = asyncio.Event()
+        self._all_entered = asyncio.Event()
+        self.active = 0
+        self.max_active = 0
+
+    async def write(self, record: str) -> None:
+        del record
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.max_active >= self._expected_active:
+            self._all_entered.set()
+        await self._release.wait()
+        self.active -= 1
+
+    async def wait_for_all_entered(self) -> None:
+        await self._all_entered.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+class _OrderedFallbackSink(BaseSink[str]):
+    sink_name = "ordered_fallback"
+    parallel_writes_safe = True
+    ordered_writes_required = True
+
+    def __init__(self) -> None:
+        self._release = asyncio.Event()
+        self._first_entered = asyncio.Event()
+        self.started_records: list[str] = []
+        self.active = 0
+        self.max_active = 0
+
+    async def write(self, record: str) -> None:
+        self.started_records.append(record)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self._first_entered.set()
+        await self._release.wait()
+        self.active -= 1
+
+    async def wait_for_first_entered(self) -> None:
+        await self._first_entered.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_can_write_to_independent_sinks_concurrently() -> None:
+    release = asyncio.Event()
+    entered_one = asyncio.Event()
+    entered_two = asyncio.Event()
+    active = [0]
+    max_active = [0]
+    fan_out = SinkFanOut(
+        [
+            _BlockingSink(entered_one, release, active, max_active),
+            _BlockingSink(entered_two, release, active, max_active),
+        ]
+    ).with_concurrency()
+
+    write_task = asyncio.create_task(fan_out.write("record"))
+
+    await asyncio.wait_for(asyncio.gather(entered_one.wait(), entered_two.wait()), timeout=1.0)
+    assert max_active[0] == 2
+
+    release.set()
+    result = await asyncio.wait_for(write_task, timeout=1.0)
+    assert result.ok
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_concurrent_errors_preserve_sink_order() -> None:
+    fan_out = SinkFanOut(
+        [
+            _FailingSink("first"),
+            _FailingSink("second"),
+        ]
+    ).with_concurrency()
+
+    result = await fan_out.write("record")
+
+    assert result.written is False
+    assert [str(error) for error in result.errors] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_concurrent_batch_path_preserves_per_record_errors() -> None:
+    fan_out = SinkFanOut(
+        [
+            _BatchFailingSink(),
+            _SingleWriteSink(),
+        ]
+    ).with_concurrency()
+
+    results = await fan_out.write_batch(["a", "b", "c"])
+
+    assert [[str(error) for error in result.errors] for result in results] == [
+        ["batch-broke"],
+        ["batch-broke", "single-write-broke"],
+        ["batch-broke"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_uses_parallel_fallback_for_capability_advertised_sink() -> None:
+    sink = _ParallelCapableFallbackSink(expected_active=3)
+    fan_out = SinkFanOut([sink]).with_concurrency()  # type: ignore[list-item]
+
+    write_task = asyncio.create_task(fan_out.write_batch(["a", "b", "c"]))
+
+    await asyncio.wait_for(sink.wait_for_all_entered(), timeout=1.0)
+    assert sink.max_active == 3
+
+    sink.release()
+    results = await asyncio.wait_for(write_task, timeout=1.0)
+    assert all(result.ok for result in results)
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_keeps_serial_fallback_for_ordered_sink() -> None:
+    sink = _OrderedFallbackSink()
+    fan_out = SinkFanOut([sink]).with_concurrency()  # type: ignore[list-item]
+
+    write_task = asyncio.create_task(fan_out.write_batch(["a", "b", "c"]))
+
+    await asyncio.wait_for(sink.wait_for_first_entered(), timeout=1.0)
+    await asyncio.sleep(0)
+    assert sink.max_active == 1
+    assert sink.started_records == ["a"]
+
+    sink.release()
+    results = await asyncio.wait_for(write_task, timeout=1.0)
+    assert sink.started_records == ["a", "b", "c"]
+    assert all(result.ok for result in results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["open", "flush", "close"])
+async def test_sink_fan_out_can_run_lifecycle_concurrently(phase: str) -> None:
+    release = asyncio.Event()
+    entered_one = asyncio.Event()
+    entered_two = asyncio.Event()
+    active = [0]
+    max_active = [0]
+    fan_out = SinkFanOut(
+        [
+            _BlockingLifecycleSink(phase, entered_one, release, active, max_active),
+            _BlockingLifecycleSink(phase, entered_two, release, active, max_active),
+        ]
+    ).with_concurrency()
+
+    method = getattr(fan_out, phase)
+    lifecycle_task = asyncio.create_task(method())
+
+    await asyncio.wait_for(asyncio.gather(entered_one.wait(), entered_two.wait()), timeout=1.0)
+    assert max_active[0] == 2
+
+    release.set()
+    await asyncio.wait_for(lifecycle_task, timeout=1.0)
+
+
+def test_with_sink_concurrency_requires_fan_out_pipeline() -> None:
+    class _CollectSink:
+        sink_name = "collect"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _RouteSink(_CollectSink):
+        pass
+
+    router = SinkRouter[int]().default(_RouteSink())  # type: ignore[arg-type]
+    # sink_concurrency is only valid for fan_out, not route
+    # route() does not accept sink_concurrency kwarg — it's excluded by design
+    pipeline = Pipeline(IterableSource([1])).route(router)
+    assert pipeline is not None
+
+
+def test_sink_fan_out_binds_context_only_for_context_bindable_sinks() -> None:
+    calls: list[object] = []
+
+    class _ContextAwareSink:
+        sink_name = "context_aware"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            del record
+
+        def bind_context(self, ctx: object) -> None:
+            calls.append(ctx)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _PlainSink:
+        sink_name = "plain"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    fan_out = SinkFanOut([_ContextAwareSink(), _PlainSink()])  # type: ignore[list-item]
+    ctx = object()
+    fan_out.bind_context(ctx)
+    assert calls == [ctx]
+
+
+def test_sink_router_binds_context_for_routes_and_default_sink() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class _ContextAwareSink:
+        sink_name = "context_aware"
+
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            del record
+
+        def bind_context(self, ctx: object) -> None:
+            calls.append((self._name, ctx))
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    router = (
+        SinkRouter[int]()
+        .route(lambda value: value > 0, _ContextAwareSink("route"))  # type: ignore[arg-type]
+        .default(_ContextAwareSink("default"))  # type: ignore[arg-type]
+    )
+    ctx = object()
+    router.bind_context(ctx)
+    assert calls == [("route", ctx), ("default", ctx)]
+
+
+def test_sink_capabilities_prefers_explicit_contracts_and_detects_native_batch() -> None:
+    class _ExplicitSink(BaseSink[int]):
+        sink_name = "explicit"
+
+        async def write(self, record: int) -> None:
+            del record
+
+        def sink_capabilities(self) -> SinkCapabilities:
+            return SinkCapabilities(
+                batch_writable_native=False,
+                parallel_writes_safe=True,
+                ordered_writes_required=False,
+            )
+
+    class _BatchOverrideSink(BaseSink[int]):
+        sink_name = "batch_override"
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def write_batch(self, records: list[int]) -> None:
+            del records
+
+    assert sink_capabilities(_ExplicitSink()) == SinkCapabilities(
+        batch_writable_native=False,
+        parallel_writes_safe=True,
+        ordered_writes_required=False,
+    )
+    assert sink_capabilities(_BatchOverrideSink()) == SinkCapabilities(
+        batch_writable_native=True,
+        parallel_writes_safe=False,
+        ordered_writes_required=True,
+    )

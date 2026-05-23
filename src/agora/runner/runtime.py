@@ -1,0 +1,197 @@
+"""Runtime helpers for scheduled pipeline execution."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import logstruct
+
+if TYPE_CHECKING:
+    from agora.core.metrics import PipelineRunSummary
+
+logger = logstruct.getLogger(__name__)
+
+
+async def interruptible_sleep(
+    seconds: float,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Sleep for *seconds*, waking early if *stop_event* is set."""
+    if stop_event is None or seconds <= 0:
+        await asyncio.sleep(max(seconds, 0))
+        return
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+
+
+@dataclass
+class RunRecord:
+    """Stats from a single scheduled pipeline run."""
+
+    run_number: int
+    started_at: float
+    summary: PipelineRunSummary | None = None
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+@dataclass
+class ScheduledPipelineState:
+    """Mutable scheduler state separated from pipeline configuration."""
+
+    run_number: int = 0
+    consecutive_errors: int = 0
+    history: deque[RunRecord] = field(default_factory=lambda: deque(maxlen=100))
+    running: bool = False
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def last_run(self) -> RunRecord | None:
+        return self.history[-1] if self.history else None
+
+
+class ScheduledPipelineRunner:
+    """Execute the loop for a configured ``ScheduledPipeline``."""
+
+    def __init__(self, pipeline: Any) -> None:
+        self._pipeline = pipeline
+
+    async def run(self) -> None:
+        state = self._pipeline._state
+        state.running = True
+        state.stop_event.clear()
+
+        logger.info(
+            "scheduler_start",
+            pipeline=self._pipeline._pipeline_id,
+            schedule=str(self._pipeline._schedule),
+        )
+
+        try:
+            while not state.stop_event.is_set():
+                ran = await self._run_once()
+
+                if not self._should_continue():
+                    break
+
+                if ran:
+                    await self._pipeline._schedule.wait_until_next(state.stop_event)
+                else:
+                    # pre_run_hook skipped this run (e.g. lease not acquired).
+                    # Retry quickly instead of waiting the full schedule interval.
+                    await interruptible_sleep(10, state.stop_event)
+
+        except asyncio.CancelledError:
+            logger.info("scheduler_cancelled", pipeline=self._pipeline._pipeline_id)
+        finally:
+            state.running = False
+            logger.info(
+                "scheduler_stopped",
+                pipeline=self._pipeline._pipeline_id,
+                total_runs=state.run_number,
+            )
+
+    def _should_continue(self) -> bool:
+        state = self._pipeline._state
+        if not self._pipeline._schedule.should_repeat:
+            return False
+
+        if state.consecutive_errors < self._pipeline._max_errors:
+            return True
+
+        logger.error(
+            "scheduler_max_errors_reached",
+            pipeline=self._pipeline._pipeline_id,
+            consecutive=state.consecutive_errors,
+        )
+        return False
+
+    async def _notify_run_complete(self, record: RunRecord) -> None:
+        if self._pipeline._on_run_complete is not None:
+            try:
+                await self._pipeline._on_run_complete(record)
+            except Exception as cb_exc:
+                logger.warning("scheduler_callback_error", error=str(cb_exc))
+
+        for observer in self._pipeline._observers:
+            try:
+                await observer(record)
+            except Exception as obs_exc:
+                logger.warning("scheduler_observer_error", error=str(obs_exc))
+
+    async def _handle_run_failure(self, record: RunRecord, exc: Exception) -> None:
+        state = self._pipeline._state
+        record.error = exc
+        state.consecutive_errors += 1
+
+        logger.exception(
+            "scheduler_run_error",
+            pipeline=self._pipeline._pipeline_id,
+            run=state.run_number,
+            consecutive_errors=state.consecutive_errors,
+            error=str(exc),
+        )
+
+        wait = self._pipeline._backoff_policy.next_delay(state.consecutive_errors)
+        logger.info("scheduler_error_backoff", wait_s=round(wait, 1))
+        await interruptible_sleep(wait, state.stop_event)
+
+    def _handle_run_success(self, record: RunRecord, summary: PipelineRunSummary) -> None:
+        state = self._pipeline._state
+        record.summary = summary
+        state.consecutive_errors = 0
+
+        logger.info(
+            "scheduler_run_done",
+            pipeline=self._pipeline._pipeline_id,
+            run=state.run_number,
+            consumed=summary.records_consumed,
+            written=summary.records_written,
+            elapsed=round(summary.elapsed_seconds, 1),
+        )
+
+    async def _run_once(self) -> bool:
+        state = self._pipeline._state
+
+        # pre_run_hook returns False → skip this run (e.g. lease not acquired).
+        # Does not increment run_number or count as an error.
+        hook = getattr(self._pipeline, "_pre_run_hook", None)
+        if hook is not None and not await hook():
+            return False
+
+        state.run_number += 1
+        record = RunRecord(run_number=state.run_number, started_at=time.monotonic())
+
+        logger.info(
+            "scheduler_run_start",
+            pipeline=self._pipeline._pipeline_id,
+            run=state.run_number,
+        )
+
+        try:
+            pipeline = await self._pipeline._factory()
+            summary = await pipeline.run(max_records=self._pipeline._max_records)
+            self._handle_run_success(record, summary)
+        except Exception as exc:
+            await self._handle_run_failure(record, exc)
+        finally:
+            state.history.append(record)
+            await self._notify_run_complete(record)
+
+        return True
+
+
+__all__ = [
+    "RunRecord",
+    "ScheduledPipelineRunner",
+    "ScheduledPipelineState",
+    "interruptible_sleep",
+]

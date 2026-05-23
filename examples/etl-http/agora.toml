@@ -1,0 +1,4 @@
+[project]
+name = "etl-http"
+version = "0.1.0"
+pipelines_package = "pipelines"
