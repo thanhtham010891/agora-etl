@@ -3,7 +3,7 @@ agora/sinks/file/parquet.py
 ===========================
 ``ParquetSink`` — write records incrementally to a Parquet file.
 
-Requires: ``pip install agora-core`` (pyarrow)
+Requires: `pip install "agora-etl[file]"` (pyarrow)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ logger = logstruct.getLogger(__name__)
 class ParquetSink(BaseSink[T], Generic[T]):
     """Write records incrementally to a Parquet file via PyArrow.
 
-    Requires: ``pip install agora-core``
+    Requires: `pip install "agora-etl[file]"`
 
     Parameters
     ----------
@@ -81,7 +81,7 @@ class ParquetSink(BaseSink[T], Generic[T]):
             import pyarrow.parquet as pq
         except ImportError:
             raise ImportError(
-                "ParquetSink requires pyarrow. Install via: pip install 'agora-core'"
+                "ParquetSink requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from None
 
         self._path.parent.mkdir(parents=True, exist_ok=True)

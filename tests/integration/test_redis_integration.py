@@ -6,7 +6,7 @@ Integration tests for Redis plugin (agora_redis).
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
 - Redis reachable at ``127.0.0.1:16379``
-- ``agora-etl-redis`` plugin installed (``pip install agora-core[redis]``)
+- ``agora-etl-redis`` plugin installed (`pip install "agora-etl-plugins[redis]"`)
 
 Run with::
 

@@ -49,7 +49,7 @@ Supports checkpointing by row number.
 
 Stream records from a Parquet file using PyArrow. Reads in batches to avoid loading the entire file into memory.
 
-Requires: `pip install agora-etl[file]`
+Requires: `pip install "agora-etl[file]"`
 
 ```python
 from agora.sources.file.parquet import ParquetSource

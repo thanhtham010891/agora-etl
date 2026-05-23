@@ -110,9 +110,7 @@ class HTTPSource(BaseSource[T], Generic[T]):
         **client_kwargs: Any,
     ) -> None:
         if not _HTTPX_AVAILABLE:
-            raise ImportError(
-                "httpx is required for HTTPSource. Install it: pip install 'agora-core'"
-            )
+            raise ImportError("httpx is required for HTTPSource. Install it: pip install agora-etl")
         self._base_url = base_url
         self._rps = requests_per_second
         self._min_interval = 1.0 / max(requests_per_second, 0.001)

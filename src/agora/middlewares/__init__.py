@@ -18,7 +18,7 @@ Provided (built-in):
     ValidateMiddleware  — validate records via pydantic or custom validator
     EnrichMiddleware    — async lookup / enrichment (external API, DB, cache)
 
-Provided (AI-powered, require agora-core AI extras):
+Provided (AI-powered, require agora-etl-plugins[ai] extras):
     AIEnrichMiddleware    — LLM-based field enrichment
     AIClassifyMiddleware  — classify records into categories
     AIExtractMiddleware   — extract structured data from text

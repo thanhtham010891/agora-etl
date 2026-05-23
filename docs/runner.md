@@ -35,7 +35,7 @@ await scheduled.start()
 | `Schedule.every(seconds=N)` | Fixed interval after each run completes |
 | `Schedule.every(minutes=N)` | |
 | `Schedule.every(hours=N)` | |
-| `Schedule.cron("0 */6 * * *")` | Cron expression (requires `agora-cron`) |
+| `Schedule.cron("0 */6 * * *")` | Cron expression (requires `agora-etl-plugins[cron]`) |
 | `Schedule.continuous()` | Restart immediately after each run |
 | `Schedule.once()` | Run exactly once then stop |
 

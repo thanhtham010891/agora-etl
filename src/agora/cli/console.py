@@ -285,7 +285,7 @@ class _Console:
         """Print agora version with styling."""
         _out.print(
             f"[bold cyan]agora[/bold cyan] [bold white]{version}[/bold white]  "
-            f"[dim]async ETL framework — https://pypi.org/project/agora-core[/dim]"
+            f"[dim]async ETL framework — https://pypi.org/project/agora-etl/dim]"
         )
 
     # ------------------------------------------------------------------ #

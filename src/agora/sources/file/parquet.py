@@ -29,7 +29,7 @@ class ParquetSource(FileSource[T], Generic[T]):
         Reads in batches using PyArrow's ``ParquetFile.iter_batches()`` to
         avoid loading the entire file into memory.
 
-    Requires: ``pip install agora-core``
+    Requires: `pip install "agora-etl[file]"`
 
         Parameters
         ----------
@@ -123,7 +123,7 @@ class ParquetSource(FileSource[T], Generic[T]):
         except ImportError:
             batch_queue.put(
                 ImportError(
-                    "PyArrow is required for ParquetSource. Install via: pip install 'agora-core'"
+                    "PyArrow is required for ParquetSource. Install via: pip install 'agora-etl[file]'"
                 )
             )
             batch_queue.put(_QUEUE_DONE)

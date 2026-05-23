@@ -6,7 +6,7 @@ Integration tests for Postgres plugin (agora-etl-postgres / psycopg).
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
 - Postgres reachable at ``127.0.0.1:55432`` (DSN via ``AGORA_TEST_POSTGRES_DSN``)
-- ``psycopg`` installed (``pip install agora-core[postgres]``)
+- ``psycopg`` installed (`pip install "agora-etl-plugins[postgres]"`)
 
 Run with::
 
