@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-
+[![PyPI](https://img.shields.io/pypi/v/agora-etl)](https://pypi.org/project/agora-etl/)
 ---
 
 ## Documentation
@@ -54,8 +54,8 @@ Agora is an async-first ETL framework for Python. It provides a composable pipel
 
 ```bash
 pip install agora-etl                # core only
-pip install agora-etl[file]          # + Parquet / CSV / JSON Lines support
-pip install agora-etl[all,dev]       # everything + dev tools
+pip install "agora-etl[file]"          # + Parquet / CSV / JSON Lines support
+pip install "agora-etl[all,dev]"       # everything + dev tools
 ```
 
 ---

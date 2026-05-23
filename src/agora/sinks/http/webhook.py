@@ -3,7 +3,7 @@ agora/sinks/webhook.py
 ======================
 ``WebhookSink[T]`` — HTTP POST each record to a webhook endpoint.
 
-Re-uses ``httpx`` from ``agora-core`` — no new dependency needed.
+Re-uses ``httpx`` from ``agora-etl` — no new dependency needed.
 
 Typical use-cases: Slack / Discord alerts, n8n / Make automations,
 custom downstream APIs that receive data via webhook.
@@ -85,7 +85,7 @@ class WebhookSink(BaseSink[T], Generic[T]):
         flush_every: int = 50,
     ) -> None:
         if not _HTTPX_AVAILABLE:
-            raise ImportError("WebhookSink requires httpx. Install via: pip install 'agora-core'")
+            raise ImportError("WebhookSink requires httpx. Install via: pip install agora-etl")
         self._url = url
         self._payload_fn = payload_fn or _default_payload
         self._headers = {"Content-Type": "application/json", **(headers or {})}

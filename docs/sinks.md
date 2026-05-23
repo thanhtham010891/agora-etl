@@ -41,7 +41,7 @@ sink = CsvSink(
 
 Write records incrementally to a Parquet file via PyArrow.
 
-Requires: `pip install agora-etl[file]`
+Requires: `pip install "agora-etl[file]"`
 
 ```python
 from agora.sinks.file.parquet import ParquetSink

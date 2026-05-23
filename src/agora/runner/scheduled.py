@@ -23,7 +23,7 @@ Schedule types
     Schedule.every(seconds=N)       — fixed interval after completion
     Schedule.every(minutes=N)
     Schedule.every(hours=N)
-    Schedule.cron("0 */6 * * *")   — cron expression (requires agora-cron)
+    Schedule.cron("0 */6 * * *")   — cron expression (requires agora-etl-plugins[cron])
     Schedule.continuous()           — no delay; restart immediately
     Schedule.once()                 — run exactly once then stop
 
@@ -101,7 +101,7 @@ class Schedule:
             from agora_cron import validate_cron_expression
         except ImportError:
             raise ImportError(
-                "Cron schedules require 'agora-cron'. Install it: pip install \"agora-core[cron]\""
+                "Cron schedules require 'agora-etl-plugins[cron]'. Install it: pip install 'agora-etl-plugins[cron]'"
             ) from None
         validate_cron_expression(expression)
         return cls(_mode="cron", _interval_s=0.0, _cron_expr=expression)
@@ -138,7 +138,7 @@ class Schedule:
                 from agora_cron import seconds_until_next_run
             except ImportError:
                 raise ImportError(
-                    "Cron schedules require 'agora-cron'. Install it: pip install \"agora-core[cron]\""
+                    "Cron schedules require 'agora-etl-plugins'. Install it: pip install 'agora-etl-plugins[cron]'"
                 ) from None
             next_run = now + seconds_until_next_run(self._cron_expr, now)
             wait = max(next_run - now, 0)
