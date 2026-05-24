@@ -17,13 +17,13 @@ The most important classes are importable directly from ``agora``::
 
     # Sources
     from agora import IterableSource
-    from agora_kafka import KafkaSource
+    from agora_plugins.kafka import KafkaSource
     from agora.sources.http.http import HTTPSource, StopFetching
     from agora.sources.file import FileSource, JsonLinesSource, ParquetSource
 
     # Sinks
-    from agora_postgres import PostgresSink
-    from agora_kafka import KafkaSink
+    from agora_plugins.postgres import PostgresSink
+    from agora_plugins.kafka import KafkaSink
     from agora.sinks.io.stdout import StdoutSink
 
     # Middlewares (built-in)
@@ -32,13 +32,14 @@ The most important classes are importable directly from ``agora``::
     # Dedup
     from agora.middlewares.dedup import DedupMiddleware
     from agora.middlewares.dedup.stores.memory import InMemoryStore
-    from agora_redis import RedisStore
+    from agora_plugins.redis import RedisStore
     from agora.middlewares.dedup.strategies.fuzzy import FuzzyMatchStrategy
 
     # Config
     from agora.config import AgoraSettings
 """
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 from agora.core.checkpoint import (
@@ -88,7 +89,10 @@ from agora.state import (
     state_backend_registry,
 )
 
-__version__ = _pkg_version("agora-etl")
+try:
+    __version__ = _pkg_version("agora-etl")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 __all__ = [
     "AgoraContainer",
     "AgoraError",

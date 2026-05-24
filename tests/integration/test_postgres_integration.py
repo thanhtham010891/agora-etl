@@ -1,7 +1,7 @@
 """
 tests/integration/test_postgres_integration.py
 ===============================================
-Integration tests for Postgres plugin (agora-etl-postgres / psycopg).
+Integration tests for the PostgreSQL plugin (`agora_plugins.postgres` / psycopg).
 
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import pytest
 
-# Skip entire module when psycopg is not installed.
+# Skip entire module when psycopg or the PostgreSQL plugin is not installed.
 psycopg = pytest.importorskip("psycopg")
-agora_postgres = pytest.importorskip("agora_postgres")
+agora_postgres = pytest.importorskip("agora_plugins.postgres")
 
 from agora import IterableSource, MapMiddleware, Pipeline  # noqa: E402
 
@@ -80,8 +80,8 @@ async def test_postgres_sink_upsert(
             sink = agora_postgres.PostgresSink(
                 dsn=postgres_dsn,
                 table=table,
-                conflict_target="id",
-                on_conflict="update",
+                row_mapper=lambda record: record,
+                conflict_key="id",
             )
             summary = await Pipeline(IterableSource(records)).build(sink).run()
             assert summary.records_written == _N_RECORDS
@@ -99,8 +99,8 @@ async def test_postgres_sink_upsert(
             sink2 = agora_postgres.PostgresSink(
                 dsn=postgres_dsn,
                 table=table,
-                conflict_target="id",
-                on_conflict="update",
+                row_mapper=lambda record: record,
+                conflict_key="id",
             )
             summary2 = await Pipeline(IterableSource(updated_records)).build(sink2).run()
             assert summary2.records_written == _N_RECORDS
@@ -168,6 +168,7 @@ async def test_postgres_source_cursor(
             pg_source = agora_postgres.PostgresSource(
                 dsn=postgres_dsn,
                 query=f"SELECT id, name, score FROM {table} ORDER BY id",
+                row_mapper=lambda row: row,
             )
             summary = await (
                 Pipeline(pg_source)
@@ -221,12 +222,13 @@ async def test_postgres_pipeline_roundtrip(
             pg_source = agora_postgres.PostgresSource(
                 dsn=postgres_dsn,
                 query=f"SELECT id, name, score FROM {src_table} ORDER BY id",
+                row_mapper=lambda row: row,
             )
             pg_sink = agora_postgres.PostgresSink(
                 dsn=postgres_dsn,
                 table=dst_table,
-                conflict_target="id",
-                on_conflict="update",
+                row_mapper=lambda record: record,
+                conflict_key="id",
             )
             summary = await (
                 Pipeline(pg_source)

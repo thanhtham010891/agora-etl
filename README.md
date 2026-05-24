@@ -9,6 +9,9 @@
 
 ## Documentation
 
+- [Docs Home](docs/index.md)
+- [Getting Started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
 - [Architecture](docs/architecture.md)
 - [Sources](docs/sources.md)
 - [Sinks](docs/sinks.md)
@@ -85,7 +88,7 @@ Source  →  Middleware chain  →  Sink(s)
 `Pipeline` is immutable. Every `.pipe()` and `.filter()` call returns a new instance, making it safe to branch:
 
 ```python
-from agora import Pipeline
+from agora import Middleware, Pipeline, PipelineContext
 from agora.sources.file.jsonlines import JsonLinesSource
 from agora.sinks.file.jsonlines import JsonLinesSink
 from agora.core.dlq import SQLiteDLQSink

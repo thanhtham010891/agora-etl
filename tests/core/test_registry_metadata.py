@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
+from agora.cli.commands.plugins import _registry_rows
 from agora.core.registry import AGORA_API_VERSION, Registry
 
 if TYPE_CHECKING:
@@ -111,3 +112,18 @@ def test_registry_skips_incompatible_manifest_entrypoints(
     registry.load_entrypoints("agora.sinks")
 
     assert registry.describe_items() == []
+
+
+def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
+    registry: Registry[type] = Registry(name="source")
+
+    class RedisStreamSource:
+        pass
+
+    registry.register("redis_stream", RedisStreamSource)
+    registry._origins["redis_stream"] = "entrypoint"
+
+    rows = _registry_rows(registry, "source")
+
+    assert rows[0]["origin"] == "entrypoint"
+    assert rows[0]["extra"] == "agora-etl-plugins[redis]"

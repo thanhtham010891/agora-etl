@@ -15,6 +15,17 @@ Agora is designed to be extended. Third-party packages register themselves via P
 | `agora.middlewares.dedup.stores` | Dedup store backends |
 | `agora.middlewares.dedup.strategies` | Dedup comparison strategies |
 | `agora.metrics.exporters` | Metrics exporters |
+| `agora.state.backends` | State backend implementations |
+
+## Official plugins
+
+The main first-party extension package is [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/). It currently groups official integrations such as:
+
+- Redis
+- cron scheduling helpers
+- distributed worker coordination
+- Kafka
+- PostgreSQL
 
 ## Registering a plugin
 
@@ -40,18 +51,31 @@ After installing the package, `agora plugins list` will show the registered comp
 
 Registered plugins can be referenced by name in declarative pipeline configs:
 
-```yaml
-source:
-  type: my_source
-  url: https://api.example.com
+```toml
+[pipelines.example.source]
+type = "my_source"
+url = "https://api.example.com"
 
-middlewares:
-  - type: my_middleware
-    threshold: 0.9
+[[pipelines.example.middlewares]]
+type = "my_middleware"
+threshold = 0.9
 
-sinks:
-  - type: my_sink
-    dsn: postgresql://localhost/mydb
+[[pipelines.example.sinks]]
+type = "my_sink"
+dsn = "postgresql://localhost/mydb"
+```
+
+Or equivalently, in Python-driven assembly:
+
+```python
+from agora import Pipeline
+from agora.sources import source_registry
+from agora.sinks import sink_registry
+
+source = source_registry.create("my_source", url="https://api.example.com")
+sink = sink_registry.create("my_sink", dsn="postgresql://localhost/mydb")
+
+pipeline = Pipeline(source).build(sink)
 ```
 
 ## AI providers

@@ -114,7 +114,7 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
                     "package": item.package or "",
                     "version": item.version or "",
                     "compatibility": compatibility,
-                    "extra": _extra_hint(item.key, item.type, category),
+                    "extra": _extra_hint(item.key, item.type, category, item.origin),
                 }
             )
         return rows
@@ -129,7 +129,7 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
                 "package": "",
                 "version": "",
                 "compatibility": "n/a",
-                "extra": _extra_hint(key, kind, category),
+                "extra": _extra_hint(key, kind, category, "manual"),
             }
         )
     return rows
@@ -150,11 +150,12 @@ _EXTRA_HINTS: dict[str, dict[str, str]] = {
         "postgres_dlq_source": "agora-etl-plugins[postgres]",
         "redis_dlq_source": "agora-etl-plugins[redis]",
         "redis_stream": "agora-etl-plugins[redis]",
-        "websocket": "agora-etl-plugins[ws]",
+        "websocket": "third-party plugin",
     },
     "sink": {
         "postgres": "agora-etl-plugins[postgres]",
         "postgres_dlq": "agora-etl-plugins[postgres]",
+        "postgres_schema_adapter": "agora-etl-plugins[postgres]",
         "stdout": "stdlib",
         "kafka": "agora-etl-plugins[kafka]",
         "jsonl": "agora-etl",
@@ -164,24 +165,25 @@ _EXTRA_HINTS: dict[str, dict[str, str]] = {
         "webhook": "agora-etl",
         "redis": "agora-etl-plugins[redis]",
         "redis_dlq": "agora-etl-plugins[redis]",
-        "elasticsearch": "agora-etl-plugins[elasticsearch]",
-        "bigquery": "agora-etl-plugins[gcp]",
-        "s3": "agora-etl-plugins[aws]",
-        "gcs": "agora-etl-plugins[gcs]",
+        "elasticsearch": "third-party plugin",
+        "bigquery": "third-party plugin",
+        "s3": "third-party plugin",
+        "gcs": "third-party plugin",
     },
     "middleware": {
         "validate": "stdlib",
         "enrich": "stdlib",
-        "ai_enrich": "agora-etl-plugins[ai]",
-        "ai_classify": "agora-etl-plugins[ai]",
-        "ai_extract": "agora-etl-plugins[ai]",
-        "ai_validate": "agora-etl-plugins[ai]",
-        "ai_translate": "agora-etl-plugins[ai]",
+        "ai_enrich": "AI provider plugin",
+        "ai_classify": "AI provider plugin",
+        "ai_batch": "AI provider plugin",
+        "ai_extract": "AI provider plugin",
+        "ai_validate": "AI provider plugin",
+        "ai_translate": "AI provider plugin",
     },
 }
 
 
-def _extra_hint(key: str, reg_type: str, category: str) -> str:
-    if reg_type == "instance":
+def _extra_hint(key: str, reg_type: str, category: str, origin: str) -> str:
+    if origin == "manual" and reg_type == "instance":
         return "built-in"
     return _EXTRA_HINTS.get(category, {}).get(key, "agora-etl[all]")
