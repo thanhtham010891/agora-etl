@@ -155,6 +155,10 @@ agora run --config pipelines.toml
 
 See [Configuration](configuration.md) for the full format.
 
+Config-driven runs can import project callables via `import = "module:name"`.
+Keep those configs in trusted source control rather than accepting them from
+untrusted users.
+
 ## Next steps
 
 - Learn config overlays with [Configuration](configuration.md)

@@ -307,7 +307,7 @@ class _Console:
 
         ``data`` format: ``{kind: [{key, type, origin, extra, package, version, compatibility}]}``
 
-        Columns: Key | Category | Status | Package | Version | API | Install
+        Columns: Key | Category | Status | Package | Version | Manifest | Install
         """
         from rich.text import Text
 
@@ -321,9 +321,11 @@ class _Console:
             ("instance", "entrypoint"): ("bold cyan", "● installed"),
             ("factory", "manual"): ("dim cyan", "○ optional"),
             ("factory", "entrypoint"): ("cyan", "○ lazy plugin"),
+            ("unavailable", "entrypoint_incompatible"): ("bold red", "x incompatible"),
         }
         compatibility_styles: dict[str, str] = {
             "ok": "bold green",
+            "incompatible": "bold red",
             "n/a": "dim",
         }
 
@@ -339,7 +341,7 @@ class _Console:
         table.add_column("Status", no_wrap=True, min_width=12)
         table.add_column("Package", style="dim", no_wrap=True, min_width=16)
         table.add_column("Version", style="dim", no_wrap=True, min_width=8)
-        table.add_column("API", no_wrap=True, min_width=6)
+        table.add_column("Manifest", no_wrap=True, min_width=10)
         table.add_column("Install", style="dim", no_wrap=True, min_width=24)
 
         for kind, rows in data.items():

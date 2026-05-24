@@ -172,6 +172,10 @@ schema = { import = "models:UserRecord" }
 
 That allows TOML configs to stay declarative while reusing project code.
 
+Because import references resolve real Python modules from your project, treat
+pipeline config as trusted input. Do not accept unreviewed config files from
+untrusted users.
+
 ## DLQ and tracing sections
 
 Optional sections inside one pipeline:
@@ -219,6 +223,13 @@ For community-facing projects, a good pattern is:
 2. extract stable callables and schemas into importable modules
 3. move operational wiring into `agora/v1` TOML
 4. use `--plan` in CI to validate configs before deployment
+
+## Security and operations notes
+
+- `agora run --config ...` and `agora dlq replay --config ...` both import Python code from the project.
+- `agora config show` imports `src/settings.py` and executes `get_settings()`.
+- Health endpoints are intentionally lightweight. Keep them bound to private
+  network interfaces or protect them with `AGORA_HEALTH_AUTH_TOKEN`.
 
 ## Related guides
 

@@ -1,6 +1,6 @@
 # Plugins
 
-Agora is designed to be extended. Third-party packages register themselves via Python entry-points and are discovered automatically at runtime.
+Agora is designed to be extended. Third-party packages register themselves via Python entry-points and are discovered when the relevant registries are loaded at runtime.
 
 ## Entry-point groups
 
@@ -46,6 +46,16 @@ my_provider = "my_package.providers:MyProvider"
 ```
 
 After installing the package, `agora plugins list` will show the registered components.
+
+If a plugin package also exposes a `MANIFEST`, Agora uses that metadata for CLI diagnostics and compatibility hints. The manifest version is a plugin-contract marker, not the same thing as the `agora-etl` package version.
+
+For older plugins, `agora.core.registry.AGORA_API_VERSION` still aliases the
+same manifest-contract version constant. New plugins should prefer
+`AGORA_PLUGIN_MANIFEST_VERSION`. The alias is deprecated in `0.2.0`.
+
+If a plugin advertises an incompatible manifest version, Agora leaves it out of
+the active registry but still surfaces it in CLI diagnostics as incompatible so
+operators can see why it was rejected.
 
 ## Using plugins in config-driven pipelines
 
@@ -155,4 +165,4 @@ from agora.core.discovery import discover_plugins
 discover_plugins()   # loads all entry-points into the registries
 ```
 
-This is called automatically when using `AgoraContainer.from_config()` or the CLI.
+This is called automatically when using `AgoraContainer.from_config()` or the CLI. In most projects you do not need to call it manually.

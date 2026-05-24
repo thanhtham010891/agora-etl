@@ -9,7 +9,7 @@ The most important classes are importable directly from ``agora``::
     from agora import BaseSource, BaseSink, Middleware
     from agora import Registry, PipelineContext, PipelineRunSummary
 
-    # Plugin system (v0.3+)
+    # Plugin system
     from agora import Plugin, Lifecycle, Configurable
     from agora import Writer, WriteResult
     from agora import AgoraContainer, AgoraError

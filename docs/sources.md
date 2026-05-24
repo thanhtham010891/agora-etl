@@ -4,6 +4,21 @@ Sources emit records via an async generator. The pipeline consumes them one at a
 
 ## Built-in sources
 
+## Checkpoint support at a glance
+
+Checkpointing is opt-in per source. A source must explicitly expose
+`supports_checkpoint = True`, implement `current_checkpoint()`, and restore
+state in `prepare_resume()`.
+
+| Source | Checkpoint support | Resume position |
+|---|---|---|
+| `JsonLinesSource` | Yes | line number |
+| `CsvSource` | Yes | row number |
+| `ParquetSource` | Yes | row number |
+| `HTTPSource` | Not by default | custom, source-specific |
+
+Do not assume every source or plugin source is resumable unless its docs say so.
+
 ### JsonLinesSource
 
 Stream records from a JSONL (newline-delimited JSON) file.
@@ -96,6 +111,10 @@ class PostsSource(HTTPSource[Post]):
 
 Available request methods: `self.get()`, `self.post()`. Both are rate-limited, retried, and optionally cached.
 
+`HTTPSource` does not define a generic checkpoint contract by itself. If an
+HTTP-based source needs resumability, implement it explicitly in the subclass
+using a cursor, page token, watermark, or other source-specific position.
+
 ## Custom source
 
 Subclass `BaseSource[T]` and implement `stream()`:
@@ -138,3 +157,6 @@ class MyCheckpointableSource(BaseSource[MyRecord]):
         if checkpoint:
             self._last_cursor = checkpoint.value["cursor"]
 ```
+
+Also set `supports_checkpoint = True` so the runtime knows this source opts into
+resume behavior.

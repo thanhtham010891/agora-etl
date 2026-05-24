@@ -106,6 +106,8 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
             compatibility = "n/a"
             if item.compatible is True:
                 compatibility = "ok"
+            elif item.compatible is False:
+                compatibility = "incompatible"
             rows.append(
                 {
                     "key": item.key,

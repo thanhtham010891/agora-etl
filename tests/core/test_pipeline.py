@@ -199,6 +199,44 @@ class DelayedBufferedTransformMiddleware(Middleware[int, int]):
         del ctx
 
 
+class BlockingBufferedMiddleware(Middleware[int, int]):
+    name = "blocking_buffered"
+
+    def __init__(self, expected_records: int) -> None:
+        self.min_concurrency = expected_records
+        self._expected_records = expected_records
+        self._started = 0
+        self.all_started = asyncio.Event()
+        self.cancelled: list[int] = []
+        self.stopped = False
+
+    async def process(self, record: int, ctx) -> int | None:
+        del ctx
+        return record
+
+    async def submit(self, record: int, ctx) -> asyncio.Task[int]:
+        del ctx
+        self._started += 1
+        if self._started >= self._expected_records:
+            self.all_started.set()
+
+        async def _resolve() -> int:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.cancelled.append(record)
+                raise
+
+        return asyncio.create_task(_resolve())
+
+    async def drain_pending(self, ctx) -> None:
+        del ctx
+
+    async def on_stop(self, ctx) -> None:
+        del ctx
+        self.stopped = True
+
+
 class PrefetchSafeSource(BaseSource[int]):
     source_name = "prefetch_safe"
     supports_prefetch = True
@@ -212,6 +250,30 @@ class PrefetchSafeSource(BaseSource[int]):
         for value in range(self._count):
             self.yielded_count += 1
             yield value
+
+
+class HookTrackingSource(BaseSource[int]):
+    source_name = "hook_tracking"
+
+    def __init__(self, records: list[int], target: list[int]) -> None:
+        self._records = records
+        self._target = target
+        self._current: int | None = None
+
+    def delivery_success_callback(self):
+        record = self._current
+        if record is None:
+            return None
+
+        async def _ack() -> None:
+            self._target.append(record)
+
+        return _ack
+
+    async def stream(self):
+        for record in self._records:
+            self._current = record
+            yield record
 
 
 class SlowCollectSink:
@@ -283,6 +345,65 @@ async def test_safe_prefetch_keeps_runner_bounded_while_preserving_order():
     assert summary.runtime.source_prefetch_limit == 2
     assert summary.runtime.source_prefetch_max_depth <= 2
     assert summary.runtime.source_prefetch_block_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_source_delivery_success_hook_runs_after_successful_write() -> None:
+    acknowledged: list[int] = []
+    sink = CollectSink()
+
+    summary = (
+        await Pipeline(HookTrackingSource([1, 2, 3], acknowledged))
+        .build(
+            sink  # type: ignore[arg-type]
+        )
+        .run()
+    )
+
+    assert summary.records_written == 3
+    assert sink.records == [1, 2, 3]
+    assert acknowledged == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_buffered_pipeline_cancellation_cancels_pending_tasks_and_preserves_shutdown() -> (
+    None
+):
+    middleware = BlockingBufferedMiddleware(expected_records=4)
+    events: list[str] = []
+
+    class _FailingCloseSink:
+        sink_name = "failing_close"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+            raise RuntimeError("close broke")
+
+    task = asyncio.create_task(
+        Pipeline(IterableSource([1, 2, 3, 4]))
+        .pipe(middleware)
+        .build(_FailingCloseSink())  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(middleware.all_started.wait(), timeout=1.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sorted(middleware.cancelled) == [1, 2, 3, 4]
+    assert middleware.stopped is True
+    assert events == ["sink.open", "sink.flush", "sink.close"]
 
 
 @pytest.mark.asyncio

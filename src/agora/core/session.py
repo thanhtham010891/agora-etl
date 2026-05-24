@@ -92,6 +92,14 @@ class PipelineLifecycleController:
         if self._spec.checkpoint_store is None:
             return
 
+        if not is_checkpoint_capable(self._spec.source):
+            ctx.log.warning(
+                "pipeline_checkpoint_unsupported_source",
+                source=self._spec.source.source_name,
+                checkpoint_key=self._spec.checkpoint_key,
+            )
+            return
+
         ctx.metrics.runtime.checkpoint_enabled = True
         try:
             with ctx.trace_span(
@@ -101,8 +109,7 @@ class PipelineLifecycleController:
             ) as span:
                 checkpoint = await self._spec.checkpoint_store.load(self._spec.checkpoint_key)
                 span.set_attribute("checkpoint.loaded", checkpoint is not None)
-                if is_checkpoint_capable(self._spec.source):
-                    await self._spec.source.prepare_resume(checkpoint)
+                await self._spec.source.prepare_resume(checkpoint)
         except Exception:
             ctx.metrics.runtime.checkpoint_failure_count += 1
             if self._spec.checkpoint_failure_policy == CheckpointFailurePolicy.LOG_AND_CONTINUE:

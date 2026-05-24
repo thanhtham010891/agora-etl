@@ -108,6 +108,11 @@ Or via environment variable:
 AGORA_HEALTH_AUTH_TOKEN=my-secret-token agora worker
 ```
 
+The built-in health server is intentionally minimal. It is a good fit for
+private cluster networks, local development, and simple process supervision.
+For internet-facing deployments, put it behind a reverse proxy or service mesh
+that already handles TLS, rate limiting, and request filtering.
+
 ## agora worker CLI
 
 The `agora worker` command loads a `WorkerPool` from a `worker.py` module in the project root:
@@ -138,6 +143,6 @@ agora worker --list                 # list registered pipelines without starting
 Replay failed records through a pipeline:
 
 ```bash
-agora dlq list --db .dlq.db
-agora dlq replay --db .dlq.db --pipeline-id my_pipeline
+agora dlq replay --config pipelines.toml
+agora dlq replay --config pipelines.toml --stage sink_write --mode sink
 ```

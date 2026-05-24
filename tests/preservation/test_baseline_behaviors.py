@@ -645,6 +645,54 @@ def test_code2_bound_pipeline_with_sink_is_immutable() -> None:
     )
 
 
+def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
+    """[CODE-2] Preservation: with_sink() keeps runtime settings intact.
+
+    Replacing sinks must not silently drop checkpoint, DLQ, backpressure, or
+    tracing configuration from the prepared pipeline.
+    """
+    from agora import InMemoryCheckpointStore
+    from agora.core.dlq import SQLiteDLQSink
+    from agora.core.pipeline import Pipeline
+    from agora.core.source import IterableSource
+    from agora.core.tracing import InMemoryTracer
+    from agora.core.types import Backpressure, DLQFailurePolicy, SinkFailurePolicy
+    from agora.sinks.io.stdout import StdoutSink
+
+    store = InMemoryCheckpointStore()
+    tracer = InMemoryTracer()
+    dlq = SQLiteDLQSink(":memory:")
+    backpressure = Backpressure.adaptive(max_buffer_size=4)
+
+    original = Pipeline(IterableSource([1, 2, 3]), id="orders").build(
+        StdoutSink(),
+        dlq=dlq,
+        dlq_failure_policy=DLQFailurePolicy.RAISE,
+        checkpoint=store,
+        checkpoint_key="orders-checkpoint",
+        checkpoint_every=3,
+        batch_size=2,
+        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+        max_buffer_size=5,
+        backpressure=backpressure,
+        tracer=tracer,
+    )
+
+    replaced = original.with_sink(StdoutSink())
+
+    assert replaced._pipeline_id == "orders"
+    assert replaced._dlq_sink is dlq
+    assert replaced._dlq_failure_policy == DLQFailurePolicy.RAISE
+    assert replaced._checkpoint_store is store
+    assert replaced._checkpoint_key == "orders-checkpoint"
+    assert replaced._checkpoint_every == 3
+    assert replaced._writer_batch_size == 2
+    assert replaced._sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE
+    assert replaced._max_buffer_size == 5
+    assert replaced._backpressure is backpressure
+    assert replaced._tracer is tracer
+
+
 # ======================================================================
 # [PROD-3] DLQRecord — Preservation (existing fields)
 # ======================================================================
@@ -807,3 +855,66 @@ def test_test1_existing_ai_imports_work() -> None:
     assert AIMiddleware is not None
     assert LLMCache is not None
     assert make_cache_key is not None
+
+
+@pytest.mark.asyncio
+async def test_exec1_source_delivery_hook_runs_only_after_successful_handling() -> None:
+    """[EXEC-1] Preservation: source delivery hooks fire only after successful handling.
+
+    Baseline behavior: a source-provided delivery success callback runs after a
+    record is successfully written, and does not run for records that fail
+    closed before delivery completes.
+    """
+    from agora import IterableSource, Pipeline
+
+    acknowledgements: list[int] = []
+
+    class _HookTrackingSource(IterableSource[int]):
+        source_name = "hook_tracking"
+
+        def __init__(self, records: list[int]) -> None:
+            super().__init__(records)
+            self._current: int | None = None
+
+        def delivery_success_callback(self):
+            current = self._current
+            if current is None:
+                return None
+
+            async def _ack() -> None:
+                acknowledgements.append(current)
+
+            return _ack
+
+        async def stream(self):
+            for record in self._records:
+                self._current = record
+                yield record
+
+    class _BoomOnSecondSink:
+        sink_name = "boom_on_second"
+
+        def __init__(self) -> None:
+            self._writes = 0
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            self._writes += 1
+            if self._writes == 2:
+                raise RuntimeError("second write broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="second write broke"):
+        await Pipeline(_HookTrackingSource([1, 2])).build(_BoomOnSecondSink()).run()  # type: ignore[arg-type]
+
+    assert acknowledgements == [1], (
+        "[EXEC-1] PRESERVATION FAILED: source delivery hook should only run for "
+        "records that were fully handled successfully."
+    )
