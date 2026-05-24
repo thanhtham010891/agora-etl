@@ -1,7 +1,7 @@
 """
 tests/integration/test_redis_integration.py
 ============================================
-Integration tests for Redis plugin (agora_redis).
+Integration tests for Redis plugin (`agora_plugins.redis`).
 
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import pytest
 
-# Skip entire module when agora_redis plugin is not installed.
-agora_redis = pytest.importorskip("agora_redis")
+# Skip entire module when the Redis plugin is not installed.
+agora_redis = pytest.importorskip("agora_plugins.redis")
+aioredis = pytest.importorskip("redis.asyncio")
 
 from agora import IterableSource, Pipeline  # noqa: E402
 from agora.middlewares.dedup.middleware import DedupMiddleware  # noqa: E402
@@ -58,7 +59,7 @@ async def test_redis_sink_write_and_read(
     # --- Write via RedisSink ---
     sink = agora_redis.RedisSink(
         url=redis_url,
-        key=lambda r: f"{key_prefix}:{r['id']}",
+        key_fn=lambda r: f"{key_prefix}:{r['id']}",
     )
     summary = await Pipeline(IterableSource(records)).build(sink).run()
     assert summary.records_written == _N_RECORDS
@@ -66,7 +67,7 @@ async def test_redis_sink_write_and_read(
     # --- Read back directly via Redis client ---
     import json
 
-    client = agora_redis.get_client(redis_url)
+    client = aioredis.from_url(redis_url)
     try:
         for record in records:
             raw = await client.get(f"{key_prefix}:{record['id']}")
@@ -98,7 +99,9 @@ async def test_redis_stream_source(
     # --- Produce to Redis stream via RedisSink (stream mode) ---
     stream_sink = agora_redis.RedisSink(
         url=redis_url,
-        stream=stream_key,
+        key_fn=lambda _: stream_key,
+        serializer=lambda record: record,
+        mode="xadd",
     )
     produce_summary = await Pipeline(IterableSource(records)).build(stream_sink).run()
     assert produce_summary.records_written == _N_RECORDS

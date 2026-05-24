@@ -3,14 +3,14 @@ agora/runner/coordinator.py
 ============================
 ``WorkerCoordinator`` — abstract interface for distributed worker coordination.
 
-Implementations (e.g. ``RedisWorkerCoordinator`` in ``agora-distributed``)
+Implementations (e.g. ``RedisWorkerCoordinator`` in ``agora-etl-plugins``)
 handle lease acquisition, worker heartbeat, and fleet discovery so that
 multiple ``WorkerPool`` processes can share pipeline assignment without
 duplicate runs.
 
 Usage::
 
-    from agora_distributed import RedisWorkerCoordinator
+    from agora_plugins.distributed import RedisWorkerCoordinator
 
     pool = WorkerPool(
         coordinator=RedisWorkerCoordinator(redis_url="redis://localhost:6379"),

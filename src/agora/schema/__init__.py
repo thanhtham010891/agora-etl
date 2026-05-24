@@ -31,7 +31,7 @@ Usage
     from agora import Pipeline
     from agora.core.source import IterableSource
     from agora.schema import BackendSchemaStore, SchemaMiddleware
-    from agora_postgres import PostgresSchemaAdapter, PostgresSink
+    from agora_plugins.postgres import PostgresSchemaAdapter, PostgresSink
     from agora.state import SQLiteBackend
 
     pipeline = (

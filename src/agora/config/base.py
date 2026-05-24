@@ -7,8 +7,8 @@ User projects extend this::
 
     # src/settings.py
     from agora.config import AgoraSettings
-    from agora_kafka.config import KafkaConfig
-    from agora_postgres.config import PostgresConfig
+    from agora_plugins.kafka import KafkaConfig
+    from agora_plugins.postgres import PostgresConfig
 
     class Settings(AgoraSettings):
         kafka: KafkaConfig = KafkaConfig()

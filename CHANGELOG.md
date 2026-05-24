@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 (May 24, 2026)
+
+### Fixes
+
+- Fixed `Schedule.cron(...)` to load cron helpers from `agora-etl-plugins[cron]`
+- Added `py.typed` to the core package so the published wheel matches its typed classifier
+- Updated public docs and examples to use the current `agora_plugins.*` import paths
+- Improved `agora plugins list` hints so entry-point plugins are no longer mislabeled as built-ins
+
 ## 0.1.0 (May 23, 2026)
 
 ### Features

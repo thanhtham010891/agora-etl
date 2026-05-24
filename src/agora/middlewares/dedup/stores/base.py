@@ -20,7 +20,7 @@ class DedupStore(ABC, Generic[K]):
 
     Implementations:
     - InMemoryStore     — single-process, no persistence
-    - agora_redis.RedisStore — distributed, optional TTL
+    - agora_plugins.redis.RedisStore — distributed, optional TTL
     - agora_bloom.BloomFilterStore — probabilistic, memory-efficient
     """
 

@@ -52,7 +52,7 @@ def unique_suffix() -> str:
 
 @pytest.fixture(scope="session")
 def kafka_bootstrap() -> str:
-    pytest.importorskip("agora_kafka")
+    pytest.importorskip("agora_plugins.kafka")
     _require_integration_enabled()
     bootstrap = os.getenv("AGORA_TEST_KAFKA_BOOTSTRAP", "127.0.0.1:9092")
     host, port = bootstrap.rsplit(":", 1)
@@ -62,7 +62,7 @@ def kafka_bootstrap() -> str:
 
 @pytest.fixture(scope="session")
 def redis_url() -> str:
-    pytest.importorskip("agora_redis")
+    pytest.importorskip("agora_plugins.redis")
     _require_integration_enabled()
     url = os.getenv("AGORA_TEST_REDIS_URL", "redis://127.0.0.1:16379/0")
     parsed = urlparse(url)

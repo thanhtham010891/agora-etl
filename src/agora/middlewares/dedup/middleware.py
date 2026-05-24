@@ -20,7 +20,7 @@ For fuzzy name-based dedup (like data-collector's SlugDeduplicator)::
 
 For distributed dedup across pods::
 
-    from agora_redis import RedisStore
+    from agora_plugins.redis import RedisStore
 
     DedupMiddleware(
         key=lambda r: r.slug,

@@ -1,0 +1,24 @@
+site_name: Agora ETL
+site_description: Async-first ETL framework for Python
+site_url: https://thanhtham010891.github.io/agora-etl/
+repo_url: https://github.com/thanhtham010891/agora-etl
+repo_name: thanhtham010891/agora-etl
+docs_dir: docs
+theme:
+  name: readthedocs
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - CLI Reference: cli.md
+  - Sources: sources.md
+  - Sinks: sinks.md
+  - Middlewares: middlewares.md
+  - Runner: runner.md
+  - Plugins: plugins.md
+  - Architecture: architecture.md
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true

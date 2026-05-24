@@ -1,7 +1,7 @@
 """
 tests/integration/test_kafka_integration.py
 ============================================
-Integration tests for Kafka plugin (agora_kafka).
+Integration tests for Kafka plugin (`agora_plugins.kafka`).
 
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
@@ -21,8 +21,8 @@ import json
 
 import pytest
 
-# Skip entire module when agora_kafka plugin is not installed.
-agora_kafka = pytest.importorskip("agora_kafka")
+# Skip entire module when the Kafka plugin is not installed.
+agora_kafka = pytest.importorskip("agora_plugins.kafka")
 
 from agora import IterableSource, Pipeline  # noqa: E402
 
@@ -60,7 +60,7 @@ async def test_kafka_produce_consume_roundtrip(
     sink = agora_kafka.KafkaSink(
         bootstrap_servers=kafka_bootstrap,
         topic=topic,
-        value_serializer=lambda r: json.dumps(r).encode(),
+        serializer=lambda r: json.dumps(r).encode(),
     )
     source_produce = IterableSource(records)
     summary = await Pipeline(source_produce).build(sink).run()
@@ -88,7 +88,7 @@ async def test_kafka_produce_consume_roundtrip(
         bootstrap_servers=kafka_bootstrap,
         topics=[topic],
         group_id=f"agora_test_group_{unique_suffix}",
-        value_deserializer=lambda b: json.loads(b.decode()),
+        deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
     )
     await (
@@ -125,7 +125,7 @@ async def test_kafka_pipeline_end_to_end(
     seed_sink = agora_kafka.KafkaSink(
         bootstrap_servers=kafka_bootstrap,
         topic=input_topic,
-        value_serializer=lambda r: json.dumps(r).encode(),
+        serializer=lambda r: json.dumps(r).encode(),
     )
     await Pipeline(IterableSource(records)).build(seed_sink).run()
 
@@ -136,13 +136,13 @@ async def test_kafka_pipeline_end_to_end(
         bootstrap_servers=kafka_bootstrap,
         topics=[input_topic],
         group_id=f"agora_e2e_transform_{unique_suffix}",
-        value_deserializer=lambda b: json.loads(b.decode()),
+        deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
     )
     transform_sink = agora_kafka.KafkaSink(
         bootstrap_servers=kafka_bootstrap,
         topic=output_topic,
-        value_serializer=lambda r: json.dumps(r).encode(),
+        serializer=lambda r: json.dumps(r).encode(),
     )
     transform_summary = await (
         Pipeline(transform_source)
@@ -174,7 +174,7 @@ async def test_kafka_pipeline_end_to_end(
         bootstrap_servers=kafka_bootstrap,
         topics=[output_topic],
         group_id=f"agora_e2e_verify_{unique_suffix}",
-        value_deserializer=lambda b: json.loads(b.decode()),
+        deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
     )
     await (

@@ -98,7 +98,7 @@ class Schedule:
     def cron(cls, expression: str) -> Schedule:
         """Run on a cron schedule, e.g. ``'0 */6 * * *'``."""
         try:
-            from agora_cron import validate_cron_expression
+            from agora_plugins.cron import validate_cron_expression
         except ImportError:
             raise ImportError(
                 "Cron schedules require 'agora-etl-plugins[cron]'. Install it: pip install 'agora-etl-plugins[cron]'"
@@ -135,7 +135,7 @@ class Schedule:
         elif self._mode == "cron":
             now = time.time()
             try:
-                from agora_cron import seconds_until_next_run
+                from agora_plugins.cron import seconds_until_next_run
             except ImportError:
                 raise ImportError(
                     "Cron schedules require 'agora-etl-plugins'. Install it: pip install 'agora-etl-plugins[cron]'"

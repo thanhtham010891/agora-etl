@@ -37,16 +37,20 @@ Run a pipeline once:
 ```bash
 agora run pipelines.example
 agora run pipelines.example --max-records 1000
-agora run --config pipeline.yaml
+agora run --config pipelines.toml
+agora run --config pipelines.toml --plan
+agora run --config pipelines.toml --environment prod
 ```
 
 `agora run` adds `cwd` and `cwd/src` to `sys.path` before importing the module.
 
-Set `AGORA_ENV` to load an environment-specific config overlay:
+With declarative configs, `AGORA_ENV` can supply the default environment overlay:
 
 ```bash
-AGORA_ENV=production agora run pipelines.example
+AGORA_ENV=production agora run --config pipelines.toml
 ```
+
+When used with `--config`, Agora expects an `agora/v1` TOML document.
 
 ## agora worker
 
@@ -86,6 +90,16 @@ agora config show
 ```
 
 Reads from `src/settings.py` which must define `get_settings() -> AgoraSettings`.
+
+## Common local workflow
+
+```bash
+agora new my-project
+cd my-project
+agora run pipelines.example --dry-run
+agora pipelines list
+agora config show
+```
 
 ## agora dlq
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agora-etl"
-version = "0.1.1"
+version = "0.1.2"
 description = "Agora — async-first ETL framework for Python."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -35,7 +35,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/thanhtham010891/agora-etl"
+Homepage = "https://thanhtham010891.github.io/agora-etl/"
+Documentation = "https://thanhtham010891.github.io/agora-etl/"
 Repository = "https://github.com/thanhtham010891/agora-etl"
 BugTracker = "https://github.com/thanhtham010891/agora-etl/issues"
 
@@ -50,6 +51,7 @@ dev = [
     "ruff==0.15.13",
     "mypy==2.1.0",
     "hatch>=1.14,<2",
+    "mkdocs>=1.6,<2",
 ]
 all = [
     "agora-etl[file]",
