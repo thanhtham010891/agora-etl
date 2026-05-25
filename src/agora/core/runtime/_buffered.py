@@ -14,6 +14,7 @@ from agora.core.runtime._delivery import (
     CheckpointState,
     ProcessedSourceRecord,
     RecordDeliveryCoordinator,
+    RecordDeliveryError,
     RunState,
     SourceQueueError,
     SourceRecord,
@@ -367,7 +368,7 @@ class ExecutionCoordinator:
         next_sequence = 0
         next_commit = 0
         state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
-        source_error: Exception | None = None
+        source_error: BaseException | None = None
 
         try:
             async for source_record in source_records:
@@ -426,35 +427,69 @@ class ExecutionCoordinator:
                     )
                 if self.reached_max_records(ctx, state.processed_count, max_records):
                     break
-        except Exception as exc:
+        except BaseException as exc:
             source_error = exc
 
-        # Yield control so just-submitted tasks reach their buffered submit point
-        # before the final drain sequence begins.
-        await asyncio.sleep(0)
-        while pending_tasks:
-            await self.chain.drain_buffered(ctx)
-            await asyncio.sleep(0)
-            next_commit = await self._drain_ready_buffered_records(
-                state,
-                pending_tasks,
-                next_commit,
-                split_index,
-                buffered_name,
-            )
-            if not pending_tasks:
-                break
-            next_commit = await self._commit_next_buffered_record(
-                state,
-                pending_tasks,
-                next_commit,
-                split_index,
-                buffered_name,
-            )
+        if self._must_abort_pending_work(source_error):
+            await self._abort_pending_work(state, pending_tasks)
+            raise source_error
 
-        await self.delivery.flush_pending_writes(state)
+        try:
+            # Yield control so just-submitted tasks reach their buffered submit point
+            # before the final drain sequence begins.
+            await asyncio.sleep(0)
+            while pending_tasks:
+                await self.chain.drain_buffered(ctx)
+                await asyncio.sleep(0)
+                next_commit = await self._drain_ready_buffered_records(
+                    state,
+                    pending_tasks,
+                    next_commit,
+                    split_index,
+                    buffered_name,
+                )
+                if not pending_tasks:
+                    break
+                next_commit = await self._commit_next_buffered_record(
+                    state,
+                    pending_tasks,
+                    next_commit,
+                    split_index,
+                    buffered_name,
+                )
+
+            await self.delivery.flush_pending_writes(state)
+        except BaseException as exc:
+            if self._must_abort_pending_work(exc):
+                await self._abort_pending_work(state, pending_tasks)
+            raise
+
         if source_error is not None:
             raise source_error
+
+    @staticmethod
+    def _must_abort_pending_work(exc: BaseException | None) -> bool:
+        return isinstance(exc, (RecordDeliveryError, asyncio.CancelledError, KeyboardInterrupt))
+
+    async def _abort_pending_work(
+        self,
+        state: RunState,
+        pending_tasks: dict[int, tuple[Any, SourceRecord]],
+    ) -> None:
+        state.pending_writes.clear()
+        await self._cancel_pending_tasks(pending_tasks)
+
+    async def _cancel_pending_tasks(
+        self,
+        pending_tasks: dict[int, tuple[Any, SourceRecord]],
+    ) -> None:
+        tasks = [future for future, _source_record in pending_tasks.values()]
+        pending_tasks.clear()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def process_record_through_buffered_stages(
         self,

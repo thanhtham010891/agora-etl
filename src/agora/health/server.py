@@ -190,26 +190,25 @@ class HealthServer:
     ) -> None:
         try:
             # Read until end-of-headers with a 10s overall timeout and 65536-byte cap.
-            chunks: list[bytes] = []
+            raw = bytearray()
             async with asyncio.timeout(10.0):
                 while True:
                     chunk = await reader.read(4096)
                     if not chunk:
                         break
-                    chunks.append(chunk)
-                    combined = b"".join(chunks)
-                    if b"\r\n\r\n" in combined or b"\n\n" in combined:
+                    raw.extend(chunk)
+                    if b"\r\n\r\n" in raw or b"\n\n" in raw:
                         break
-                    if len(combined) > 65536:
+                    if len(raw) > 65536:
                         writer.close()
                         return
-            raw = b"".join(chunks)
+            raw_request = bytes(raw)
         except (TimeoutError, ConnectionResetError):
             writer.close()
             return
 
-        method, path = _parse_request_line(raw)
-        if not self._check_auth(raw):
+        method, path = _parse_request_line(raw_request)
+        if not self._check_auth(raw_request):
             _write_response(writer, _HTTP_401, "application/json", b'{"error":"Unauthorized"}')
         else:
             await self._route(method, path, writer)

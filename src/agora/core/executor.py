@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -170,6 +171,7 @@ class PipelineExecutor:
             adaptive_checkpoint_slow_ms=self._spec.adaptive_checkpoint_slow_ms,
         )
         shutdown_error: Exception | None = None
+        cancellation_error: asyncio.CancelledError | None = None
 
         with state.ctx.trace_span(
             "pipeline.run",
@@ -180,6 +182,10 @@ class PipelineExecutor:
             try:
                 await self._lifecycle.start_runtime(state)
                 await self._run_stream(state, execution)
+            except asyncio.CancelledError as exc:
+                state.ctx.log.info("pipeline_cancelled")
+                state.interrupted = True
+                cancellation_error = exc
             except KeyboardInterrupt as exc:
                 await self._handle_run_error(state, coordinator, exc)
             except Exception as exc:
@@ -188,6 +194,8 @@ class PipelineExecutor:
                 shutdown_error = await self._lifecycle.shutdown_runtime(state)
                 execution.sync_source_runtime_metrics(state.ctx)
 
+        if cancellation_error is not None:
+            raise cancellation_error
         self._raise_terminal_error(state, shutdown_error)
         return state.complete()
 

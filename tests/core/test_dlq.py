@@ -49,6 +49,30 @@ class _CollectSink:
         return None
 
 
+class _AckTrackingSource(BaseSource[dict]):
+    source_name = "ack_tracking"
+
+    def __init__(self, records: list[dict], target: list[dict]) -> None:
+        self._records = records
+        self._target = target
+        self._current: dict | None = None
+
+    def delivery_success_callback(self):
+        record = self._current
+        if record is None:
+            return None
+
+        async def _ack() -> None:
+            self._target.append(record)
+
+        return _ack
+
+    async def stream(self):
+        for record in self._records:
+            self._current = record
+            yield record
+
+
 class _BoomMiddleware(Middleware[dict, dict]):
     name = "boom"
 
@@ -112,6 +136,38 @@ async def test_pipeline_routes_sink_write_errors_to_dlq_without_dropping_run() -
     assert dlq_record.record == {"id": 1}
     assert dlq_record.original_record == {"id": 1}
     assert dlq_record.processed_record == {"id": 1}
+
+
+@pytest.mark.asyncio
+async def test_dlq_routed_sink_failure_still_acknowledges_source_delivery() -> None:
+    acknowledged: list[dict] = []
+    dlq = _CollectDLQSink()
+
+    class _BoomSink:
+        sink_name = "boom_sink"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: dict) -> None:
+            del record
+            raise RuntimeError("sink broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    summary = await (
+        Pipeline(_AckTrackingSource([{"id": 1}], acknowledged))
+        .build(_BoomSink(), dlq=dlq)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_errored == 1
+    assert len(dlq.records) == 1
+    assert acknowledged == [{"id": 1}]
 
 
 @pytest.mark.asyncio
@@ -518,3 +574,94 @@ async def test_pipeline_can_raise_when_dlq_write_fails() -> None:
             )
             .run()
         )
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_sink_error_with_raising_dlq_does_not_advance_checkpoint() -> None:
+    store = InMemoryCheckpointStore()
+
+    class _CheckpointedIterableSource(BaseSource[int]):
+        source_name = "checkpointed_iterable"
+        supports_checkpoint = True
+
+        def __init__(self, records: list[int]) -> None:
+            self._records = records
+            self._resume_index = -1
+            self._last_index = -1
+
+        async def prepare_resume(self, checkpoint) -> None:
+            if checkpoint is None:
+                self._resume_index = -1
+                return
+            self._resume_index = int(checkpoint.value["index"])
+
+        def current_checkpoint(self) -> dict[str, int] | None:
+            if self._last_index < 0:
+                return None
+            return {"index": self._last_index}
+
+        async def stream(self):
+            for index, record in enumerate(self._records):
+                if index <= self._resume_index:
+                    continue
+                self._last_index = index
+                yield record
+
+    class _BoomOnSecondSink:
+        sink_name = "boom_second"
+
+        def __init__(self) -> None:
+            self._writes = 0
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            self._writes += 1
+            if self._writes == 2:
+                raise RuntimeError("second write broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _FailingDLQSink:
+        sink_name = "failing_dlq"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: DLQRecord) -> None:
+            del record
+            raise RuntimeError("dlq broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(RuntimeError, match="dlq broke"):
+        await (
+            Pipeline(_CheckpointedIterableSource([1, 2, 3]))
+            .build(
+                _BoomOnSecondSink(),  # type: ignore[arg-type]
+                checkpoint=store,
+                dlq=_FailingDLQSink(),
+                dlq_failure_policy=DLQFailurePolicy.RAISE,
+            )
+            .run()
+        )
+
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedIterableSource([1, 2, 3]))
+        .build(resumed_sink, checkpoint=store)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert resumed_sink.records == [2, 3]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}

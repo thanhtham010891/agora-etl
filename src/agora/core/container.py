@@ -3,8 +3,8 @@ agora/core/container.py
 ========================
 ``AgoraContainer`` — lightweight async-aware dependency injection container.
 
-The container manages plugin lifecycles and wiring.  It is the
-single entry-point for config-driven pipeline assembly::
+The container manages plugin lifecycles and wiring. It is the primary
+entry-point for config-driven pipeline assembly::
 
     container = AgoraContainer()
     container.register_singleton("db_pool", pool)
@@ -38,8 +38,8 @@ Design decisions
   ``shutdown_all()`` runs in reverse (like a stack).
 - **No magic**: explicit registration, no classpath scanning.
   Pair with ``Registry.load_entrypoints()`` for auto-discovery.
-- **Config-driven**: ``from_config()`` uses the plugin registries from
-  Phase 3 to resolve types by name. Config keys mirror constructor kwargs.
+- **Config-driven**: ``from_config()`` resolves types by name from the active
+  plugin registries. Config keys mirror constructor kwargs.
 """
 
 from __future__ import annotations

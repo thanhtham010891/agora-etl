@@ -81,3 +81,5 @@ Agora is a framework, not a hosted platform. You own deployment, secret manageme
 - pluggable state backends and integrations
 
 For deployment-facing behavior, start with [Runner](runner.md) and [Architecture](architecture.md).
+For config import safety and trusted-input boundaries, also read
+[Configuration](configuration.md).

@@ -1,1 +1,5 @@
-"""Search sinks (Elasticsearch, OpenSearch) — not yet implemented. Coming in a future release."""
+"""Reserved namespace for search sink helpers.
+
+Search integrations should normally live in plugin packages rather than the
+core framework.
+"""

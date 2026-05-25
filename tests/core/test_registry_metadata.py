@@ -6,7 +6,7 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agora.cli.commands.plugins import _registry_rows
-from agora.core.registry import AGORA_API_VERSION, Registry
+from agora.core.registry import AGORA_API_VERSION, AGORA_PLUGIN_MANIFEST_VERSION, Registry
 
 if TYPE_CHECKING:
     import pytest
@@ -66,7 +66,7 @@ def test_registry_load_entrypoints_records_manifest_metadata(
         monkeypatch,
         package_name="fake_plugin_ok",
         plugin_module_name="fake_plugin_ok.sinks",
-        manifest_api_version=AGORA_API_VERSION,
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
     )
 
     monkeypatch.setattr(
@@ -87,6 +87,10 @@ def test_registry_load_entrypoints_records_manifest_metadata(
     assert item.package == "fake_plugin_ok-dist"
     assert item.version == "1.2.3"
     assert item.compatible is True
+
+
+def test_registry_keeps_api_version_alias_for_existing_plugins() -> None:
+    assert AGORA_API_VERSION == AGORA_PLUGIN_MANIFEST_VERSION
 
 
 def test_registry_skips_incompatible_manifest_entrypoints(
@@ -111,7 +115,50 @@ def test_registry_skips_incompatible_manifest_entrypoints(
     registry: Registry[type] = Registry(name="sink")
     registry.load_entrypoints("agora.sinks")
 
-    assert registry.describe_items() == []
+    assert registry.has("bad_sink") is False
+
+    item = registry.describe_items()[0]
+    assert item.key == "bad_sink"
+    assert item.type == "unavailable"
+    assert item.origin == "entrypoint_incompatible"
+    assert item.package == "fake_plugin_bad-dist"
+    assert item.version == "1.2.3"
+    assert item.agora_api_version == "9.9"
+    assert item.compatible is False
+
+
+def test_registry_load_entrypoints_without_manifest_keeps_distribution_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_module = ModuleType("manifestless_plugin.sinks")
+
+    class ManifestlessPlugin:
+        pass
+
+    ManifestlessPlugin.__module__ = "manifestless_plugin.sinks"
+    plugin_module.ManifestlessPlugin = ManifestlessPlugin
+    monkeypatch.setitem(sys.modules, "manifestless_plugin.sinks", plugin_module)
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "manifestless_sink",
+                ManifestlessPlugin,
+                dist_name="manifestless-plugin",
+                dist_version="0.5.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks")
+
+    item = registry.describe_items()[0]
+    assert item.key == "manifestless_sink"
+    assert item.package == "manifestless-plugin"
+    assert item.version == "0.5.0"
+    assert item.compatible is None
 
 
 def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
@@ -127,3 +174,21 @@ def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
 
     assert rows[0]["origin"] == "entrypoint"
     assert rows[0]["extra"] == "agora-etl-plugins[redis]"
+
+
+def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
+    registry: Registry[type] = Registry(name="sink")
+    registry._metadata["bad_sink"] = {
+        "package": "bad-plugin",
+        "version": "0.9.0",
+        "agora_api_version": "9.9",
+        "compatible": False,
+    }
+    registry._origins["bad_sink"] = "entrypoint_incompatible"
+    registry._registration_types["bad_sink"] = "unavailable"
+
+    rows = _registry_rows(registry, "sink")
+
+    assert rows[0]["origin"] == "entrypoint_incompatible"
+    assert rows[0]["compatibility"] == "incompatible"
+    assert rows[0]["extra"] == "agora-etl[all]"

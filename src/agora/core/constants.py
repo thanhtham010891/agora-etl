@@ -5,10 +5,8 @@ Named constants replacing magic numbers scattered throughout the codebase.
 
 Centralising these values here means:
   - They can be found with a single grep
-  - They can be overridden via AgoraSettings in the future
+  - They can be overridden via settings when needed
   - Tests can reference the same values
-
-See W1/W2/W3/W4 in the refactor audit.
 """
 
 from __future__ import annotations

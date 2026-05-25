@@ -33,6 +33,8 @@
 
 Agora is an async-first ETL framework for Python. It provides a composable pipeline model — source, middleware chain, sink — with built-in support for fault tolerance, observability, checkpointing, and AI enrichment.
 
+The core package is intentionally focused on runtime primitives and extension contracts. Integrations that depend on external systems are expected to live in plugin packages such as `agora-etl-plugins`.
+
 **Key features:**
 
 - Fluent, immutable pipeline builder
@@ -57,7 +59,7 @@ Agora is an async-first ETL framework for Python. It provides a composable pipel
 
 ```bash
 pip install agora-etl                # core only
-pip install "agora-etl[file]"          # + Parquet / CSV / JSON Lines support
+pip install "agora-etl[file]"          # + Parquet support
 pip install "agora-etl[all,dev]"       # everything + dev tools
 ```
 
@@ -177,7 +179,6 @@ agora run <module>        # run a pipeline once
 agora worker              # start the worker pool
 agora pipelines list      # list pipeline modules
 agora plugins list        # list registered plugins
-agora dlq list            # inspect dead-letter queue
 agora dlq replay          # replay failed records
 agora config show         # show resolved settings
 agora version             # print version
@@ -195,6 +196,10 @@ AGORA_HEALTH_HOST=127.0.0.1
 AGORA_HEALTH_PORT=8080
 AGORA_HEALTH_AUTH_TOKEN=my-secret
 ```
+
+Import references inside config files execute Python imports from your project.
+Treat `agora.toml` or any `agora/v1` pipeline config as trusted input, not as
+something to accept from untrusted users.
 
 ---
 

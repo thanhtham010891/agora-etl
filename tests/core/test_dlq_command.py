@@ -265,3 +265,101 @@ enabled = true
                 run_id=None,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_dlq_replay_failure_keeps_record_and_increments_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("fake_dlq_retry_module")
+
+    async def passthrough(record, ctx):
+        del ctx
+        return record
+
+    module.passthrough = passthrough
+    monkeypatch.setitem(sys.modules, "fake_dlq_retry_module", module)
+
+    class _AlwaysFailSink:
+        sink_name = "always_fail_replay_sink"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record) -> None:
+            del record
+            raise RuntimeError("sink exploded")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sink_registry.register_factory("always_fail_replay_sink", lambda **kwargs: _AlwaysFailSink())
+
+    dlq_path = tmp_path / "replay_retry_dlq.db"
+    config_path = tmp_path / "pipeline.toml"
+    config_path.write_text(
+        f"""
+format = "agora/v1"
+
+[defaults]
+pipeline = "orders"
+
+[pipelines.orders]
+pipeline_id = "orders-etl"
+
+[pipelines.orders.source]
+type = "iterable"
+records = [{{ id = 1 }}]
+
+[[pipelines.orders.sinks]]
+type = "always_fail_replay_sink"
+
+[[pipelines.orders.middlewares]]
+type = "enrich"
+enricher = {{ import = "fake_dlq_retry_module:passthrough" }}
+
+[pipelines.orders.dlq]
+enabled = true
+
+[pipelines.orders.dlq.sink]
+type = "sqlite_dlq"
+path = "{dlq_path}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    container = _load_container_from_config(str(config_path))
+    async with container:
+        summary = await container.build_pipeline().run(run_id="run-1")
+
+    assert summary.records_errored == 1
+
+    exit_code = await _run_dlq_command(
+        SimpleNamespace(
+            subcommand="replay",
+            pipeline=None,
+            config=str(config_path),
+            profile=None,
+            environment=None,
+            stage=None,
+            mode="pipeline",
+            limit=None,
+            run_id=None,
+        )
+    )
+
+    assert exit_code == 1
+
+    conn = sqlite3.connect(dlq_path)
+    try:
+        row = conn.execute("SELECT attempt, COUNT(*) FROM dlq_records").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row[0] == 1
+    assert row[1] == 1

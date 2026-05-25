@@ -75,11 +75,17 @@ agora pipelines list
 
 ## agora plugins
 
-List all registered sources, sinks, and middlewares:
+List registered sources, sinks, and middlewares:
 
 ```bash
 agora plugins list
+agora plugins list --kind sink
+agora plugins list --json
 ```
+
+`agora plugins list` is a diagnostics view, not a package installer. Incompatible
+entry-point plugins may appear with an incompatible status so you can see why
+Agora did not load them.
 
 ## agora config
 
@@ -103,16 +109,21 @@ agora config show
 
 ## agora dlq
 
-Inspect and replay dead-letter queue records:
+Replay dead-letter queue records using a declarative pipeline config:
 
 ```bash
-agora dlq list --db .dlq.db
-agora dlq list --db .dlq.db --pipeline-id my_pipeline --limit 50
-agora dlq replay --db .dlq.db --pipeline-id my_pipeline
-agora dlq replay --db .dlq.db --pipeline-id my_pipeline --sink-mode
+agora dlq replay --config pipelines.toml
+agora dlq replay --config pipelines.toml orders --stage sink_write
+agora dlq replay --config pipelines.toml --mode sink
+agora dlq replay --config pipelines.toml --limit 50
 ```
 
-`--sink-mode` replays the processed record directly to the sink, bypassing the middleware chain.
+Replay modes:
+
+- `--mode pipeline` replays the original payload back through the middleware chain
+- `--mode sink` re-drives only the sink writer path using the processed payload
+
+`--mode sink` only supports DLQ records captured at stage `sink_write`.
 
 ## agora version
 
@@ -136,3 +147,9 @@ my_project/
 ```
 
 Both `cwd` and `cwd/src` are added to `sys.path` automatically.
+
+## Trust boundary
+
+`agora run`, `agora worker`, and `agora dlq replay` import Python modules from
+the current project. Config files may also resolve `import = "module:name"`
+references. Treat project code and config as trusted input.

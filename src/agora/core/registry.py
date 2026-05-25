@@ -18,7 +18,7 @@ Usage::
     # Retrieve
     normalizer = normalizer_registry.get("source_a")
 
-Enhanced API (v0.3)::
+Current API::
 
     # Decorator-based registration
     @source_registry.plugin("my_source")
@@ -54,7 +54,17 @@ if TYPE_CHECKING:
 P = TypeVar("P")
 
 logger = logstruct.getLogger(__name__)
-AGORA_API_VERSION = "0.3"
+AGORA_PLUGIN_MANIFEST_VERSION = "0.3"
+"""Version of the optional plugin manifest contract understood by this release.
+
+This value tracks the shape of ``MANIFEST`` metadata used for diagnostics and
+compatibility hints. It is intentionally separate from the ``agora-etl``
+package version.
+"""
+
+# Backward-compatible alias kept for plugin packages that already import it.
+# Deprecated in 0.2.0: prefer ``AGORA_PLUGIN_MANIFEST_VERSION`` in new code.
+AGORA_API_VERSION = AGORA_PLUGIN_MANIFEST_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +92,14 @@ def _coerce_manifest(
     try:
         package = importlib.import_module(package_name)
     except ImportError:
-        return None
+        if distribution_name is None and distribution_version is None:
+            return None
+        return {
+            "package": distribution_name or package_name,
+            "version": distribution_version,
+            "agora_api_version": None,
+            "compatible": None,
+        }
 
     manifest = getattr(package, "MANIFEST", None)
     if manifest is None:
@@ -97,7 +114,9 @@ def _coerce_manifest(
 
     agora_api_version = getattr(manifest, "agora_api_version", None)
     compatible = (
-        bool(agora_api_version == AGORA_API_VERSION) if agora_api_version is not None else None
+        bool(agora_api_version == AGORA_PLUGIN_MANIFEST_VERSION)
+        if agora_api_version is not None
+        else None
     )
     return {
         "package": getattr(manifest, "package", None) or distribution_name or package_name,
@@ -302,14 +321,23 @@ class Registry(Generic[P]):
     def describe_items(self) -> list[RegistryItemInfo]:
         """Return enriched registration details for CLI and diagnostics."""
         items: list[RegistryItemInfo] = []
-        for key in self.all_keys():
+        described_keys = self.all_keys()
+        for key in self._metadata:
+            if key not in described_keys:
+                described_keys.append(key)
+
+        for key in described_keys:
             metadata = self._metadata.get(key, {})
             items.append(
                 RegistryItemInfo(
                     key=key,
                     type=self._registration_types.get(
                         key,
-                        "factory" if key in self._factories else "instance",
+                        "factory"
+                        if key in self._factories
+                        else "instance"
+                        if key in self._plugins
+                        else "unavailable",
                     ),
                     origin=self._origins.get(key, "manual"),
                     package=metadata.get("package"),
@@ -452,13 +480,16 @@ class Registry(Generic[P]):
                     distribution_version=getattr(distribution, "version", None),
                 )
                 if metadata is not None and metadata.get("compatible") is False:
+                    self._metadata[ep.name] = metadata
+                    self._origins[ep.name] = "entrypoint_incompatible"
+                    self._registration_types[ep.name] = "unavailable"
                     logger.warning(
                         "registry_entrypoint_incompatible",
                         registry=self._name,
                         group=group,
                         name=ep.name,
                         plugin_api_version=metadata.get("agora_api_version"),
-                        expected_api_version=AGORA_API_VERSION,
+                        expected_manifest_version=AGORA_PLUGIN_MANIFEST_VERSION,
                     )
                     continue
                 self.register(ep.name, plugin)

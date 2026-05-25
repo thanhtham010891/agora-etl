@@ -24,7 +24,7 @@ class AgoraContext:
     verbose:
         Whether ``--verbose`` / ``-v`` was passed globally.
     extra:
-        Open-ended dict for any framework-level extras added in future.
+        Open-ended dict for framework-level extras added by commands or tests.
     """
 
     cwd: str = ""

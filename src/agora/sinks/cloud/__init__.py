@@ -1,1 +1,5 @@
-"""Cloud sinks (S3, GCS, Azure Blob) — not yet implemented. Coming in a future release."""
+"""Reserved namespace for cloud sink helpers.
+
+Official cloud integrations should prefer plugin packages until they are mature
+enough for the first-party release story.
+"""

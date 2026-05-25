@@ -45,6 +45,10 @@ source.stream()
   → writer.write(result)
 ```
 
+Buffered execution preserves output order, but it is not "fire and forget".
+If a fail-closed sink error or run cancellation occurs, Agora aborts pending
+buffered work instead of continuing to commit later records out of order.
+
 ## Backpressure
 
 When `backpressure=Backpressure.adaptive(...)` is set, the runtime monitors writer flush latency and checkpoint save latency to dynamically scale the in-flight record limit up or down. This prevents fast sources from overwhelming slow sinks.
@@ -69,15 +73,35 @@ Failed records can be replayed via `agora dlq replay`.
 
 ## Checkpointing
 
-Sources that implement `current_checkpoint()` can be resumed after a restart. The runtime calls `checkpoint_store.save()` every `checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)` is called before streaming begins.
+Checkpointing is explicit, not automatic for every source. A source must opt in
+to resume support by exposing `supports_checkpoint = True` and implementing the
+checkpoint hooks. The runtime calls `checkpoint_store.save()` every
+`checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)`
+is called before streaming begins.
 
 Built-in checkpointable sources: `CsvSource`, `ParquetSource`, `JsonLinesSource`.
 
+Sources that do not explicitly opt into checkpoint support still run normally,
+but Agora does not advertise resume behavior for them and does not touch the
+checkpoint store on their behalf.
+
 ## Plugin system
 
-Agora discovers plugins via Python entry-points at import time. Third-party packages register themselves under the `agora.*` entry-point groups. The core registries (`source_registry`, `sink_registry`, etc.) load these automatically.
+Agora discovers plugins via Python entry-points when the relevant registries are
+loaded. Third-party packages register themselves under the `agora.*`
+entry-point groups. The core registries (`source_registry`, `sink_registry`,
+etc.) expose those registrations to code, config assembly, and CLI workflows.
 
 See [plugins.md](plugins.md) for details.
+
+## Operational constraints
+
+Agora is a framework runtime, not a full control plane. A few boundaries are
+intentional:
+
+- config import references execute trusted project code
+- the built-in health server is lightweight and best kept behind private network boundaries
+- plugin manifest compatibility hints are diagnostics, not a full dependency solver
 
 ## Tracing
 
