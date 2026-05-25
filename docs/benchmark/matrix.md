@@ -1,5 +1,14 @@
 # Agora ETL — Benchmark Matrix
 
+This page publishes the current benchmark snapshot for Agora ETL.
+
+Read it in this order:
+
+1. Source Summary
+2. Sink Summary
+3. Buffered Overhead
+4. Full Matrix
+
 ## Environment
 
 | | |
@@ -95,12 +104,5 @@ Rows per scenario: `10,000`
 | Parquet | Buffered | Parquet | 3 | 1.87s | 5,348 r/s | 0.3 MB/s | 7.2 MB | 4/4 |
 | Parquet | Buffered | Stdout | 3 | 1.86s | 5,383 r/s | 0.3 MB/s | 6.9 MB | 4/4 |
 
-## Notes
-
-- Each scenario reports the median of 3 isolated subprocess runs.
-- `MB/s` uses the generated input file size for each source, scaled by consumed rows.
-- Source Summary uses `Direct + Null` to isolate source read cost.
-- Sink Summary uses `Direct` scenarios and compares each sink to the same-source `Null` baseline.
-- Buffered Overhead uses the `Null` sink to isolate runtime coordination cost.
-- Peak Py Heap uses tracemalloc (Python heap only — excludes native memory from pyarrow, uvloop).
-- Use `--generate` to regenerate benchmark input data.
+`Peak Py Heap` reflects Python heap only. It does not include native memory
+from components such as `pyarrow` or `uvloop`.

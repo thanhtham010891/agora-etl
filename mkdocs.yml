@@ -6,26 +6,33 @@ repo_name: thanhtham010891/agora-etl
 docs_dir: docs
 theme:
   name: readthedocs
+extra_css:
+  - stylesheets/layout.css
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - Change Log:
-      - Overview: change-log/index.md
-      - 0.1.4: change-log/0.1.4.md
-      - 0.1.3: change-log/0.1.3.md
-      - 0.1.2: change-log/0.1.2.md
-      - 0.1.0: change-log/0.1.0.md
-  - Configuration: configuration.md
-  - CLI Reference: cli.md
+  - Guides:
+      - Getting Started: getting-started.md
+      - Configuration: configuration.md
+      - CLI Reference: cli.md
+      - Runner: runner.md
   - Benchmark:
       - Overview: benchmark/index.md
       - Matrix: benchmark/matrix.md
-  - Sources: sources.md
-  - Sinks: sinks.md
-  - Middlewares: middlewares.md
-  - Runner: runner.md
-  - Plugins: plugins.md
-  - Architecture: architecture.md
+  - Reference:
+      - Sources: sources.md
+      - Sinks: sinks.md
+      - Middlewares: middlewares.md
+      - Plugins:
+          - Overview: plugins/index.md
+          - Official Bundle: plugins/official-bundle.md
+          - Redis: plugins/redis.md
+          - Kafka: plugins/kafka.md
+          - PostgreSQL: plugins/postgresql.md
+          - Scheduling: plugins/scheduling.md
+          - Distributed Coordination: plugins/distributed.md
+          - Developing Plugins: plugins/developing.md
+      - Architecture: architecture.md
+  - Change Log: change-log/index.md
 markdown_extensions:
   - admonition
   - tables

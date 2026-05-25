@@ -1,6 +1,7 @@
-# Plugins
+# Developing Plugins
 
-Agora is designed to be extended. Third-party packages register themselves via Python entry-points and are discovered when the relevant registries are loaded at runtime.
+Agora plugins are normal Python packages that register components through entry
+points.
 
 ## Entry-point groups
 
@@ -17,19 +18,9 @@ Agora is designed to be extended. Third-party packages register themselves via P
 | `agora.metrics.exporters` | Metrics exporters |
 | `agora.state.backends` | State backend implementations |
 
-## Official plugins
+## Minimal registration example
 
-The main first-party extension package is [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/). It currently groups official integrations such as:
-
-- Redis
-- cron scheduling helpers
-- distributed worker coordination
-- Kafka
-- PostgreSQL
-
-## Registering a plugin
-
-In your package's `pyproject.toml`:
+In `pyproject.toml`:
 
 ```toml
 [project.entry-points."agora.sources"]
@@ -40,24 +31,15 @@ my_sink = "my_package.sinks:MySink"
 
 [project.entry-points."agora.middlewares"]
 my_middleware = "my_package.middlewares:MyMiddleware"
-
-[project.entry-points."agora.ai.providers"]
-my_provider = "my_package.providers:MyProvider"
 ```
 
-After installing the package, `agora plugins list` will show the registered components.
+After installation:
 
-If a plugin package also exposes a `MANIFEST`, Agora uses that metadata for CLI diagnostics and compatibility hints. The manifest version is a plugin-contract marker, not the same thing as the `agora-etl` package version.
+```bash
+agora plugins list
+```
 
-For older plugins, `agora.core.registry.AGORA_API_VERSION` still aliases the
-same manifest-contract version constant. New plugins should prefer
-`AGORA_PLUGIN_MANIFEST_VERSION`. The alias is deprecated in `0.2.0`.
-
-If a plugin advertises an incompatible manifest version, Agora leaves it out of
-the active registry but still surfaces it in CLI diagnostics as incompatible so
-operators can see why it was rejected.
-
-## Using plugins in config-driven pipelines
+## Config-driven usage
 
 Registered plugins can be referenced by name in declarative pipeline configs:
 
@@ -72,10 +54,10 @@ threshold = 0.9
 
 [[pipelines.example.sinks]]
 type = "my_sink"
-dsn = "postgresql://localhost/mydb"
+dsn = "postgresql://example/db"
 ```
 
-Or equivalently, in Python-driven assembly:
+Or in Python:
 
 ```python
 from agora import Pipeline
@@ -83,17 +65,33 @@ from agora.sources import source_registry
 from agora.sinks import sink_registry
 
 source = source_registry.create("my_source", url="https://api.example.com")
-sink = sink_registry.create("my_sink", dsn="postgresql://localhost/mydb")
+sink = sink_registry.create("my_sink", dsn="postgresql://example/db")
 
 pipeline = Pipeline(source).build(sink)
 ```
 
-## AI providers
+## Manifest compatibility
 
-AI providers implement the `AIProvider` protocol:
+If a plugin package exposes a `MANIFEST`, Agora uses it for compatibility
+diagnostics and CLI reporting.
+
+Important:
+
+- manifest compatibility is a plugin-contract concern
+- it is not the same thing as the `agora-etl` package version
+- incompatible plugins are excluded from the active registry but still shown in
+  diagnostics so operators can see why they were rejected
+
+For older plugins, `agora.core.registry.AGORA_API_VERSION` still aliases the
+same manifest-contract version constant. New plugins should prefer
+`AGORA_PLUGIN_MANIFEST_VERSION`.
+
+## Authoring examples
+
+### AI provider
 
 ```python
-from agora.ai.providers.base import AIProvider, CompletionResponse
+from agora.ai.providers.base import CompletionResponse
 
 class MyProvider:
     model = "my-model-v1"
@@ -115,28 +113,7 @@ class MyProvider:
         )
 ```
 
-Register it:
-
-```toml
-[project.entry-points."agora.ai.providers"]
-my_provider = "my_package.providers:MyProvider"
-```
-
-Use it in any AI middleware:
-
-```python
-from agora.middlewares.ai.enrich import AIEnrichMiddleware
-
-pipeline.pipe(AIEnrichMiddleware(
-    provider=MyProvider(api_key="..."),
-    prompt_template="Summarize: {name}",
-    output_fields=["summary"],
-))
-```
-
-## Dedup store plugins
-
-Implement the `DedupStore` protocol to add a distributed dedup backend:
+### Dedup store
 
 ```python
 from agora.middlewares.dedup.stores.base import DedupStore
@@ -157,12 +134,13 @@ class RedisStore(DedupStore[str]):
         await self._redis.aclose()
 ```
 
-## Discovering plugins manually
+## Discovery hook
 
 ```python
 from agora.core.discovery import discover_plugins
 
-discover_plugins()   # loads all entry-points into the registries
+discover_plugins()
 ```
 
-This is called automatically when using `AgoraContainer.from_config()` or the CLI. In most projects you do not need to call it manually.
+In most projects you do not need to call this manually. The CLI and config
+assembly paths load plugin entry points for you.

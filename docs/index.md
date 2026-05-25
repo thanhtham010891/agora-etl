@@ -8,7 +8,7 @@ Source -> Middleware chain -> Sink(s)
 
 It is designed for teams that want a lightweight Python-native runtime for ingestion, transformation, enrichment, checkpointing, dead-letter queues, and long-running scheduled workers.
 
-## What you can build with Agora
+## Why Agora
 
 - batch imports from files, APIs, or databases
 - scheduled ETL jobs with health endpoints
@@ -16,7 +16,7 @@ It is designed for teams that want a lightweight Python-native runtime for inges
 - resumable jobs with checkpoints and DLQ replay
 - plugin-based integrations for Redis, Kafka, PostgreSQL, and more
 
-## Package overview
+## Package Model
 
 - `agora-etl`: the core framework
 - `agora-etl-plugins`: the official plugin bundle for Redis, cron scheduling, distributed coordination, Kafka, and PostgreSQL
@@ -29,41 +29,23 @@ It is designed for teams that want a lightweight Python-native runtime for inges
 - Need repeatable local performance checks: [Benchmark](benchmark/index.md)
 - Want the latest benchmark report table: [Benchmark Matrix](benchmark/matrix.md)
 - Planning production workers: [Runner](runner.md)
+- Understanding plugin boundaries: [Plugins](plugins/index.md)
 - Browsing release history: [Change Log](change-log/index.md)
 
-## Reference guides
+## Reference
 
 - [Sources](sources.md)
 - [Sinks](sinks.md)
 - [Middlewares](middlewares.md)
-- [Plugins](plugins.md)
+- [Plugins](plugins/index.md)
 - [Architecture](architecture.md)
 
-## Learning paths
+## Common Paths
 
-### I want to run my first pipeline
-
-1. Read [Getting Started](getting-started.md)
-2. Run `agora new my-project`
-3. Run `agora run pipelines.example --dry-run`
-
-### I want declarative configs
-
-1. Read [Configuration](configuration.md)
-2. Validate a config with `agora run --config pipelines.toml --plan`
-3. Run it with `agora run --config pipelines.toml`
-
-### I want long-running workers
-
-1. Read [Runner](runner.md)
-2. Add a `worker.py` module that returns a `WorkerPool`
-3. Start it with `agora worker`
-
-### I want to extend Agora
-
-1. Read [Plugins](plugins.md)
-2. Register components with Python entry points
-3. Verify registration with `agora plugins list`
+- First pipeline: read [Getting Started](getting-started.md), then run `agora new my-project`
+- Declarative config: read [Configuration](configuration.md), then try `agora run --config pipelines.toml --plan`
+- Long-running workers: read [Runner](runner.md), then wire a `WorkerPool`
+- Plugin development: read [Plugins](plugins/index.md), then verify registration with `agora plugins list`
 
 ## Examples
 
@@ -74,7 +56,7 @@ The repository includes end-to-end example projects:
 - `examples/etl-parquet`
 - `examples/etl-http`
 
-## Production notes
+## Production Notes
 
 Agora is a framework, not a hosted platform. You own deployment, secret management, scheduling policy, and operational guardrails. The core runtime gives you:
 

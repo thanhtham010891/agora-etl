@@ -234,7 +234,7 @@ Examples:
 
 ## Recommended workflow
 
-For community-facing projects, a good pattern is:
+For a good pattern is:
 
 1. start in Python while shaping the pipeline
 2. extract stable callables and schemas into importable modules
@@ -254,4 +254,4 @@ For community-facing projects, a good pattern is:
 
 - [Getting Started](getting-started.md)
 - [CLI Reference](cli.md)
-- [Plugins](plugins.md)
+- [Plugins](plugins/index.md)

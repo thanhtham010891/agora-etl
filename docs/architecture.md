@@ -128,7 +128,7 @@ loaded. Third-party packages register themselves under the `agora.*`
 entry-point groups. The core registries (`source_registry`, `sink_registry`,
 etc.) expose those registrations to code, config assembly, and CLI workflows.
 
-See [plugins.md](plugins.md) for details.
+See [Plugins](plugins/index.md) for details.
 
 ## Operational constraints
 

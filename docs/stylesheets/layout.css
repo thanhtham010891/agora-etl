@@ -1,0 +1,27 @@
+.wy-nav-content {
+  max-width: none;
+}
+
+.rst-content > div[role="navigation"][aria-label="breadcrumbs navigation"],
+.rst-footer-buttons,
+.rst-versions {
+  display: none !important;
+}
+
+@media screen and (min-width: 1100px) {
+  .wy-nav-content {
+    margin: 0 24px;
+  }
+}
+
+@media screen and (min-width: 1400px) {
+  .wy-nav-content {
+    margin-right: 40px;
+  }
+}
+
+@media screen and (max-width: 768px) {
+  .wy-nav-content {
+    margin: 0;
+  }
+}

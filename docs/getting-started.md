@@ -127,7 +127,7 @@ See:
 
 - [Sources](sources.md)
 - [Sinks](sinks.md)
-- [Plugins](plugins.md)
+- [Plugins](plugins/index.md)
 
 ## Add validation or enrichment
 
