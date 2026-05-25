@@ -176,6 +176,23 @@ Because import references resolve real Python modules from your project, treat
 pipeline config as trusted input. Do not accept unreviewed config files from
 untrusted users.
 
+When you run:
+
+- `agora run --config pipelines.toml`
+- `agora run --config pipelines.toml --plan`
+- `agora dlq replay --config pipelines.toml`
+
+Agora prepends the project root and `src/` to `sys.path`, then resolves those
+imports as normal Python objects. In practice, that means a declarative config
+is operational code with a TOML wrapper.
+
+Recommended operator posture:
+
+- keep pipeline configs in version control and review them like application code
+- keep imported callables in stable modules instead of ad-hoc scratch files
+- do not let end users upload or edit `agora/v1` configs directly
+- use `--plan` in CI to surface imports before promotion
+
 ## DLQ and tracing sections
 
 Optional sections inside one pipeline:
@@ -228,8 +245,10 @@ For community-facing projects, a good pattern is:
 
 - `agora run --config ...` and `agora dlq replay --config ...` both import Python code from the project.
 - `agora config show` imports `src/settings.py` and executes `get_settings()`.
+- `agora run --plan` is read-only with respect to pipeline execution, but it still resolves trusted import references from the config.
 - Health endpoints are intentionally lightweight. Keep them bound to private
   network interfaces or protect them with `AGORA_HEALTH_AUTH_TOKEN`.
+- Treat the built-in health server as an internal probe surface, not as a public API edge.
 
 ## Related guides
 

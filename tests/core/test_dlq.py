@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -513,6 +515,62 @@ async def test_sqlite_dlq_acknowledge_uses_storage_identity_for_duplicate_metada
 
         assert [record.record for record in remaining] == [{"id": 1}]
         assert remaining[0].attempt == 0
+    finally:
+        await sink.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_dlq_handles_to_thread_calls_across_different_threads(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "dlq-threaded.db"
+
+    async def _fresh_thread_to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def _runner() -> None:
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:
+                loop.call_soon_threadsafe(future.set_exception, exc)
+            else:
+                loop.call_soon_threadsafe(future.set_result, result)
+
+        thread = threading.Thread(target=_runner)
+        thread.start()
+        try:
+            return await future
+        finally:
+            thread.join()
+
+    monkeypatch.setattr(asyncio, "to_thread", _fresh_thread_to_thread)
+
+    sink = SQLiteDLQSink(path)
+    source = SQLiteDLQSource(path, pipeline_id="orders")
+    record = DLQRecord(
+        pipeline_id="orders",
+        run_id="run-1",
+        stage="sink_write",
+        error_type="RuntimeError",
+        error_message="boom",
+        record={"id": 1},
+    )
+
+    await sink.open()
+    try:
+        await sink.write(record)
+
+        await source.open()
+        try:
+            records = [item async for item in source.stream()]
+        finally:
+            await source.close()
+
+        assert [item.record for item in records] == [{"id": 1}]
+        replayed = await sink.replay(records[0])
+        assert replayed.attempt == 1
+        await sink.acknowledge(replayed)
     finally:
         await sink.close()
 

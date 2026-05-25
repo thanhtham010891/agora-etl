@@ -82,6 +82,8 @@ class WorkerPool:
         self._health_server = None
         self.metrics = metrics or MetricsCollector()
         self._coordinator = coordinator
+        self._metrics_observers: dict[ScheduledPipeline, object] = {}
+        self._lease_release_observers: dict[ScheduledPipeline, object] = {}
 
     def register(self, pipeline: ScheduledPipeline) -> WorkerPool:
         """Register a scheduled pipeline.  Returns self for chaining."""
@@ -127,7 +129,10 @@ class WorkerPool:
 
         # Wire metrics into each pipeline via public Observer API
         for p in self._pipelines:
-            p.add_observer(self._make_metrics_callback(p.pipeline_id))
+            if p not in self._metrics_observers:
+                callback = self._make_metrics_callback(p.pipeline_id)
+                p.add_observer(callback)
+                self._metrics_observers[p] = callback
 
         # Install signal handlers (SIGINT + SIGTERM → graceful shutdown)
         loop = asyncio.get_running_loop()
@@ -200,6 +205,8 @@ class WorkerPool:
                         self._health_server.stop()
                     if health_tasks:
                         await asyncio.gather(*health_tasks, return_exceptions=True)
+                    if self._coordinator is not None:
+                        await self._coordinator.stop()
                     break
         except asyncio.CancelledError:
             # asyncio.run() was cancelled externally (e.g. double Ctrl+C)
@@ -208,6 +215,9 @@ class WorkerPool:
         finally:
             shutdown_wait.cancel()
             await asyncio.gather(shutdown_wait, return_exceptions=True)
+            self._tasks = []
+            self._health_server = None
+            self._shutdown_event = None
             self._log_final_stats()
 
     # ------------------------------------------------------------------ #
@@ -284,7 +294,9 @@ class WorkerPool:
             await coordinator.release_lease(pipeline.pipeline_id)
 
         pipeline.set_pre_run_hook(_pre_run_hook)
-        pipeline.add_observer(_release_observer)
+        if pipeline not in self._lease_release_observers:
+            pipeline.add_observer(_release_observer)
+            self._lease_release_observers[pipeline] = _release_observer
 
     def _terminal_pipeline_error(
         self,

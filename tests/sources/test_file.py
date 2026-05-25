@@ -7,6 +7,7 @@ No network access required.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import inspect
 import json
@@ -21,6 +22,27 @@ from agora import (
     SourceRecordFailurePolicy,
 )
 from agora.sources.file import CsvSource, JsonLinesSource, ParquetSource
+
+
+class _SlowSink:
+    sink_name = "slow"
+
+    def __init__(self, delay: float = 0.01) -> None:
+        self._delay = delay
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record) -> None:
+        del record
+        await asyncio.sleep(self._delay)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
 
 # ======================================================================
 # CsvSource
@@ -153,6 +175,40 @@ class TestCsvSource:
             "record_error_count": 1,
             "record_drop_count": 0,
         }
+
+    async def test_early_stop_closes_cleanly_without_waiting_for_producer(
+        self, csv_file: Path
+    ) -> None:
+        source = CsvSource(
+            path=csv_file,
+            row_mapper=lambda row: row,
+            batch_size=1,
+            queue_maxsize=1,
+        )
+        stream = source.stream()
+
+        first = await anext(stream)
+        assert first["id"] == "1"
+
+        await asyncio.wait_for(stream.aclose(), timeout=1.0)
+
+    async def test_queue_maxsize_controls_runtime_prefetch_limit(self, csv_file: Path) -> None:
+        summary = await (
+            Pipeline(
+                CsvSource(
+                    path=csv_file,
+                    row_mapper=lambda row: row,
+                    batch_size=1,
+                    queue_maxsize=1,
+                )
+            )
+            .build(_SlowSink())  # type: ignore[arg-type]
+            .run(max_records=3)
+        )
+
+        assert summary.runtime.source_prefetch_enabled is True
+        assert summary.runtime.source_prefetch_limit == 1
+        assert summary.runtime.source_prefetch_max_depth <= 1
 
 
 # ======================================================================
@@ -318,6 +374,40 @@ class TestJsonLinesSource:
         assert summary.runtime.source_record_error_count == 1
         assert summary.runtime.source_record_drop_count == 1
 
+    async def test_early_stop_closes_cleanly_without_waiting_for_producer(
+        self, jsonl_file: Path
+    ) -> None:
+        source = JsonLinesSource(
+            path=jsonl_file,
+            row_mapper=lambda d: d,
+            batch_size=1,
+            queue_maxsize=1,
+        )
+        stream = source.stream()
+
+        first = await anext(stream)
+        assert first["id"] == 1
+
+        await asyncio.wait_for(stream.aclose(), timeout=1.0)
+
+    async def test_queue_maxsize_controls_runtime_prefetch_limit(self, jsonl_file: Path) -> None:
+        summary = await (
+            Pipeline(
+                JsonLinesSource(
+                    path=jsonl_file,
+                    row_mapper=lambda d: d,
+                    batch_size=1,
+                    queue_maxsize=1,
+                )
+            )
+            .build(_SlowSink())  # type: ignore[arg-type]
+            .run(max_records=3)
+        )
+
+        assert summary.runtime.source_prefetch_enabled is True
+        assert summary.runtime.source_prefetch_limit == 1
+        assert summary.runtime.source_prefetch_max_depth <= 1
+
 
 class TestParquetSource:
     async def test_streams_records(self, tmp_path: Path) -> None:
@@ -335,3 +425,27 @@ class TestParquetSource:
             {"id": 1, "name": "Alice"},
             {"id": 2, "name": "Bob"},
         ]
+
+    async def test_early_stop_closes_cleanly_without_waiting_for_producer(
+        self, tmp_path: Path
+    ) -> None:
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
+
+        path = tmp_path / "records.parquet"
+        table = pa.Table.from_pylist(
+            [
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob"},
+                {"id": 3, "name": "Charlie"},
+            ]
+        )
+        pq.write_table(table, path)
+
+        source = ParquetSource(path=path, row_mapper=lambda row: row, batch_size=1)
+        stream = source.stream()
+
+        first = await anext(stream)
+        assert first["id"] == 1
+
+        await asyncio.wait_for(stream.aclose(), timeout=1.0)

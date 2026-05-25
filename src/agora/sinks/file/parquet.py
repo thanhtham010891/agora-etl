@@ -56,6 +56,8 @@ class ParquetSink(BaseSink[T], Generic[T]):
         self._compression = compression
         self._buffer: list[T] = []
         self._writer: Any = None  # pyarrow.parquet.ParquetWriter
+        self._fieldnames: list[str] | None = None
+        self._schema: Any | None = None
 
     async def write(self, record: T) -> None:
         self._buffer.append(record)
@@ -70,9 +72,15 @@ class ParquetSink(BaseSink[T], Generic[T]):
     async def flush(self) -> None:
         if not self._buffer:
             return
-        rows = [self._row_mapper(r) for r in self._buffer]
-        self._buffer.clear()
-        await asyncio.to_thread(self._write_batch, rows)
+        batch = list(self._buffer)
+        rows = [self._row_mapper(r) for r in batch]
+        try:
+            await asyncio.to_thread(self._write_batch, rows)
+        except Exception:
+            # Restore buffer so caller can retry or inspect failed records.
+            self._buffer = batch + self._buffer[len(batch) :]
+            raise
+        del self._buffer[: len(batch)]
         logger.debug("parquet_sink_flush", path=str(self._path), count=len(rows))
 
     def _write_batch(self, rows: list[dict[str, Any]]) -> None:
@@ -85,12 +93,27 @@ class ParquetSink(BaseSink[T], Generic[T]):
             ) from None
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pylist(rows)
+        table = pa.Table.from_pydict(self._rows_to_columns(rows), schema=self._schema)
         if self._writer is None:
+            self._schema = table.schema
             self._writer = pq.ParquetWriter(
                 str(self._path), table.schema, compression=self._compression
             )
         self._writer.write_table(table)
+
+    def _rows_to_columns(self, rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
+        if self._fieldnames is None:
+            self._fieldnames = []
+            for row in rows:
+                for key in row:
+                    if key not in self._fieldnames:
+                        self._fieldnames.append(key)
+
+        columns = {name: [] for name in self._fieldnames}
+        for row in rows:
+            for name in self._fieldnames:
+                columns[name].append(row.get(name))
+        return columns
 
     async def close(self) -> None:
         await self.flush()

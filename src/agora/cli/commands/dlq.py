@@ -12,6 +12,7 @@ from agora.cli.commands.base import BaseCommand, CommandError
 from agora.cli.commands.run import (
     _build_container_from_pipeline_config,
     _load_resolved_pipeline_config,
+    _warn_if_config_uses_import_refs,
 )
 from agora.cli.console import console
 from agora.core.component_factory import config_component_factory
@@ -120,6 +121,7 @@ async def _run_dlq_command(args: argparse.Namespace) -> int:
         environment_name=getattr(args, "environment", None),
     )
     pipeline_cfg = resolved.pipeline_config
+    _warn_if_config_uses_import_refs(args.config, pipeline_cfg)
     dlq_sink_cfg = _resolve_dlq_sink_config(pipeline_cfg)
     dlq_source_cfg = _build_dlq_source_config(
         pipeline_cfg,
@@ -154,21 +156,29 @@ async def _run_dlq_command(args: argparse.Namespace) -> int:
         replay_template = replay_container.build_pipeline()
         async for record in dlq_source.stream():
             attempted += 1
-            updated = await dlq_sink.replay(record)
             replay_mode = getattr(args, "mode", "pipeline")
-            if replay_mode == "sink" and updated.stage != "sink_write":
+            if replay_mode == "sink" and record.stage != "sink_write":
                 failed += 1
                 console.warn(
                     f"Replay skipped for {record.pipeline_id}/{record.stage}: "
                     "sink mode only supports sink_write records"
                 )
                 continue
-            replay_payload = updated.replay_payload(mode=replay_mode)
+            replay_payload = record.replay_payload(mode=replay_mode)
             if replay_payload is None:
                 failed += 1
                 console.warn(
                     f"Replay skipped for {record.pipeline_id}/{record.stage}: "
                     f"no {replay_mode} replay payload available"
+                )
+                continue
+            try:
+                updated = await dlq_sink.replay(record)
+            except Exception as exc:
+                failed += 1
+                console.warn(
+                    f"Replay failed for {record.pipeline_id}/{record.stage}: "
+                    f"could not mark replay attempt: {type(exc).__name__}: {exc}"
                 )
                 continue
             replay_pipeline = _build_replay_pipeline(
@@ -195,7 +205,23 @@ async def _run_dlq_command(args: argparse.Namespace) -> int:
                 )
                 continue
 
-            await dlq_sink.acknowledge(updated)
+            if summary.records_written != 1:
+                failed += 1
+                console.warn(
+                    f"Replay failed for {record.pipeline_id}/{record.stage}: "
+                    "record was not written during replay"
+                )
+                continue
+
+            try:
+                await dlq_sink.acknowledge(updated)
+            except Exception as exc:
+                failed += 1
+                console.warn(
+                    f"Replay failed for {record.pipeline_id}/{record.stage}: "
+                    f"could not acknowledge replayed record: {type(exc).__name__}: {exc}"
+                )
+                continue
             succeeded += 1
 
     if attempted == 0:

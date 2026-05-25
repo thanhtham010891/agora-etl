@@ -8,6 +8,9 @@ from agora.ai import ai_provider_registry
 from agora.ai.cache import StateBackendLLMCache
 from agora.ai.providers.base import CompletionResponse, EmbeddingResponse
 from agora.core.component_factory import config_component_factory
+from agora.core.container import AgoraContainer
+from agora.core.errors import ConfigError
+from agora.core.plugin import Lifecycle
 from agora.middlewares.ai.enrich import AIEnrichMiddleware
 
 
@@ -51,3 +54,61 @@ async def test_build_ai_middleware_component_resolves_provider_and_backend_cache
     await middleware._cache.set("k", "v")
     assert await middleware._cache.get("k") == "v"
     await middleware._cache.close()
+
+
+@pytest.mark.asyncio
+async def test_container_startup_all_fails_fast_when_singleton_factory_resolution_fails() -> None:
+    container = AgoraContainer("test")
+
+    def _boom():
+        raise RuntimeError("factory exploded")
+
+    container.register_factory("broken", _boom, singleton=True)
+
+    with pytest.raises(RuntimeError, match="factory exploded"):
+        await container.startup_all()
+
+
+def test_container_build_pipeline_requires_at_least_one_sink() -> None:
+    container = AgoraContainer("test")
+    container.register_singleton("_pipeline_id", "missing-sink")
+    container.register_singleton("source", object())
+    container.register_singleton("_middlewares", [])
+    container.register_singleton("_sinks", [])
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            r"Cannot build pipeline: no sinks are configured\. "
+            r"Declarative pipelines must define at least one sink\."
+        ),
+    ):
+        container.build_pipeline()
+
+
+@dataclass
+class _LifecycleProbe(Lifecycle):
+    started: list[str]
+    stopped: list[str]
+    name: str
+
+    async def startup(self) -> None:
+        self.started.append(self.name)
+
+    async def shutdown(self) -> None:
+        self.stopped.append(self.name)
+
+
+@pytest.mark.asyncio
+async def test_container_startup_all_still_starts_lifecycle_singletons_in_order() -> None:
+    started: list[str] = []
+    stopped: list[str] = []
+    container = AgoraContainer("ordered")
+    container.register_singleton("first", _LifecycleProbe(started, stopped, "first"))
+    container.register_singleton("second", _LifecycleProbe(started, stopped, "second"))
+
+    await container.startup_all()
+    await container.shutdown_all()
+
+    assert started == ["first", "second"]
+    assert stopped == ["second", "first"]

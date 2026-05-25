@@ -20,6 +20,7 @@ from agora.core.runtime._delivery import (
     SourceRecord,
 )
 from agora.core.source import (
+    DeliveryHookSource,
     prefetch_limit_for,
     source_delivery_success_callback,
     source_runtime_metrics,
@@ -233,6 +234,9 @@ class ExecutionCoordinator:
         source_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=prefetch_limit)
 
         async def _pump_source() -> None:
+            # Cache the isinstance check — runtime_checkable Protocol checks are
+            # expensive and the source type never changes mid-run.
+            _has_delivery_hook = isinstance(self.source, DeliveryHookSource)
             try:
                 async for record in self.source.stream():
                     if source_queue.full():
@@ -241,7 +245,9 @@ class ExecutionCoordinator:
                         SourceRecord(
                             raw=record,
                             checkpoint=self.source.current_checkpoint(),
-                            on_success=source_delivery_success_callback(self.source),
+                            on_success=self.source.delivery_success_callback()
+                            if _has_delivery_hook
+                            else None,
                         )
                     )
                     ctx.metrics.runtime.source_prefetch_max_depth = max(
@@ -264,10 +270,16 @@ class ExecutionCoordinator:
                     raise item.exc
                 yield item
         finally:
+            # Drain queue first so producer unblocks from await source_queue.put()
+            while not source_queue.empty():
+                source_queue.get_nowait()
             if not producer_task.done():
                 producer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await producer_task
+            # Final drain in case producer added items after cancel
+            while not source_queue.empty():
+                source_queue.get_nowait()
 
     async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
         prefetch_limit = prefetch_limit_for(self.source)
@@ -308,6 +320,10 @@ class ExecutionCoordinator:
         state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
         source_error: Exception | None = None
 
+        # Cache branch decision — writer_batch_size never changes mid-run.
+        _use_batching = self.writer_batch_size > 1
+        _batch_size = self.writer_batch_size
+
         try:
             async for source_record in source_records:
                 ctx.metrics.records_consumed += 1
@@ -315,15 +331,25 @@ class ExecutionCoordinator:
                 state.processed_count += 1
 
                 result = await self.chain.process(source_record.raw, ctx)
-                await self.delivery.dispatch_processed_result(
-                    state,
-                    result.value,
-                    source_record.raw,
-                    source_record.checkpoint,
-                    self.writer_batch_size,
-                    failure=result.failure,
-                    on_success=source_record.on_success,
-                )
+                if _use_batching:
+                    await self.delivery.queue_processed_record(
+                        state,
+                        result.value,
+                        source_record.raw,
+                        source_record.checkpoint,
+                        _batch_size,
+                        failure=result.failure,
+                        on_success=source_record.on_success,
+                    )
+                else:
+                    await self.delivery.write_processed_record(
+                        state,
+                        result.value,
+                        source_record.raw,
+                        source_record.checkpoint,
+                        failure=result.failure,
+                        on_success=source_record.on_success,
+                    )
                 if self.reached_max_records(ctx, state.processed_count, max_records):
                     break
         except Exception as exc:
@@ -410,6 +436,15 @@ class ExecutionCoordinator:
                     len(pending_tasks),
                 )
                 while len(pending_tasks) >= stage_limit:
+                    next_commit = await self._drain_ready_buffered_records(
+                        state,
+                        pending_tasks,
+                        next_commit,
+                        split_index,
+                        buffered_name,
+                    )
+                    if len(pending_tasks) < stage_limit:
+                        break
                     if adaptive_controller is not None:
                         stage_limit = adaptive_controller.observe(
                             ctx.metrics.runtime, pending_count=len(pending_tasks)
@@ -459,9 +494,8 @@ class ExecutionCoordinator:
                 )
 
             await self.delivery.flush_pending_writes(state)
-        except BaseException as exc:
-            if self._must_abort_pending_work(exc):
-                await self._abort_pending_work(state, pending_tasks)
+        except BaseException:
+            await self._abort_pending_work(state, pending_tasks)
             raise
 
         if source_error is not None:

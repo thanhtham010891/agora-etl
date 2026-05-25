@@ -918,3 +918,247 @@ async def test_exec1_source_delivery_hook_runs_only_after_successful_handling() 
         "[EXEC-1] PRESERVATION FAILED: source delivery hook should only run for "
         "records that were fully handled successfully."
     )
+
+
+@pytest.mark.asyncio
+async def test_exec2_buffered_pipeline_preserves_output_order_under_out_of_order_completion() -> (
+    None
+):
+    """[EXEC-2] Preservation: buffered execution still commits results in source order.
+
+    Baseline behavior: buffered middleware may complete out of order internally,
+    but downstream writes are committed in original source order.
+    """
+    from agora import IterableSource, Pipeline
+    from agora.core.middleware import Middleware
+    from agora.core.sink import WriteResult
+
+    class _OutOfOrderBufferedMiddleware(Middleware[int, int]):
+        name = "out_of_order_buffered"
+
+        def __init__(self) -> None:
+            self.min_concurrency = 2
+            self._tasks: list[asyncio.Task[None]] = []
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+        async def submit(self, record: int, ctx) -> asyncio.Future[int]:
+            del ctx
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[int] = loop.create_future()
+
+            async def _resolve() -> None:
+                await asyncio.sleep(0.03 if record == 0 else 0.0)
+                if not future.done():
+                    future.set_result(record + 100)
+
+            self._tasks.append(asyncio.create_task(_resolve()))
+            return future
+
+        async def drain_pending(self, ctx) -> None:
+            del ctx
+            if self._tasks:
+                tasks, self._tasks = self._tasks, []
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    class _CollectSink:
+        sink_name = "collect"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> WriteResult:
+            self.records.append(record)
+            return WriteResult(written=True)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sink = _CollectSink()
+    summary = await (
+        Pipeline(IterableSource([0, 1, 2, 3]))
+        .pipe(_OutOfOrderBufferedMiddleware())
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 4
+    assert sink.records == [100, 101, 102, 103], (
+        "[EXEC-2] PRESERVATION FAILED: buffered execution must preserve source "
+        f"order even when buffered work completes out of order. got={sink.records}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rec1_checkpoint_save_failure_is_fail_closed_by_default() -> None:
+    """[REC-1] Preservation: checkpoint save failures stop the run by default.
+
+    Baseline behavior: checkpoint persistence is fail-closed unless the caller
+    explicitly opts into log-and-continue behavior.
+    """
+    from agora import Pipeline
+    from agora.core.sink import WriteResult
+    from agora.core.source import BaseSource
+
+    class _CheckpointedSource(BaseSource[int]):
+        source_name = "checkpointed_preservation"
+        supports_checkpoint = True
+
+        def __init__(self, records: list[int]) -> None:
+            self._records = records
+            self._last_index = -1
+
+        async def prepare_resume(self, checkpoint) -> None:
+            del checkpoint
+
+        def current_checkpoint(self) -> dict[str, int] | None:
+            if self._last_index < 0:
+                return None
+            return {"index": self._last_index}
+
+        async def stream(self):
+            for index, record in enumerate(self._records):
+                self._last_index = index
+                yield record
+
+    class _FailingCheckpointStore:
+        async def load(self, key: str):
+            del key
+
+        async def save(self, key: str, checkpoint) -> None:
+            del key, checkpoint
+            raise RuntimeError("checkpoint save broke")
+
+        async def close(self) -> None:
+            return None
+
+    class _CollectSink:
+        sink_name = "collect"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> WriteResult:
+            self.records.append(record)
+            return WriteResult(written=True)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="checkpoint save broke"):
+        await (
+            Pipeline(_CheckpointedSource([1, 2, 3]))
+            .build(sink, checkpoint=_FailingCheckpointStore())  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert sink.records == [1], (
+        "[REC-1] PRESERVATION FAILED: fail-closed checkpoint behavior should stop "
+        f"the run before later records are processed. got={sink.records}"
+    )
+
+
+def test_prod3_dlq_record_replay_payload_respects_pipeline_and_sink_modes() -> None:
+    """[PROD-3] Preservation: replay payload selection stays mode-specific."""
+    from agora.core.dlq import DLQRecord
+
+    record = DLQRecord(
+        pipeline_id="orders",
+        run_id="run-1",
+        stage="sink_write",
+        error_type="RuntimeError",
+        error_message="boom",
+        record={"legacy": True},
+        original_record={"id": 1},
+        processed_record={"id": 1, "normalized": True},
+    )
+
+    assert record.replay_payload("pipeline") == {"id": 1}, (
+        "[PROD-3] PRESERVATION FAILED: pipeline replay should prefer the original payload."
+    )
+    assert record.replay_payload("sink") == {"id": 1, "normalized": True}, (
+        "[PROD-3] PRESERVATION FAILED: sink replay should prefer the processed payload."
+    )
+
+    fallback = DLQRecord(
+        pipeline_id="orders",
+        run_id="run-2",
+        stage="sink_write",
+        error_type="RuntimeError",
+        error_message="boom",
+        record={"legacy": True},
+    )
+    assert fallback.replay_payload("pipeline") == {"legacy": True}
+    assert fallback.replay_payload("sink") == {"legacy": True}
+
+
+@pytest.mark.asyncio
+async def test_rec1_sqlite_dlq_replay_tracks_attempt_until_acknowledged(tmp_path) -> None:
+    """[REC-1] Preservation: replay increments attempt and ack removes the record."""
+    from agora.core.dlq import DLQRecord, SQLiteDLQSink, SQLiteDLQSource
+
+    path = tmp_path / "preservation-dlq.db"
+    sink = SQLiteDLQSink(path)
+    await sink.open()
+
+    async def _load_records() -> list[DLQRecord]:
+        source = SQLiteDLQSource(path, pipeline_id="orders")
+        await source.open()
+        try:
+            return [record async for record in source.stream()]
+        finally:
+            await source.close()
+
+    try:
+        await sink.write(
+            DLQRecord(
+                pipeline_id="orders",
+                run_id="run-1",
+                stage="sink_write",
+                error_type="RuntimeError",
+                error_message="boom",
+                record={"legacy": True},
+                original_record={"id": 1},
+                processed_record={"id": 1, "normalized": True},
+            )
+        )
+
+        stored = await _load_records()
+        assert len(stored) == 1, (
+            "[REC-1] PRESERVATION FAILED: expected one stored DLQ record before replay."
+        )
+        assert stored[0].attempt == 0
+
+        updated = await sink.replay(stored[0])
+        assert updated.attempt == 1, (
+            "[REC-1] PRESERVATION FAILED: replay should increment the in-memory attempt count."
+        )
+
+        after_replay = await _load_records()
+        assert len(after_replay) == 1
+        assert after_replay[0].attempt == 1, (
+            "[REC-1] PRESERVATION FAILED: replay should persist the incremented attempt."
+        )
+
+        await sink.acknowledge(updated)
+        assert await _load_records() == [], (
+            "[REC-1] PRESERVATION FAILED: acknowledge should remove the replayed DLQ record."
+        )
+    finally:
+        await sink.close()

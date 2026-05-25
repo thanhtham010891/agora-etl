@@ -203,6 +203,7 @@ class AgoraContainer:
                             container=self._name,
                             key=key,
                         )
+                        raise
 
         for key in self._registration_order:
             instance = self._singletons.get(key)
@@ -334,10 +335,10 @@ class AgoraContainer:
         pipeline_id = self.resolve("_pipeline_id") if self.has("_pipeline_id") else "pipeline"
 
         if not sinks:
-            from agora.sinks.io.stdout import StdoutSink
-
-            sinks = [StdoutSink()]
-            logger.info("container_build_pipeline_no_sinks", fallback="StdoutSink")
+            raise ConfigError(
+                "Cannot build pipeline: no sinks are configured. "
+                "Declarative pipelines must define at least one sink."
+            )
 
         dlq_sink = self.resolve("_dlq_sink") if self.has("_dlq_sink") else None
         dlq_failure_policy = (

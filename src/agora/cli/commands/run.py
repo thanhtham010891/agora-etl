@@ -36,7 +36,12 @@ import logstruct
 from agora.cli._path import ensure_project_on_path
 from agora.cli.commands.base import BaseCommand, CommandError
 from agora.cli.console import console
-from agora.config import describe_pipeline_config, resolve_config_document, validate_config_document
+from agora.config import (
+    collect_import_references,
+    describe_pipeline_config,
+    resolve_config_document,
+    validate_config_document,
+)
 
 if TYPE_CHECKING:
     import argparse
@@ -150,6 +155,7 @@ async def _build_and_run(args: argparse.Namespace) -> None:
             profile_name=getattr(args, "profile", None),
             environment_name=getattr(args, "environment", None),
         )
+        _warn_if_config_uses_import_refs(args.config, resolved.pipeline_config)
         if getattr(args, "plan", False):
             _print_pipeline_plan(args.config, resolved)
             return
@@ -240,6 +246,11 @@ def _print_pipeline_plan(config_path: str, resolved: Any) -> None:
     console.item("environment", resolved.environment_name or "none")
     console.item("source", plan["source"])
     console.item("middlewares", ", ".join(plan["middlewares"]) or "none")
+    import_refs = plan.get("import_refs", [])
+    if import_refs:
+        console.item("imports", ", ".join(import_refs))
+    else:
+        console.item("imports", "none")
 
     dedup = plan["dedup"]
     if dedup is None:
@@ -271,3 +282,13 @@ def _print_pipeline_plan(config_path: str, resolved: Any) -> None:
 
     console.item("sinks", ", ".join(plan["sinks"]))
     console.blank()
+
+
+def _warn_if_config_uses_import_refs(config_path: str, pipeline_config: dict[str, Any]) -> None:
+    import_refs = collect_import_references(pipeline_config)
+    if not import_refs:
+        return
+    console.warn(
+        f"Config '{config_path}' resolves {len(import_refs)} trusted Python import reference(s). "
+        "Review declarative configs like code: Agora imports these objects after prepending your project root and src/ to sys.path."
+    )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import queue
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 logger = logstruct.getLogger(__name__)
-_QUEUE_DONE = object()
 
 
 class CsvSource(FileSource[T], Generic[T]):
@@ -48,10 +46,9 @@ class CsvSource(FileSource[T], Generic[T]):
     skip_blank_lines:
         Skip rows where all values are empty (default: ``True``).
     batch_size:
-        Number of parsed rows transferred from the file thread to the
-        async runtime at a time (default: ``1000``).
+        Number of parsed rows transferred per async iteration (default: ``1000``).
     queue_maxsize:
-        Maximum number of pending batches held in memory (default: ``2``).
+        Runtime prefetch depth for the async source queue (default: ``2``).
     """
 
     source_name = "csv"
@@ -77,7 +74,7 @@ class CsvSource(FileSource[T], Generic[T]):
         self._encoding = encoding
         self._skip_blank_lines = skip_blank_lines
         self._batch_size = max(batch_size, 1)
-        self._queue_maxsize = max(queue_maxsize, 1)
+        self.prefetch_limit = max(queue_maxsize, 1)
         self._on_record_error = on_record_error
         self._resume_row_number = 0
         self._last_row_number = 0
@@ -104,22 +101,43 @@ class CsvSource(FileSource[T], Generic[T]):
         )
 
     async def read_records(self) -> AsyncIterator[T]:
+        import csv
+
         self._record_error_count = 0
         self._record_drop_count = 0
-        batch_queue: queue.Queue[object] = queue.Queue(maxsize=self._queue_maxsize)
-        producer = asyncio.create_task(asyncio.to_thread(self._pump_rows, batch_queue))
 
+        def _open_reader():
+            file_obj = open(self._path, encoding=self._encoding, newline="")  # noqa: SIM115
+            if self._has_header:
+                reader = csv.DictReader(file_obj, delimiter=self._delimiter)
+            else:
+                reader = csv.DictReader(
+                    file_obj,
+                    fieldnames=self._fieldnames,
+                    delimiter=self._delimiter,
+                )
+            return file_obj, reader
+
+        def _read_batch(reader, row_number: int) -> tuple[list[tuple[int, dict]], int]:
+            batch: list[tuple[int, dict]] = []
+            for row in reader:
+                row_number += 1
+                if row_number <= self._resume_row_number:
+                    continue
+                batch.append((row_number, dict(row)))
+                if len(batch) >= self._batch_size:
+                    break
+            return batch, row_number
+
+        file_obj, reader = await asyncio.to_thread(_open_reader)
+        row_number = 0
         try:
             while True:
-                batch_rows = await asyncio.to_thread(batch_queue.get)
-                if batch_rows is _QUEUE_DONE:
+                batch, row_number = await asyncio.to_thread(_read_batch, reader, row_number)
+                if not batch:
                     break
-                if isinstance(batch_rows, Exception):
-                    raise batch_rows
-
-                assert isinstance(batch_rows, list)
-                for row_number, row in batch_rows:
-                    self._last_row_number = row_number
+                for row_num, row in batch:
+                    self._last_row_number = row_num
                     if self._skip_blank_lines and all(value == "" for value in row.values()):
                         continue
                     try:
@@ -141,35 +159,4 @@ class CsvSource(FileSource[T], Generic[T]):
                             source=self.source_name,
                         ) from exc
         finally:
-            await producer
-
-    def _pump_rows(self, batch_queue: queue.Queue[object]) -> None:
-        import csv
-
-        pending_rows: list[tuple[int, dict]] = []
-
-        try:
-            with open(self._path, encoding=self._encoding, newline="") as file_obj:
-                if self._has_header:
-                    reader = csv.DictReader(file_obj, delimiter=self._delimiter)
-                else:
-                    reader = csv.DictReader(
-                        file_obj,
-                        fieldnames=self._fieldnames,
-                        delimiter=self._delimiter,
-                    )
-
-                for row_number, row in enumerate(reader, start=1):
-                    if row_number <= self._resume_row_number:
-                        continue
-                    pending_rows.append((row_number, dict(row)))
-                    if len(pending_rows) >= self._batch_size:
-                        batch_queue.put(pending_rows)
-                        pending_rows = []
-
-                if pending_rows:
-                    batch_queue.put(pending_rows)
-        except Exception as exc:
-            batch_queue.put(exc)
-        finally:
-            batch_queue.put(_QUEUE_DONE)
+            await asyncio.to_thread(file_obj.close)

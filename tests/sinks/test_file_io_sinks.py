@@ -166,6 +166,24 @@ async def test_csv_second_flush_appends(tmp_path: Path) -> None:
     assert lines.count("id") == 1  # header once
 
 
+async def test_csv_reuses_open_file_across_flushes(tmp_path: Path) -> None:
+    """CsvSink should not reopen the file for each flush."""
+    output = tmp_path / "output.csv"
+    sink = CsvSink(
+        path=output,
+        row_mapper=lambda r: {"id": r["id"]},
+    )
+
+    with patch("agora.sinks.file.csv.open", wraps=open) as open_mock:
+        await sink.write({"id": 1})
+        await sink.flush()
+        await sink.write({"id": 2})
+        await sink.flush()
+        await sink.close()
+
+    assert open_mock.call_count == 1
+
+
 # ============================================================================
 # JsonLinesSink Tests
 # ============================================================================
@@ -215,6 +233,22 @@ async def test_jsonl_custom_serializer(tmp_path: Path) -> None:
 
     lines = output.read_text().strip().split("\n")
     assert json.loads(lines[0]) == {"doubled": 10}
+
+
+async def test_jsonl_preserves_default_str_for_unknown_values(tmp_path: Path) -> None:
+    """Unknown nested values still serialize via str(...) under orjson."""
+    output = tmp_path / "output.jsonl"
+    sink = JsonLinesSink(path=output)
+
+    class CustomValue:
+        def __str__(self) -> str:
+            return "custom-value"
+
+    await sink.write({"id": 1, "payload": CustomValue()})
+    await sink.flush()
+
+    lines = output.read_text().strip().split("\n")
+    assert json.loads(lines[0]) == {"id": 1, "payload": "custom-value"}
 
 
 async def test_jsonl_default_serializer_model_dump(tmp_path: Path) -> None:
@@ -354,6 +388,32 @@ async def test_parquet_multiple_flushes_single_file(tmp_path: Path) -> None:
 
     table = pq.read_table(str(output))
     assert len(table) == 4
+
+
+async def test_parquet_missing_fields_in_later_batches_are_written_as_nulls(tmp_path: Path) -> None:
+    """Later batches can omit earlier fields without breaking the writer schema."""
+    output = tmp_path / "output.parquet"
+    sink = ParquetSink(
+        path=output,
+        row_mapper=lambda r: r,
+        batch_size=2,
+    )
+
+    await sink.write({"id": 1, "name": "Alice"})
+    await sink.write({"id": 2, "name": "Bob"})
+    await sink.flush()
+
+    await sink.write({"id": 3})
+    await sink.write({"id": 4})
+    await sink.close()
+
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(str(output))
+    assert len(table) == 4
+    assert table.column_names == ["id", "name"]
+    assert table.column("name")[2].as_py() is None
+    assert table.column("name")[3].as_py() is None
 
 
 async def test_parquet_close_without_writes(tmp_path: Path) -> None:

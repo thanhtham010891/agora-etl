@@ -57,6 +57,14 @@ _HTTP_401 = b"HTTP/1.1 401 Unauthorized\r\n"
 _HTTP_404 = b"HTTP/1.1 404 Not Found\r\n"
 _HTTP_503 = b"HTTP/1.1 503 Service Unavailable\r\n"
 _CRLF = b"\r\n"
+_DEFAULT_RESPONSE_HEADERS = (
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+)
+_UNAUTHORIZED_RESPONSE_HEADERS = (
+    *_DEFAULT_RESPONSE_HEADERS,
+    ("WWW-Authenticate", 'Bearer realm="agora-health"'),
+)
 
 
 class HealthServer:
@@ -209,7 +217,13 @@ class HealthServer:
 
         method, path = _parse_request_line(raw_request)
         if not self._check_auth(raw_request):
-            _write_response(writer, _HTTP_401, "application/json", b'{"error":"Unauthorized"}')
+            _write_response(
+                writer,
+                _HTTP_401,
+                "application/json",
+                b'{"error":"Unauthorized"}',
+                extra_headers=_UNAUTHORIZED_RESPONSE_HEADERS,
+            )
         else:
             await self._route(method, path, writer)
 
@@ -255,14 +269,17 @@ def _write_response(
     status_line: bytes,
     content_type: str,
     body: bytes,
+    *,
+    extra_headers: tuple[tuple[str, str], ...] = _DEFAULT_RESPONSE_HEADERS,
 ) -> None:
     headers = (
         status_line
         + f"Content-Type: {content_type}\r\n".encode()
         + f"Content-Length: {len(body)}\r\n".encode()
-        + b"Connection: close\r\n"
-        + _CRLF
     )
+    for key, value in extra_headers:
+        headers += f"{key}: {value}\r\n".encode()
+    headers += b"Connection: close\r\n" + _CRLF
     writer.write(headers + body)
 
 

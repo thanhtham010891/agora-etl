@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import queue
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 logger = logstruct.getLogger(__name__)
-_QUEUE_DONE = object()
 
 
 class ParquetSource(FileSource[T], Generic[T]):
@@ -80,21 +78,41 @@ class ParquetSource(FileSource[T], Generic[T]):
         )
 
     async def read_records(self) -> AsyncIterator[T]:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise ImportError(
+                "PyArrow is required for ParquetSource. Install via: pip install 'agora-etl[file]'"
+            ) from exc
+
         self._record_error_count = 0
         self._record_drop_count = 0
-        batch_queue: queue.Queue[object] = queue.Queue(maxsize=2)
-        producer = asyncio.create_task(asyncio.to_thread(self._pump_batches, batch_queue))
+
+        def _open_reader():
+            parquet_file = pq.ParquetFile(str(self._path))
+            batch_iter = parquet_file.iter_batches(batch_size=self._batch_size, use_threads=True)
+            return parquet_file, batch_iter
+
+        def _read_batch(batch_iter) -> list[dict[str, Any]] | None:
+            try:
+                batch = next(batch_iter)
+            except StopIteration:
+                return None
+            # Let PyArrow materialize the batch directly instead of copying row-by-row in Python.
+            return batch.to_pylist()
+
+        pf, batch_iter = await asyncio.to_thread(_open_reader)
+        row_number = self._resume_row_number
 
         try:
             while True:
-                batch_rows = await asyncio.to_thread(batch_queue.get)
-                if batch_rows is _QUEUE_DONE:
+                raw_rows = await asyncio.to_thread(_read_batch, batch_iter)
+                if raw_rows is None:
                     break
-                if isinstance(batch_rows, Exception):
-                    raise batch_rows
-
-                assert isinstance(batch_rows, list)
-                for row_number, row in batch_rows:
+                for row in raw_rows:
+                    row_number += 1
+                    if row_number <= self._resume_row_number:
+                        continue
                     self._last_row_number = row_number
                     try:
                         record = self._row_mapper(row)
@@ -115,33 +133,4 @@ class ParquetSource(FileSource[T], Generic[T]):
                             source=self.source_name,
                         ) from exc
         finally:
-            await producer
-
-    def _pump_batches(self, batch_queue: queue.Queue[object]) -> None:
-        try:
-            import pyarrow.parquet as pq
-        except ImportError:
-            batch_queue.put(
-                ImportError(
-                    "PyArrow is required for ParquetSource. Install via: pip install 'agora-etl[file]'"
-                )
-            )
-            batch_queue.put(_QUEUE_DONE)
-            return
-
-        try:
-            pf = pq.ParquetFile(str(self._path))
-            row_number = 0
-            for batch in pf.iter_batches(batch_size=self._batch_size):
-                pending_rows: list[tuple[int, dict]] = []
-                for row in batch.to_pylist():
-                    row_number += 1
-                    if row_number <= self._resume_row_number:
-                        continue
-                    pending_rows.append((row_number, row))
-                if pending_rows:
-                    batch_queue.put(pending_rows)
-        except Exception as exc:
-            batch_queue.put(exc)
-        finally:
-            batch_queue.put(_QUEUE_DONE)
+            await asyncio.to_thread(pf.close)

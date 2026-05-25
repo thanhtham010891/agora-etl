@@ -428,6 +428,29 @@ type = "stdout"
         _load_container_from_config(str(config_path))
 
 
+def test_load_container_from_config_requires_at_least_one_sink(tmp_path: Path) -> None:
+    config_path = tmp_path / "pipeline.toml"
+    config_path.write_text(
+        """
+format = "agora/v1"
+
+[defaults]
+pipeline = "missing-sink"
+
+[pipelines.missing-sink.source]
+type = "iterable"
+records = [1]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CommandError,
+        match=r"Invalid pipeline config in '.*': Invalid pipeline:\n  - sinks: At least one sink must be defined\.",
+    ):
+        _load_container_from_config(str(config_path))
+
+
 @pytest.mark.asyncio
 async def test_load_container_from_config_resolves_import_refs(
     tmp_path: Path,
@@ -797,3 +820,75 @@ type = "stdout"
     )
 
     assert ("item", ("tracing", "backend=in_memory, service_name=etl-tracing")) in printed
+
+
+@pytest.mark.asyncio
+async def test_build_and_run_plan_warns_when_config_uses_import_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "pipeline.toml"
+    config_path.write_text(
+        """
+format = "agora/v1"
+
+[defaults]
+pipeline = "planned"
+
+[pipelines.planned.source]
+type = "iterable"
+records = { import = "fake.module:RECORDS" }
+
+[[pipelines.planned.middlewares]]
+type = "enrich"
+enricher = { import = "fake.module:uppercase" }
+
+[[pipelines.planned.sinks]]
+type = "stdout"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    printed: list[tuple[str, tuple[str, ...]]] = []
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        run_command.console,
+        "section",
+        lambda title: printed.append(("section", (title,))),
+    )
+    monkeypatch.setattr(
+        run_command.console,
+        "item",
+        lambda *columns: printed.append(("item", columns)),
+    )
+    monkeypatch.setattr(run_command.console, "blank", lambda: printed.append(("blank", ())))
+    monkeypatch.setattr(run_command.console, "warn", warnings.append)
+
+    await _build_and_run(
+        SimpleNamespace(
+            pipeline=None,
+            config=str(config_path),
+            profile=None,
+            environment=None,
+            max_records=None,
+            run_id=None,
+            dry_run=False,
+            plan=True,
+        )
+    )
+
+    assert warnings == [
+        (
+            f"Config '{config_path}' resolves 2 trusted Python import reference(s). "
+            "Review declarative configs like code: Agora imports these objects after "
+            "prepending your project root and src/ to sys.path."
+        )
+    ]
+    assert (
+        "item",
+        (
+            "imports",
+            ("source.records=fake.module:RECORDS, middlewares.0.enricher=fake.module:uppercase"),
+        ),
+    ) in printed

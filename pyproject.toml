@@ -10,17 +10,17 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tham Tra" }]
 requires-python = ">=3.11"
-keywords = ["etl", "pipeline", "async", "kafka", "data-engineering"]
+keywords = ["etl", "pipeline", "asyncio", "data-engineering", "plugin"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Framework :: AsyncIO",
     "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Database",
     "Typing :: Typed",
 ]
 dependencies = [
@@ -43,6 +43,7 @@ BugTracker = "https://github.com/thanhtham010891/agora-etl/issues"
 [project.optional-dependencies]
 file = [
     "pyarrow>=18.0,<20",
+    "orjson>=3.11,<4",
 ]
 dev = [
     "pytest==9.0.3",
@@ -52,6 +53,11 @@ dev = [
     "mypy==2.1.0",
     "hatch>=1.14,<2",
     "mkdocs>=1.6,<2",
+]
+benchmark = [
+    "agora-etl[file]",
+    "uvloop>=0.21,<1",
+    "pyinstrument>=5.0,<6",
 ]
 all = [
     "agora-etl[file]",

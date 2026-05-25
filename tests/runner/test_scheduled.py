@@ -353,3 +353,78 @@ class TestWorkerPool:
 
         with pytest.raises(RuntimeError, match="health exploded"):
             await pool.run()
+
+    async def test_worker_pool_repeated_run_does_not_duplicate_metrics_observers(self) -> None:
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="once_repeat",
+        )
+        pool = WorkerPool()
+        pool.register(scheduled)
+
+        await pool.run()
+        await pool.run()
+
+        stats = pool.metrics.get("once_repeat")
+        assert stats is not None
+        assert stats.total_runs == 2
+        assert stats.successful_runs == 2
+        assert len(scheduled._observers) == 1
+
+    async def test_worker_pool_repeated_run_does_not_duplicate_release_observers(self) -> None:
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.acquire_calls: list[tuple[str, int]] = []
+                self.release_calls: list[str] = []
+                self.start_calls = 0
+                self.stop_calls = 0
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+                self.start_calls += 1
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                self.acquire_calls.append((pipeline_id, run_number))
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                self.release_calls.append(pipeline_id)
+
+            async def list_workers(self):
+                return []
+
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        coordinator = FakeCoordinator()
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="once_coord",
+        )
+        pool = WorkerPool(coordinator=coordinator)
+        pool.register(scheduled)
+
+        await pool.run()
+        await pool.run()
+
+        assert coordinator.start_calls == 2
+        assert coordinator.stop_calls == 2
+        assert coordinator.acquire_calls == [("once_coord", 1), ("once_coord", 2)]
+        assert coordinator.release_calls == ["once_coord", "once_coord"]
+        assert len(scheduled._observers) == 2

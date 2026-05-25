@@ -113,6 +113,9 @@ private cluster networks, local development, and simple process supervision.
 For internet-facing deployments, put it behind a reverse proxy or service mesh
 that already handles TLS, rate limiting, and request filtering.
 
+Treat it as a private-network primitive. It is not intended to be a hardened
+public edge on its own, even when bearer auth is enabled.
+
 ## agora worker CLI
 
 The `agora worker` command loads a `WorkerPool` from a `worker.py` module in the project root:
@@ -146,3 +149,10 @@ Replay failed records through a pipeline:
 agora dlq replay --config pipelines.toml
 agora dlq replay --config pipelines.toml --stage sink_write --mode sink
 ```
+
+Replay modes have different semantics:
+
+- `--mode pipeline` replays the original payload when available and runs it through the middleware chain again.
+- `--mode sink` replays the processed payload and bypasses middlewares, which is only valid for `sink_write` DLQ records.
+- A DLQ record is acknowledged only after replay writes exactly one record successfully.
+- Failed or dropped replays remain in the DLQ for later inspection or retry.

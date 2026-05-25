@@ -6,7 +6,10 @@ Sinks receive processed records and persist them. The pipeline fans out to all r
 
 ### JsonLinesSink
 
-Write records as newline-delimited JSON (JSONL). Uses stdlib only.
+Write records as newline-delimited JSON (JSONL).
+
+Prefers `orjson` when available and falls back to stdlib `json`. The
+`agora-etl[file]` extra includes that faster path.
 
 ```python
 from agora.sinks.file.jsonlines import JsonLinesSink
@@ -23,6 +26,9 @@ sink = JsonLinesSink(
 ### CsvSink
 
 Write records as CSV. Uses stdlib only.
+
+`CsvSink` keeps its file handle and writer open for the sink lifecycle, so
+repeated flushes do not reopen the file on every batch.
 
 ```python
 from agora.sinks.file.csv import CsvSink
@@ -42,6 +48,10 @@ sink = CsvSink(
 Write records incrementally to a Parquet file via PyArrow.
 
 Requires: `pip install "agora-etl[file]"`
+
+The Parquet schema is inferred from the first written batch and then reused for
+later flushes. Missing fields in later rows are written as `null`. New columns
+introduced after the first batch are not added automatically.
 
 ```python
 from agora.sinks.file.parquet import ParquetSink

@@ -70,6 +70,8 @@ class CsvSink(BaseSink[T], Generic[T]):
         self._encoding = encoding
         self._buffer: list[T] = []
         self._header_written = False
+        self._file: Any | None = None
+        self._writer: Any | None = None
 
     async def write(self, record: T) -> None:
         self._buffer.append(record)
@@ -86,34 +88,42 @@ class CsvSink(BaseSink[T], Generic[T]):
             return
         batch = list(self._buffer)
         rows = [self._row_mapper(r) for r in batch]
-        write_header = not self._header_written and not (self._append and self._path.exists())
-        mode = "a" if (self._header_written or self._append) else "w"
-        await asyncio.to_thread(self._write_rows, rows, write_header, mode)
+        await asyncio.to_thread(self._write_rows, rows)
         del self._buffer[: len(batch)]
         self._header_written = True
         logger.debug("csv_sink_flush", path=str(self._path), count=len(rows))
 
-    def _write_rows(
-        self,
-        rows: list[dict[str, Any]],
-        write_header: bool,
-        mode: str,
-    ) -> None:
+    def _ensure_writer(self, rows: list[dict[str, Any]]) -> None:
+        if self._writer is not None:
+            return
+
         if not rows:
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fieldnames = self._fieldnames or list(rows[0].keys())
-        with open(self._path, mode, encoding=self._encoding, newline="") as f:
-            writer = _csv.DictWriter(
-                f,
-                fieldnames=fieldnames,
-                delimiter=self._delimiter,
-                extrasaction="ignore",
-            )
-            if write_header:
-                writer.writeheader()
-            writer.writerows(rows)
+        file_exists = self._path.exists()
+        mode = "a" if self._append else "w"
+        self._file = open(self._path, mode, encoding=self._encoding, newline="")  # noqa: SIM115
+        self._writer = _csv.DictWriter(
+            self._file,
+            fieldnames=fieldnames,
+            delimiter=self._delimiter,
+            extrasaction="ignore",
+        )
+        if not (self._append and file_exists):
+            self._writer.writeheader()
+
+    def _write_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._ensure_writer(rows)
+        if not rows or self._writer is None or self._file is None:
+            return
+        self._writer.writerows(rows)
+        self._file.flush()
 
     async def close(self) -> None:
         await self.flush()
+        if self._file is not None:
+            await asyncio.to_thread(self._file.close)
+            self._file = None
+            self._writer = None
         logger.info("csv_sink_closed", path=str(self._path))

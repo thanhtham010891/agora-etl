@@ -142,6 +142,35 @@ class _FastBatchCollectSink:
         pass
 
 
+class _SlowBatchCollectSink:
+    sink_name = "slow_batch_collect"
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.records: list[int] = []
+        self.batches: list[list[int]] = []
+
+    async def open(self) -> None:
+        pass
+
+    async def write(self, record: int) -> WriteResult:
+        self.records.append(record)
+        return WriteResult(written=True)
+
+    async def write_batch(self, records: list[int]) -> list[WriteResult]:
+        await asyncio.sleep(self.delay)
+        batch = list(records)
+        self.batches.append(batch)
+        self.records.extend(batch)
+        return [WriteResult(written=True) for _ in batch]
+
+    async def flush(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
 class _CheckpointedSequenceSource(BaseSource[int]):
     source_name = "checkpointed_sequence"
     supports_checkpoint = True
@@ -500,3 +529,27 @@ async def test_adaptive_backpressure_scales_down_when_checkpoint_persistence_is_
     assert summary.runtime.adaptive_backpressure_scale_down_count >= 1
     assert summary.runtime.buffered_stage_limit < 4
     assert summary.runtime.checkpoint_save_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_adaptive_backpressure_scales_down_when_writer_flush_is_slow() -> None:
+    summary = await (
+        Pipeline(IterableSource(list(range(12))))
+        .pipe(_InFlightTrackingMiddleware(min_concurrency=4))
+        .build(
+            _SlowBatchCollectSink(delay=0.01),  # type: ignore[arg-type]
+            batch_size=2,
+            backpressure=Backpressure.adaptive(
+                max_buffer_size=6,
+                writer_slow_ms=1.0,
+                checkpoint_slow_ms=100.0,
+            ),
+        )
+        .run()
+    )
+
+    assert summary.records_written == 12
+    assert summary.runtime.adaptive_backpressure_enabled is True
+    assert summary.runtime.adaptive_backpressure_scale_down_count >= 1
+    assert summary.runtime.buffered_stage_limit < 4
+    assert summary.runtime.writer_flush_count >= 1

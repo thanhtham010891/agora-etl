@@ -14,7 +14,7 @@ Core package only:
 pip install agora-etl
 ```
 
-With file extras for Parquet support:
+With file extras for Parquet support and faster JSONL paths:
 
 ```bash
 pip install "agora-etl[file]"

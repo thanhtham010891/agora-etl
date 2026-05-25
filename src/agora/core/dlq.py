@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -216,12 +217,13 @@ class SQLiteDLQSink(DLQSink):
     def __init__(self, path: str | Path = ".agora_dlq.db") -> None:
         self._path = str(path)
         self._conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.RLock()
 
     async def open(self) -> None:
         self._conn = await asyncio.to_thread(self._connect)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute(_CREATE_TABLE)
         _ensure_sqlite_columns(conn)
@@ -233,15 +235,18 @@ class SQLiteDLQSink(DLQSink):
         await asyncio.to_thread(self._insert, row)
 
     def _insert(self, row: dict[str, Any]) -> None:
-        if self._conn is None:
-            raise RuntimeError(f"{type(self).__name__} is not open — call open() before writing")
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(["?"] * len(row))
-        self._conn.execute(
-            f"INSERT INTO dlq_records ({cols}) VALUES ({placeholders})",
-            list(row.values()),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            if self._conn is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} is not open — call open() before writing"
+                )
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join(["?"] * len(row))
+            self._conn.execute(
+                f"INSERT INTO dlq_records ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+            self._conn.commit()
 
     async def replay(self, record: DLQRecord) -> DLQRecord:
         updated = await super().replay(record)
@@ -252,59 +257,70 @@ class SQLiteDLQSink(DLQSink):
         await asyncio.to_thread(self._delete, record)
 
     def _update_attempt(self, record: DLQRecord, new_attempt: int) -> None:
-        if self._conn is None:
-            raise RuntimeError(f"{type(self).__name__} is not open — call open() before writing")
-        if record._storage_id is not None:
-            self._conn.execute(
-                "UPDATE dlq_records SET attempt = ? WHERE id = ?",
-                (new_attempt, record._storage_id),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE dlq_records SET attempt = ? "
-                "WHERE id = (SELECT id FROM dlq_records "
-                "WHERE pipeline_id = ? AND run_id = ? AND stage = ? AND created_at = ? "
-                "ORDER BY id LIMIT 1)",
-                (
-                    new_attempt,
-                    record.pipeline_id,
-                    record.run_id,
-                    record.stage,
-                    record.created_at.isoformat(),
-                ),
-            )
-        self._conn.commit()
+        with self._conn_lock:
+            if self._conn is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} is not open — call open() before writing"
+                )
+            if record._storage_id is not None:
+                self._conn.execute(
+                    "UPDATE dlq_records SET attempt = ? WHERE id = ?",
+                    (new_attempt, record._storage_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE dlq_records SET attempt = ? "
+                    "WHERE id = (SELECT id FROM dlq_records "
+                    "WHERE pipeline_id = ? AND run_id = ? AND stage = ? AND created_at = ? "
+                    "ORDER BY id LIMIT 1)",
+                    (
+                        new_attempt,
+                        record.pipeline_id,
+                        record.run_id,
+                        record.stage,
+                        record.created_at.isoformat(),
+                    ),
+                )
+            self._conn.commit()
 
     def _delete(self, record: DLQRecord) -> None:
-        if self._conn is None:
-            raise RuntimeError(f"{type(self).__name__} is not open — call open() before writing")
-        if record._storage_id is not None:
-            self._conn.execute(
-                "DELETE FROM dlq_records WHERE id = ?",
-                (record._storage_id,),
-            )
-        else:
-            self._conn.execute(
-                "DELETE FROM dlq_records WHERE id = ("
-                "SELECT id FROM dlq_records "
-                "WHERE pipeline_id = ? AND run_id = ? AND stage = ? AND created_at = ? "
-                "ORDER BY id LIMIT 1)",
-                (
-                    record.pipeline_id,
-                    record.run_id,
-                    record.stage,
-                    record.created_at.isoformat(),
-                ),
-            )
-        self._conn.commit()
+        with self._conn_lock:
+            if self._conn is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} is not open — call open() before writing"
+                )
+            if record._storage_id is not None:
+                self._conn.execute(
+                    "DELETE FROM dlq_records WHERE id = ?",
+                    (record._storage_id,),
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM dlq_records WHERE id = ("
+                    "SELECT id FROM dlq_records "
+                    "WHERE pipeline_id = ? AND run_id = ? AND stage = ? AND created_at = ? "
+                    "ORDER BY id LIMIT 1)",
+                    (
+                        record.pipeline_id,
+                        record.run_id,
+                        record.stage,
+                        record.created_at.isoformat(),
+                    ),
+                )
+            self._conn.commit()
 
     async def flush(self) -> None:
         pass
 
     async def close(self) -> None:
         if self._conn is not None:
-            await asyncio.to_thread(self._conn.close)
-            self._conn = None
+            await asyncio.to_thread(self._close_conn)
+
+    def _close_conn(self) -> None:
+        with self._conn_lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
 
 class SQLiteDLQSource(DLQSource):
@@ -332,12 +348,13 @@ class SQLiteDLQSource(DLQSource):
         self._stage = stage
         self._limit = limit
         self._conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.RLock()
 
     async def open(self) -> None:
         self._conn = await asyncio.to_thread(self._connect)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute(_CREATE_TABLE)
         _ensure_sqlite_columns(conn)
@@ -346,8 +363,13 @@ class SQLiteDLQSource(DLQSource):
 
     async def close(self) -> None:
         if self._conn is not None:
-            await asyncio.to_thread(self._conn.close)
-            self._conn = None
+            await asyncio.to_thread(self._close_conn)
+
+    def _close_conn(self) -> None:
+        with self._conn_lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     async def _iter_records(self) -> AsyncGenerator[DLQRecord, None]:
         rows = await asyncio.to_thread(self._fetch_rows)
@@ -355,25 +377,28 @@ class SQLiteDLQSource(DLQSource):
             yield _row_to_record(row)
 
     def _fetch_rows(self) -> list[sqlite3.Row]:
-        if self._conn is None:
-            raise RuntimeError(f"{type(self).__name__} is not open — call open() before reading")
-        conditions: list[str] = []
-        params: list[Any] = []
-        if self._pipeline_id is not None:
-            conditions.append("pipeline_id = ?")
-            params.append(self._pipeline_id)
-        if self._stage is not None:
-            conditions.append("stage = ?")
-            params.append(self._stage)
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        # Use parameterized LIMIT to avoid SQL injection from non-integer input
-        if self._limit is not None:
-            limit_clause = "LIMIT ?"
-            params.append(self._limit)
-        else:
-            limit_clause = ""
-        sql = f"SELECT * FROM dlq_records {where} ORDER BY id ASC {limit_clause}"
-        return self._conn.execute(sql, params).fetchall()
+        with self._conn_lock:
+            if self._conn is None:
+                raise RuntimeError(
+                    f"{type(self).__name__} is not open — call open() before reading"
+                )
+            conditions: list[str] = []
+            params: list[Any] = []
+            if self._pipeline_id is not None:
+                conditions.append("pipeline_id = ?")
+                params.append(self._pipeline_id)
+            if self._stage is not None:
+                conditions.append("stage = ?")
+                params.append(self._stage)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            # Use parameterized LIMIT to avoid SQL injection from non-integer input
+            if self._limit is not None:
+                limit_clause = "LIMIT ?"
+                params.append(self._limit)
+            else:
+                limit_clause = ""
+            sql = f"SELECT * FROM dlq_records {where} ORDER BY id ASC {limit_clause}"
+            return self._conn.execute(sql, params).fetchall()
 
 
 __all__ = [
