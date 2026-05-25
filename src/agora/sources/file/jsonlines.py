@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import queue
 from pathlib import Path
+
+try:
+    import orjson as _json_lib
+except ImportError:
+    import json as _json_lib  # type: ignore[no-redef]
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import logstruct
@@ -21,7 +24,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 logger = logstruct.getLogger(__name__)
-_QUEUE_DONE = object()
 
 
 class JsonLinesSource(FileSource[T], Generic[T]):
@@ -37,10 +39,9 @@ class JsonLinesSource(FileSource[T], Generic[T]):
     encoding:
         File encoding (default: ``"utf-8"``).
     batch_size:
-        Number of lines transferred from the file thread to the async
-        runtime at a time (default: ``1000``).
+        Number of lines transferred per async iteration (default: ``1000``).
     queue_maxsize:
-        Maximum number of pending batches held in memory (default: ``2``).
+        Runtime prefetch depth for the async source queue (default: ``2``).
     """
 
     source_name = "jsonl"
@@ -58,7 +59,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         self._row_mapper = row_mapper
         self._encoding = encoding
         self._batch_size = max(batch_size, 1)
-        self._queue_maxsize = max(queue_maxsize, 1)
+        self.prefetch_limit = max(queue_maxsize, 1)
         self._on_record_error = on_record_error
         self._resume_line_number = 0
         self._last_line_number = 0
@@ -87,26 +88,45 @@ class JsonLinesSource(FileSource[T], Generic[T]):
     async def read_records(self) -> AsyncIterator[T]:
         self._record_error_count = 0
         self._record_drop_count = 0
-        batch_queue: queue.Queue[object] = queue.Queue(maxsize=self._queue_maxsize)
-        producer = asyncio.create_task(asyncio.to_thread(self._pump_lines, batch_queue))
 
+        def _open_file():
+            return open(self._path, encoding=self._encoding)
+
+        def _read_batch(file_obj, line_number: int) -> tuple[list[tuple[int, str, object]], int]:
+            batch: list[tuple[int, str, object]] = []
+            for line in file_obj:
+                line_number += 1
+                if line_number <= self._resume_line_number:
+                    continue
+                stripped = line.strip()
+                if not stripped:
+                    batch.append((line_number, stripped, None))
+                    continue
+                try:
+                    obj = _json_lib.loads(stripped)
+                except Exception as exc:
+                    batch.append((line_number, stripped, exc))
+                else:
+                    batch.append((line_number, stripped, obj))
+                if len(batch) >= self._batch_size:
+                    break
+            return batch, line_number
+
+        file_obj = await asyncio.to_thread(_open_file)
+        line_number = 0
         try:
             while True:
-                batch_lines = await asyncio.to_thread(batch_queue.get)
-                if batch_lines is _QUEUE_DONE:
+                batch, line_number = await asyncio.to_thread(_read_batch, file_obj, line_number)
+                if not batch:
                     break
-                if isinstance(batch_lines, Exception):
-                    raise batch_lines
-
-                assert isinstance(batch_lines, list)
-                for line_number, line in batch_lines:
-                    self._last_line_number = line_number
-                    line = line.strip()
+                for line_num, line, parsed in batch:
+                    self._last_line_number = line_num
                     if not line:
                         continue
                     try:
-                        obj = json.loads(line)
-                        record = self._row_mapper(obj)
+                        if isinstance(parsed, Exception):
+                            raise parsed
+                        record = self._row_mapper(parsed)
                         if record is not None:
                             yield record
                         else:
@@ -124,24 +144,4 @@ class JsonLinesSource(FileSource[T], Generic[T]):
                             source=self.source_name,
                         ) from exc
         finally:
-            await producer
-
-    def _pump_lines(self, batch_queue: queue.Queue[object]) -> None:
-        pending_lines: list[tuple[int, str]] = []
-
-        try:
-            with self._path.open(encoding=self._encoding) as file_obj:
-                for line_number, line in enumerate(file_obj, start=1):
-                    if line_number <= self._resume_line_number:
-                        continue
-                    pending_lines.append((line_number, line))
-                    if len(pending_lines) >= self._batch_size:
-                        batch_queue.put(pending_lines)
-                        pending_lines = []
-
-                if pending_lines:
-                    batch_queue.put(pending_lines)
-        except Exception as exc:
-            batch_queue.put(exc)
-        finally:
-            batch_queue.put(_QUEUE_DONE)
+            await asyncio.to_thread(file_obj.close)

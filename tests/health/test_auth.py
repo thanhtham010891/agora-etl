@@ -55,6 +55,17 @@ def _body(response: str) -> str:
     return response[sep + 4 :] if sep != -1 else ""
 
 
+def _headers(response: str) -> dict[str, str]:
+    lines = response.split("\r\n")
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if not line:
+            break
+        key, _sep, value = line.partition(":")
+        headers[key.lower()] = value.strip()
+    return headers
+
+
 # ------------------------------------------------------------------ #
 # 401 on missing Authorization header                                  #
 # ------------------------------------------------------------------ #
@@ -72,6 +83,10 @@ async def test_401_on_missing_auth_header_health() -> None:
         assert "401" in _status_line(response), (
             f"Expected 401 for missing auth header, got: {_status_line(response)!r}"
         )
+        headers = _headers(response)
+        assert headers["www-authenticate"] == 'Bearer realm="agora-health"'
+        assert headers["cache-control"] == "no-store"
+        assert headers["x-content-type-options"] == "nosniff"
         body = json.loads(_body(response))
         assert body == {"error": "Unauthorized"}, f"Unexpected body: {body}"
     finally:
@@ -188,6 +203,9 @@ async def test_200_on_correct_bearer_token_health() -> None:
         assert "200" in _status_line(response), (
             f"Expected 200 for correct Bearer token, got: {_status_line(response)!r}"
         )
+        headers = _headers(response)
+        assert headers["cache-control"] == "no-store"
+        assert headers["x-content-type-options"] == "nosniff"
         body = json.loads(_body(response))
         assert "status" in body, f"Health payload missing 'status': {body}"
         assert "pipelines" in body, f"Health payload missing 'pipelines': {body}"

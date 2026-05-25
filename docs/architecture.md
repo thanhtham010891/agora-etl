@@ -49,6 +49,18 @@ Buffered execution preserves output order, but it is not "fire and forget".
 If a fail-closed sink error or run cancellation occurs, Agora aborts pending
 buffered work instead of continuing to commit later records out of order.
 
+## Runtime guarantees
+
+Agora intentionally makes a small number of core guarantees:
+
+- linear execution commits records in source order
+- buffered execution may process concurrently, but commits downstream writes in source order
+- fail-closed sink or checkpoint failures stop the run instead of silently advancing later records
+- source checkpoints advance only through records that were successfully handled under the active failure policy
+- DLQ replay acknowledges a record only after replay produces one successful write
+
+These guarantees are the behaviors preservation tests are meant to lock down.
+
 ## Backpressure
 
 When `backpressure=Backpressure.adaptive(...)` is set, the runtime monitors writer flush latency and checkpoint save latency to dynamically scale the in-flight record limit up or down. This prevents fast sources from overwhelming slow sinks.
@@ -58,6 +70,10 @@ Fixed backpressure is also available:
 ```python
 Backpressure.fixed(max_buffer_size=200)
 ```
+
+Adaptive backpressure is a tuning mechanism, not a delivery guarantee. It may
+raise or lower concurrency as writer flush latency and checkpoint latency
+change, but it does not relax the ordering and fail-closed rules above.
 
 ## Dead-letter queue
 
@@ -70,6 +86,13 @@ When a record fails (middleware error, sink error), the runtime writes a `DLQRec
 - the source checkpoint at the time of failure
 
 Failed records can be replayed via `agora dlq replay`.
+
+Replay semantics are intentionally narrow:
+
+- `pipeline` replay re-enters the middleware chain from the original payload when one is available
+- `sink` replay bypasses middleware and re-drives only the sink writer path from the processed payload
+- records are acknowledged only after replay produces one successful write
+- records that fail replay or are dropped during replay remain in the DLQ
 
 ## Checkpointing
 
@@ -84,6 +107,19 @@ Built-in checkpointable sources: `CsvSource`, `ParquetSource`, `JsonLinesSource`
 Sources that do not explicitly opt into checkpoint support still run normally,
 but Agora does not advertise resume behavior for them and does not touch the
 checkpoint store on their behalf.
+
+Checkpoint persistence is fail-closed by default. If a checkpoint save fails,
+the run raises unless `checkpoint_failure_policy=LOG_AND_CONTINUE` is set
+explicitly.
+
+## Non-guarantees
+
+Agora does not claim a few stronger properties that depend on external systems:
+
+- exactly-once delivery across arbitrary sinks
+- transactional coupling between sink writes and external checkpoint stores
+- safe execution of untrusted declarative configs
+- public-edge hardening for the built-in health server
 
 ## Plugin system
 

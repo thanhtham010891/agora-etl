@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from agora.core.errors import ConfigError
 
@@ -117,6 +117,12 @@ class PipelineConfig(BaseModel):
             raise ValueError("Pipeline ID cannot be empty.")
         return value
 
+    @model_validator(mode="after")
+    def _validate_required_runtime_sections(self) -> PipelineConfig:
+        if not self.sinks:
+            raise ValueError("At least one sink must be defined.")
+        return self
+
 
 class ConfigDefaults(BaseModel):
     """Default selectors used when CLI flags are omitted."""
@@ -177,6 +183,7 @@ class ResolvedPipelineConfig:
 
 def validate_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize one pipeline config dictionary."""
+    _ensure_pipeline_has_sinks(config)
     try:
         validated = PipelineConfig.model_validate(config)
     except ValidationError as exc:
@@ -253,7 +260,9 @@ def resolve_config_document(
 
 def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
     """Return a compact plan-friendly summary for a validated pipeline config."""
+    _ensure_pipeline_has_sinks(config)
     validated = PipelineConfig.model_validate(config)
+    import_refs = collect_import_references(validated.model_dump(mode="python", by_alias=True))
 
     dedup = None
     if validated.dedup is not None:
@@ -288,10 +297,6 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
             "service_name": service_name,
         }
 
-    sinks = [sink.type for sink in validated.sinks]
-    if not sinks:
-        sinks = ["stdout (implicit)"]
-
     return {
         "pipeline_id": validated.pipeline_id,
         "source": validated.source.type,
@@ -299,8 +304,35 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "dedup": dedup,
         "dlq": dlq,
         "tracing": tracing,
-        "sinks": sinks,
+        "sinks": [sink.type for sink in validated.sinks],
+        "import_refs": import_refs,
     }
+
+
+def collect_import_references(config: Any, *, path: str = "") -> list[str]:
+    """Return every declarative import reference found in *config*.
+
+    Each result is formatted as ``path=module:attribute`` so callers can
+    surface the trust boundary clearly in CLI output.
+    """
+    refs: list[str] = []
+
+    if isinstance(config, list):
+        for index, item in enumerate(config):
+            child_path = f"{path}.{index}" if path else str(index)
+            refs.extend(collect_import_references(item, path=child_path))
+        return refs
+
+    if isinstance(config, dict):
+        if set(config.keys()) == {"import"}:
+            import_path = config.get("import")
+            if isinstance(import_path, str):
+                refs.append(f"{path or '<root>'}={import_path}")
+            return refs
+        for key, item in config.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            refs.extend(collect_import_references(item, path=child_path))
+    return refs
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -366,6 +398,13 @@ def _describe_config_value(value: Any) -> str:
     if isinstance(value, ImportRefConfig):
         return value.import_path
     return str(value)
+
+
+def _ensure_pipeline_has_sinks(config: dict[str, Any]) -> None:
+    sinks = config.get("sinks")
+    if isinstance(sinks, list) and sinks:
+        return
+    raise ConfigError("Invalid pipeline:\n  - sinks: At least one sink must be defined.")
 
 
 def _format_validation_error(label: str, exc: ValidationError) -> str:

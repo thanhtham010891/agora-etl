@@ -317,18 +317,42 @@ class MiddlewareChain(Generic[T, U]):
                 await drain_pending(ctx)
 
     async def start_all(self, ctx: PipelineContext) -> None:
-        for m in self._middlewares:
-            await m.on_start(ctx)
+        started: list[Any] = []
+        for middleware in self._middlewares:
+            try:
+                await middleware.on_start(ctx)
+            except Exception:
+                await self._rollback_started_middlewares(ctx, middleware, started)
+                raise
+            started.append(middleware)
 
     async def stop_all(self, ctx: PipelineContext) -> None:
         for m in reversed(self._middlewares):
             await m.on_stop(ctx)
+
+    async def _rollback_started_middlewares(
+        self,
+        ctx: PipelineContext,
+        failing: Any,
+        started: list[Any],
+    ) -> None:
+        for middleware in [failing, *reversed(started)]:
+            try:
+                await middleware.on_stop(ctx)
+            except Exception as exc:
+                ctx.log.exception(
+                    "middleware_start_rollback_error",
+                    middleware=getattr(middleware, "name", type(middleware).__name__),
+                    error=str(exc),
+                )
 
     def middleware_count(self) -> int:
         return len(self._middlewares)
 
     async def process(self, record: Any, ctx: PipelineContext) -> MiddlewareProcessResult:
         """Run record through the chain and return a structured outcome."""
+        if not self._middlewares:
+            return MiddlewareProcessResult(value=record)
         return await self.process_range(0, len(self._middlewares), record, ctx)
 
     async def process_range(

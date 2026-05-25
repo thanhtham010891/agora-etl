@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from agora.config import (
+    collect_import_references,
     describe_pipeline_config,
     resolve_config_document,
     validate_config_document,
@@ -34,6 +35,7 @@ def test_validate_pipeline_config_reports_component_type_errors() -> None:
         validate_pipeline_config(
             {
                 "source": {"type": "iterable", "records": [1]},
+                "sinks": [{"type": "stdout"}],
                 "middlewares": [{}],
             }
         )
@@ -95,6 +97,7 @@ def test_validate_pipeline_config_allows_implicit_builtin_dlq_sink() -> None:
     validated = validate_pipeline_config(
         {
             "source": {"type": "iterable", "records": [1]},
+            "sinks": [{"type": "stdout"}],
             "dlq": {"enabled": True},
         }
     )
@@ -107,11 +110,21 @@ def test_validate_pipeline_config_includes_tracing_defaults() -> None:
         {
             "pipeline_id": "traced",
             "source": {"type": "iterable", "records": [1]},
+            "sinks": [{"type": "stdout"}],
             "tracing": {"enabled": True},
         }
     )
 
     assert validated["tracing"] == {"enabled": True, "backend": "opentelemetry"}
+
+
+def test_validate_pipeline_config_requires_at_least_one_sink() -> None:
+    with pytest.raises(ConfigError, match=r"sinks: At least one sink must be defined\."):
+        validate_pipeline_config(
+            {
+                "source": {"type": "iterable", "records": [1]},
+            }
+        )
 
 
 def test_resolve_config_document_rejects_unknown_environment() -> None:
@@ -130,23 +143,14 @@ def test_resolve_config_document_rejects_unknown_environment() -> None:
         )
 
 
-def test_describe_pipeline_config_infers_implicit_stdout_sink() -> None:
-    plan = describe_pipeline_config(
-        {
-            "pipeline_id": "implicit-sink",
-            "source": {"type": "iterable", "records": [1]},
-        }
-    )
-
-    assert plan == {
-        "pipeline_id": "implicit-sink",
-        "source": "iterable",
-        "middlewares": [],
-        "dedup": None,
-        "dlq": None,
-        "tracing": None,
-        "sinks": ["stdout (implicit)"],
-    }
+def test_describe_pipeline_config_requires_at_least_one_sink() -> None:
+    with pytest.raises(ConfigError, match=r"sinks: At least one sink must be defined\."):
+        describe_pipeline_config(
+            {
+                "pipeline_id": "implicit-sink",
+                "source": {"type": "iterable", "records": [1]},
+            }
+        )
 
 
 def test_describe_pipeline_config_includes_dlq_summary() -> None:
@@ -219,3 +223,50 @@ def test_describe_pipeline_config_marks_implicit_builtin_dlq_sink() -> None:
         "failure_policy": "log_only",
         "sink": "sqlite_dlq (implicit)",
     }
+
+
+def test_collect_import_references_reports_nested_paths() -> None:
+    refs = collect_import_references(
+        {
+            "source": {
+                "type": "iterable",
+                "records": {"import": "fake.module:RECORDS"},
+            },
+            "middlewares": [
+                {
+                    "type": "enrich",
+                    "enricher": {"import": "fake.module:uppercase"},
+                }
+            ],
+            "sinks": [{"type": "stdout"}],
+        }
+    )
+
+    assert refs == [
+        "source.records=fake.module:RECORDS",
+        "middlewares.0.enricher=fake.module:uppercase",
+    ]
+
+
+def test_describe_pipeline_config_includes_import_refs() -> None:
+    plan = describe_pipeline_config(
+        {
+            "pipeline_id": "imported",
+            "source": {
+                "type": "iterable",
+                "records": {"import": "fake.module:RECORDS"},
+            },
+            "middlewares": [
+                {
+                    "type": "enrich",
+                    "enricher": {"import": "fake.module:uppercase"},
+                }
+            ],
+            "sinks": [{"type": "stdout"}],
+        }
+    )
+
+    assert plan["import_refs"] == [
+        "source.records=fake.module:RECORDS",
+        "middlewares.0.enricher=fake.module:uppercase",
+    ]

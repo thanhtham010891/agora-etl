@@ -407,6 +407,75 @@ async def test_buffered_pipeline_cancellation_cancels_pending_tasks_and_preserve
 
 
 @pytest.mark.asyncio
+async def test_buffered_pipeline_drain_failure_cancels_pending_tasks() -> None:
+    events: list[str] = []
+
+    class FailingDrainBufferedMiddleware(Middleware[int, int]):
+        name = "failing_drain_buffered"
+
+        def __init__(self, expected_records: int) -> None:
+            self.min_concurrency = expected_records
+            self._expected_records = expected_records
+            self._started = 0
+            self._release = asyncio.Event()
+            self.cancelled: list[int] = []
+            self.all_started = asyncio.Event()
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+        async def submit(self, record: int, ctx) -> asyncio.Task[int]:
+            del ctx
+            self._started += 1
+            if self._started >= self._expected_records:
+                self.all_started.set()
+
+            async def _resolve() -> int:
+                try:
+                    await self._release.wait()
+                    return record
+                except asyncio.CancelledError:
+                    self.cancelled.append(record)
+                    raise
+
+            return asyncio.create_task(_resolve())
+
+        async def drain_pending(self, ctx) -> None:
+            del ctx
+            await asyncio.sleep(0)
+            raise RuntimeError("drain broke")
+
+    class TrackingSink:
+        sink_name = "tracking"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+
+    middleware = FailingDrainBufferedMiddleware(expected_records=3)
+
+    with pytest.raises(RuntimeError, match="drain broke"):
+        await (
+            Pipeline(IterableSource([1, 2]))
+            .pipe(middleware)
+            .build(TrackingSink())  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert sorted(middleware.cancelled) == [1, 2]
+    assert events == ["sink.open", "sink.flush", "sink.close"]
+
+
+@pytest.mark.asyncio
 async def test_writer_batch_size_uses_sink_batch_path_and_flushes_tail() -> None:
     sink = BatchCollectSink()
 
@@ -439,7 +508,8 @@ async def test_buffered_stage_runtime_metrics_capture_in_flight_pressure():
     assert summary.records_written == 4
     assert summary.runtime.buffered_stage_limit == 2
     assert summary.runtime.buffered_stage_max_in_flight == 2
-    assert summary.runtime.buffered_stage_drain_count == 3
+    # Ready buffered tasks are now drained in groups instead of one-by-one.
+    assert summary.runtime.buffered_stage_drain_count == 2
 
 
 @pytest.mark.asyncio
@@ -669,6 +739,58 @@ async def test_sink_open_failure_still_stops_started_middlewares() -> None:
         )
 
     assert events == ["middleware.start", "sink.open", "middleware.stop"]
+
+
+@pytest.mark.asyncio
+async def test_middleware_start_failure_rolls_back_started_middlewares() -> None:
+    events: list[str] = []
+
+    class TrackingMiddleware(Middleware[int, int]):
+        name = "tracking"
+
+        async def on_start(self, ctx) -> None:
+            del ctx
+            events.append("tracking.start")
+
+        async def on_stop(self, ctx) -> None:
+            del ctx
+            events.append("tracking.stop")
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    class FailingStartMiddleware(Middleware[int, int]):
+        name = "failing_start"
+
+        async def on_start(self, ctx) -> None:
+            del ctx
+            events.append("failing.start")
+            raise RuntimeError("middleware start broke")
+
+        async def on_stop(self, ctx) -> None:
+            del ctx
+            events.append("failing.stop")
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    with pytest.raises(RuntimeError, match="middleware start broke"):
+        await (
+            Pipeline(IterableSource([1]))
+            .pipe(TrackingMiddleware())
+            .pipe(FailingStartMiddleware())
+            .build(CollectSink())  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert events == [
+        "tracking.start",
+        "failing.start",
+        "failing.stop",
+        "tracking.stop",
+    ]
 
 
 @pytest.mark.asyncio

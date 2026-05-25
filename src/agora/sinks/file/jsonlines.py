@@ -3,15 +3,23 @@ agora/sinks/file/jsonlines.py
 =============================
 ``JsonLinesSink`` — write records as newline-delimited JSON.
 
-Uses stdlib only (no new dependencies).
+Prefers ``orjson`` when available and falls back to stdlib ``json``.
 Buffered async disk I/O via ``asyncio.to_thread()``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
+
+try:
+    import orjson as _json_lib
+
+    _ORJSON = True
+except ImportError:
+    import json as _json_lib  # type: ignore[no-redef]
+
+    _ORJSON = False
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
@@ -32,6 +40,11 @@ def _default_serializer(record: Any) -> Any:
     if hasattr(record, "__dict__"):
         return record.__dict__
     return record
+
+
+def _stringify_unknown(value: Any) -> str:
+    """Preserve the historical ``default=str`` contract for unknown values."""
+    return str(value)
 
 
 class JsonLinesSink(BaseSink[T], Generic[T]):
@@ -67,10 +80,16 @@ class JsonLinesSink(BaseSink[T], Generic[T]):
         self._path = Path(path)
         self._serializer = serializer or _default_serializer
         self._initial_mode = "a" if append else "w"
-        self._current_mode = self._initial_mode
         self._flush_every = flush_every
         self._encoding = encoding
         self._buffer: list[T] = []
+        self._file = None
+
+    async def open(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = await asyncio.to_thread(
+            open, self._path, self._initial_mode, -1, self._encoding
+        )
 
     async def write(self, record: T) -> None:
         self._buffer.append(record)
@@ -85,20 +104,50 @@ class JsonLinesSink(BaseSink[T], Generic[T]):
     async def flush(self) -> None:
         if not self._buffer:
             return
+        if self._file is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = await asyncio.to_thread(
+                open, self._path, self._initial_mode, -1, self._encoding
+            )
         rows = list(self._buffer)
-        mode = self._current_mode
-        await asyncio.to_thread(self._write_rows, rows, mode)
+        try:
+            await asyncio.to_thread(self._write_rows, rows)
+        except Exception:
+            # Restore buffer so caller can retry or inspect failed records
+            self._buffer = rows + self._buffer[len(rows) :]
+            raise
         del self._buffer[: len(rows)]
-        self._current_mode = "a"
         logger.debug("jsonl_sink_flush", path=str(self._path), count=len(rows))
 
-    def _write_rows(self, rows: list[T], mode: str) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, mode, encoding=self._encoding) as f:
-            for record in rows:
-                obj = self._serializer(record)
-                f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+    def _write_rows(self, rows: list[T]) -> None:
+        # Batch all rows into a single string — one write syscall per flush
+        if _ORJSON:
+            chunk = (
+                b"\n".join(
+                    _json_lib.dumps(
+                        self._serializer(r),
+                        option=_json_lib.OPT_NON_STR_KEYS,
+                        default=_stringify_unknown,
+                    )
+                    for r in rows
+                )
+                + b"\n"
+            )
+            self._file.write(chunk.decode("utf-8"))
+        else:
+            chunk = (
+                "\n".join(
+                    _json_lib.dumps(self._serializer(r), ensure_ascii=False, default=str)
+                    for r in rows
+                )
+                + "\n"
+            )
+            self._file.write(chunk)
+        self._file.flush()
 
     async def close(self) -> None:
         await self.flush()
+        if self._file is not None:
+            await asyncio.to_thread(self._file.close)
+            self._file = None
         logger.info("jsonl_sink_closed", path=str(self._path))

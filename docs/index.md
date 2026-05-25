@@ -26,7 +26,11 @@ It is designed for teams that want a lightweight Python-native runtime for inges
 - New to Agora: [Getting Started](getting-started.md)
 - Want to run pipelines from TOML: [Configuration](configuration.md)
 - Need command-line workflows: [CLI Reference](cli.md)
+- Need repeatable local performance checks: [Benchmark](benchmark/index.md)
+- Want the latest benchmark report table: [Benchmark Matrix](benchmark/matrix.md)
 - Planning production workers: [Runner](runner.md)
+- Tracking the next core release: [Release Plan 0.1.4](release-0.1.4.md)
+- Browsing release history: [Change Log](change-log/index.md)
 
 ## Reference guides
 

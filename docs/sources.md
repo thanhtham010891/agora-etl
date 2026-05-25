@@ -23,6 +23,9 @@ Do not assume every source or plugin source is resumable unless its docs say so.
 
 Stream records from a JSONL (newline-delimited JSON) file.
 
+Uses stdlib `json` by default and automatically switches to `orjson` when that
+dependency is available through the `agora-etl[file]` extra.
+
 ```python
 from agora.sources.file.jsonlines import JsonLinesSource
 from agora.core.types import SourceRecordFailurePolicy
@@ -77,6 +80,9 @@ source = ParquetSource(
 ```
 
 Supports checkpointing by row number.
+
+`ParquetSource` still exposes row-oriented dictionaries to `row_mapper`, even
+though the underlying file is read in PyArrow batches.
 
 ### HTTPSource
 

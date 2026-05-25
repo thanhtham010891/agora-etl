@@ -207,6 +207,12 @@ class SinkFanOut(Generic[T]):
         self._sinks = sinks
         self._concurrent_writes = concurrent_writes
         self._max_concurrency = max_concurrency
+        # Cache per-sink capabilities — never changes after construction.
+        self._sink_capabilities = [sink_capabilities(s) for s in sinks]
+        self._sink_batch_writable = [
+            cap.batch_writable_native and isinstance(s, BatchWritable)
+            for s, cap in zip(sinks, self._sink_capabilities, strict=True)
+        ]
 
     def with_concurrency(self, max_concurrency: int | None = None) -> SinkFanOut[T]:
         """Return a copy with opt-in concurrent sink writes enabled."""
@@ -253,10 +259,12 @@ class SinkFanOut(Generic[T]):
         self,
         sink: BaseSink[T],
         records: list[T],
+        *,
+        batch_writable: bool,
+        capabilities: SinkCapabilities,
     ) -> object:
-        capabilities = sink_capabilities(sink)
-        if capabilities.batch_writable_native and isinstance(sink, BatchWritable):
-            await sink.write_batch(records)
+        if batch_writable:
+            await sink.write_batch(records)  # type: ignore[attr-defined]
             return None
 
         if (
@@ -327,8 +335,15 @@ class SinkFanOut(Generic[T]):
         written_flags = [False] * len(records)
         errors_by_record: list[list[Exception]] = [[] for _ in records]
         sink_calls: list[tuple[BaseSink[T], Awaitable[object]]] = []
-        for sink in self._sinks:
-            sink_calls.append((sink, self._write_batch_to_sink(sink, records)))
+        for sink, cap, bw in zip(
+            self._sinks, self._sink_capabilities, self._sink_batch_writable, strict=True
+        ):
+            sink_calls.append(
+                (
+                    sink,
+                    self._write_batch_to_sink(sink, records, batch_writable=bw, capabilities=cap),
+                )
+            )
 
         if not self._concurrent_writes:
             results: list[object] = []
