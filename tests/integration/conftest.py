@@ -54,7 +54,7 @@ def unique_suffix() -> str:
 def kafka_bootstrap() -> str:
     pytest.importorskip("agora_plugins.kafka")
     _require_integration_enabled()
-    bootstrap = os.getenv("AGORA_TEST_KAFKA_BOOTSTRAP", "127.0.0.1:9092")
+    bootstrap = os.getenv("AGORA_TEST_KAFKA_BOOTSTRAP", "127.0.0.1:19092")
     host, port = bootstrap.rsplit(":", 1)
     _wait_for_tcp_endpoint(host, int(port))
     return bootstrap

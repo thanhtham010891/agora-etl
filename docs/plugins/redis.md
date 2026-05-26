@@ -28,11 +28,16 @@ It is built for Redis Streams consumer-group workflows:
 - reads with consumer groups
 - keeps checkpoints based on Redis stream message IDs
 - can acknowledge on success
+- can batch success acknowledgements
 - can reclaim stale pending messages with idle-time thresholds
 - can fail closed or log-and-continue on deserialize errors
 
 Use it when records already land in Redis Streams and you want Agora to process
 them as a resumable pipeline.
+
+If your deserializer prefers raw bytes instead of decoded strings, set
+`decode_responses=False` and deserialize directly from the Redis payload shape
+you expect.
 
 ### Redis sink
 
@@ -50,6 +55,9 @@ Practical rule:
 - use `xadd` when you want Redis to remain an event bus
 - use list modes for simple queue-like fan-out
 
+For TTL-free `set` batches, Redis can use the multi-key path instead of issuing
+one write command per record.
+
 ### Redis DLQ
 
 `RedisDLQSink` and `RedisDLQSource` let you keep dead-letter records in Redis
@@ -61,12 +69,19 @@ This is useful when:
 - more than one operator may need to inspect or replay failures
 - replay should happen from a shared backend instead of a local SQLite file
 
+The replay side is meant for operational filtering and bounded reads, not only
+for dumping the entire DLQ into memory at once.
+
 ### Redis state backend
 
 `RedisBackend` gives Agora a shared key-value state store with TTL support.
 
 Use it when state must survive beyond one process, or when more than one worker
 needs to observe the same pipeline state.
+
+TTL-backed keys are handled with short-lived runtime state in mind, so expiry
+behavior stays close to the requested timestamp instead of drifting to coarse
+whole-second rounding.
 
 ### Redis dedup stores
 
@@ -78,6 +93,10 @@ The Redis family ships two different dedup backends:
 The semantic store is intentionally small-scale. It performs an O(N) scan over
 stored embeddings and is meant for modest datasets, not as a replacement for a
 real vector database.
+
+It now scans incrementally rather than assuming the full embedding index should
+be pulled into memory at once, but the architectural boundary is still the
+same: this is a pragmatic small-scale dedup helper, not a vector search system.
 
 ### Redis AI cache
 
@@ -111,6 +130,7 @@ source = RedisStreamSource(
     consumer="worker-1",
     deserializer=deserialize,
     ack_on_success=True,
+    ack_batch_size=200,
     reclaim_idle_ms=60_000,
 )
 
@@ -129,6 +149,7 @@ What this shows:
 
 - `RedisStreamSource` is the event-ingestion edge
 - checkpoints are based on stream message IDs
+- acknowledgements can be flushed in batches instead of one message at a time
 - `RedisSink` in `set` mode is good for lightweight derived state
 - TTL is only applied on `set`, not on list or stream modes
 

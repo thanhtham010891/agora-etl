@@ -30,6 +30,9 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_check
 
 from agora.core.writer import WriteResult
 
+# Singleton reused for every successfully written record in the fast path.
+_WRITE_OK = WriteResult(written=True, errors=[])
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from types import TracebackType
@@ -331,6 +334,16 @@ class SinkFanOut(Generic[T]):
         """Write *records* to all sinks, returning per-record outcomes."""
         if not records:
             return []
+
+        # Fast path: single batch-writable sink — skip fanout overhead entirely.
+        if len(self._sinks) == 1 and self._sink_batch_writable[0]:
+            try:
+                await self._sinks[0].write_batch(records)  # type: ignore[attr-defined]
+                n = len(records)
+                return [_WRITE_OK] * n
+            except Exception as exc:
+                err = WriteResult(written=False, errors=[exc])
+                return [err] * len(records)
 
         written_flags = [False] * len(records)
         errors_by_record: list[list[Exception]] = [[] for _ in records]

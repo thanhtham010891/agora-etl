@@ -5,7 +5,7 @@ Integration tests for Kafka plugin (`agora_plugins.kafka`).
 
 Requires:
 - ``AGORA_RUN_INTEGRATION=1`` environment variable
-- Kafka broker reachable at ``127.0.0.1:9092``
+- Kafka broker reachable at ``127.0.0.1:19092``
 - ``agora-etl-kafka`` plugin installed (`pip install "agora-etl-plugins[kafka]"`)
 
 Run with::

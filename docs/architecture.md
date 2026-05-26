@@ -149,6 +149,10 @@ The runtime emits spans for each pipeline stage. Three tracers are available:
 | `InMemoryTracer` | Stores spans in memory — useful for testing |
 | `OpenTelemetryTracer` | Exports to any OTLP-compatible backend |
 
+When `NoopTracer` is active, Agora skips the extra attribute-normalization path
+used for real span exporters. This keeps the default tracing path inexpensive
+for pipelines that are not collecting spans.
+
 ## State backends
 
 Checkpoints, DLQ records, and the HTTP response cache all use the same `StateBackend` abstraction:

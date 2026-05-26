@@ -98,11 +98,16 @@ class PipelineContext:
     def trace_span(self, name: str, **attributes: Any) -> _PipelineSpanScope:
         """Create a nested tracing span scoped to a block of pipeline work."""
         parent = self.current_span()
-        span = self.tracer.start_span(
-            name,
-            attributes={key: _normalize_trace_value(value) for key, value in attributes.items()},
-            parent=parent,
-        )
+        if isinstance(self.tracer, NoopTracer):
+            span = self.tracer.start_span(name)
+        else:
+            span = self.tracer.start_span(
+                name,
+                attributes={
+                    key: _normalize_trace_value(value) for key, value in attributes.items()
+                },
+                parent=parent,
+            )
         return _PipelineSpanScope(self, span)
 
 

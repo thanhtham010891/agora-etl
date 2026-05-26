@@ -45,6 +45,9 @@ That last point matters:
 - fail-safe is safer for correctness
 - fallback-to-local is more permissive but can allow duplicate runs
 
+For community-facing deployments, treat `fallback_to_local` as an explicit
+tradeoff, not a harmless convenience switch.
+
 ## Sample
 
 This example shows two important moments: starting the coordinator for a worker

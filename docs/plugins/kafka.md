@@ -30,6 +30,9 @@ It supports:
 - configurable commit cadence
 - fail-closed or log-and-continue deserialize error handling
 
+Startup and shutdown paths are cleanup-aware, so failed startup or final commit
+problems do not silently skip consumer teardown.
+
 Use it when Agora should sit directly on top of a Kafka consumer flow instead
 of polling an API or reading files.
 
@@ -48,6 +51,16 @@ It is built around a few strong defaults:
 That makes it a good fit for pipelines where delivery discipline matters more
 than chasing the absolute loosest producer settings.
 
+If producer startup fails, serializer lifecycle is rolled back instead of being
+left half-open, and the producer object is cleaned up best-effort as well.
+
+Batch writes also stay on a leaner success path, so synchronous serializers do
+not pay extra coroutine/inspection churn on every record in a healthy producer
+run.
+
+Async callable serializers are also supported, including serializer objects
+that expose `open()` and `close()` lifecycle hooks.
+
 ### Schema registry helpers
 
 The Kafka family also ships Confluent-compatible schema registry helpers.
@@ -63,6 +76,9 @@ Use these when:
 - topics are schema-managed
 - different services need the same payload contract
 - you want registry-backed Avro without adding another integration layer
+
+Registry subjects are treated as path segments rather than raw URL fragments, so
+names that include characters like `/` stay safe and unambiguous.
 
 ## Sample
 

@@ -135,6 +135,10 @@ Override `write_batch()` for bulk inserts:
 
 Set `batch_writable_native = True` on the class to tell the runtime to prefer `write_batch()` over individual `write()` calls.
 
+For a single sink, Agora also takes a direct fast path when the sink advertises
+native batch writes. That avoids extra fan-out bookkeeping in the common
+single-destination case.
+
 ## Fan-out
 
 Write each record to multiple sinks:

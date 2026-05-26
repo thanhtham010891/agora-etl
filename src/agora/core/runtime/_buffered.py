@@ -22,7 +22,6 @@ from agora.core.runtime._delivery import (
 from agora.core.source import (
     DeliveryHookSource,
     prefetch_limit_for,
-    source_delivery_success_callback,
     source_runtime_metrics,
 )
 
@@ -284,13 +283,16 @@ class ExecutionCoordinator:
     async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
         prefetch_limit = prefetch_limit_for(self.source)
         checkpoint_capable = is_checkpoint_capable(self.source)
+        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
 
         if prefetch_limit <= 0:
             async for record in self.source.stream():
                 yield SourceRecord(
                     raw=record,
                     checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
-                    on_success=source_delivery_success_callback(self.source),
+                    on_success=self.source.delivery_success_callback()
+                    if has_delivery_hook
+                    else None,
                 )
             return
 
@@ -320,14 +322,18 @@ class ExecutionCoordinator:
         state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
         source_error: Exception | None = None
 
-        # Cache branch decision — writer_batch_size never changes mid-run.
+        # Cache branch decisions — never change mid-run.
         _use_batching = self.writer_batch_size > 1
         _batch_size = self.writer_batch_size
+        _max_records = max_records
+        _has_max = max_records is not None
+        _source_name = self.source.source_name
+        _metrics = ctx.metrics
 
         try:
             async for source_record in source_records:
-                ctx.metrics.records_consumed += 1
-                ctx.metrics.inc_source(self.source.source_name)
+                _metrics.records_consumed += 1
+                _metrics.by_source[_source_name] = _metrics.by_source.get(_source_name, 0) + 1
                 state.processed_count += 1
 
                 result = await self.chain.process(source_record.raw, ctx)
@@ -350,7 +356,8 @@ class ExecutionCoordinator:
                         failure=result.failure,
                         on_success=source_record.on_success,
                     )
-                if self.reached_max_records(ctx, state.processed_count, max_records):
+                if _has_max and state.processed_count >= _max_records:
+                    ctx.log.info("pipeline_max_records_reached", max_records=_max_records)
                     break
         except Exception as exc:
             source_error = exc

@@ -27,7 +27,7 @@ It is designed for teams that want a lightweight Python-native runtime for inges
 - Want to run pipelines from TOML: [Configuration](configuration.md)
 - Need command-line workflows: [CLI Reference](cli.md)
 - Need repeatable local performance checks: [Benchmark](benchmark/index.md)
-- Want the latest benchmark report table: [Benchmark Matrix](benchmark/matrix.md)
+- Want the latest benchmark report table: [Core Benchmark](benchmark/core.md)
 - Planning production workers: [Runner](runner.md)
 - Understanding plugin boundaries: [Plugins](plugins/index.md)
 - Browsing release history: [Change Log](change-log/index.md)

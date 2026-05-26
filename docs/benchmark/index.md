@@ -1,54 +1,32 @@
 # Benchmark
 
-This section exists to publish a readable performance snapshot for Agora ETL.
+This section collects the current benchmark snapshots for Agora ETL.
 
-The main page to read is the benchmark matrix:
+Available reports:
 
-- [Benchmark Matrix](matrix.md)
+- [Core Benchmark](core.md)
+- [Kafka Benchmark](kafka.md)
+- [Redis Benchmark](redis.md)
 
-## How to read the matrix
+## Reading the benchmark pages
 
-Start with the summaries, not the full table.
+Start with the page that matches the subsystem you want to inspect.
 
-### Source Summary
+### Core Benchmark
 
-This shows source read cost with the lightest path:
+The [Core Benchmark](core.md) focuses on built-in file sources, sinks, and
+runtime overhead. Read the summaries first, then use the full matrix when you
+need detail.
 
-- `Direct`
-- `Null`
+### Kafka and Redis Benchmarks
 
-Use it to compare how expensive each source is before sink or buffered-runtime
-cost is added.
-
-### Sink Summary
-
-This shows sink cost on `Direct` scenarios.
-
-The important column here is retention versus `Null`. It answers the simple
-question:
-
-How much throughput survives once the sink is real?
-
-### Buffered Overhead
-
-This isolates the runtime cost of buffered execution with the `Null` sink.
-
-Use it when you want to understand coordination overhead separately from actual
-I/O.
-
-### Full Matrix
-
-The full table is there for detail, but it should be read after the summaries.
-
-It is most useful for:
-
-- spotting regressions
-- comparing one source or sink family across middlewares
-- checking whether a slowdown belongs to reading, writing, or buffering
+The [Kafka Benchmark](kafka.md) and [Redis Benchmark](redis.md) focus on the
+first-party plugin lanes. They break results down by scenario so producer,
+consumer, and end-to-end costs can be read separately.
 
 ## What the numbers mean
 
-- `Rows/s` is the easiest top-line throughput number
-- `MB/s` is better when comparing formats with very different payload sizes
-- `Peak Py Heap` is Python heap only, not total process memory
-- `Repeat` is the number of isolated runs used to produce the median
+- `Rows/s` is the primary throughput metric.
+- `MB/s` helps when payload size differs across scenarios.
+- `Peak Py Heap` reflects Python heap only, not total process memory.
+- `Repeat` is the number of isolated runs used to produce the reported median.

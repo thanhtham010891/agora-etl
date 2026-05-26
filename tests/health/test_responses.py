@@ -50,9 +50,7 @@ def test_ready_response_is_service_unavailable_when_collector_is_failing() -> No
     import asyncio
 
     collector = MetricsCollector()
-    asyncio.get_event_loop().run_until_complete(
-        collector.record_run("pipe", summary=None, error=RuntimeError("boom"))
-    )
+    asyncio.run(collector.record_run("pipe", summary=None, error=RuntimeError("boom")))
     builder = HealthResponseBuilder(
         collector=collector,
         metrics_exporter=_FakeExporter(),

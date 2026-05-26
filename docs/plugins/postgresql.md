@@ -10,6 +10,9 @@ already manage.
 pip install "agora-etl-plugins[postgres]"
 ```
 
+That extra covers both the PostgreSQL source/sink path and the PostgreSQL-backed
+DLQ components.
+
 ## When PostgreSQL is a good fit
 
 - extract rows from a SQL query
@@ -60,6 +63,9 @@ Use it when:
 - schema middleware already produces table metadata
 - the target table should auto-create or add missing columns
 - you want the pipeline to stay close to the shape of incoming records
+
+Schema-qualified table names such as `analytics.users` are supported for both
+write SQL and schema introspection paths.
 
 ### PostgreSQL DLQ
 

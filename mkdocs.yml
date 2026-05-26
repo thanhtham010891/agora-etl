@@ -17,7 +17,9 @@ nav:
       - Runner: runner.md
   - Benchmark:
       - Overview: benchmark/index.md
-      - Matrix: benchmark/matrix.md
+      - Core: benchmark/core.md
+      - Kafka: benchmark/kafka.md
+      - Redis: benchmark/redis.md
   - Reference:
       - Sources: sources.md
       - Sinks: sinks.md
