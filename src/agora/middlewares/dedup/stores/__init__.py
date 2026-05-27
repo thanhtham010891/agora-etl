@@ -12,6 +12,8 @@ Registry
     store = cls(max_size=10_000)
 """
 
+from typing import Any
+
 from agora.core.registry import Registry
 from agora.middlewares.dedup.stores.base import DedupStore
 from agora.middlewares.dedup.stores.memory import InMemoryStore
@@ -21,7 +23,7 @@ from agora.middlewares.dedup.stores.sqlite import SQLiteDedupStore
 # Dedup Store Registry
 # ======================================================================
 
-dedup_store_registry: Registry[type[DedupStore]] = Registry(name="dedup_store")
+dedup_store_registry: Registry[type[DedupStore[str]]] = Registry(name="dedup_store")
 
 # Register built-in stores
 dedup_store_registry.register("memory", InMemoryStore)
@@ -41,7 +43,7 @@ def _register_lazy_stores() -> None:
         store = dedup_store_registry.create("embedding", provider=GeminiProvider(...))
     """
 
-    def _embedding_factory(**kwargs):
+    def _embedding_factory(**kwargs: Any) -> Any:
         if "provider" not in kwargs:
             raise TypeError(
                 "EmbeddingStore requires an 'provider' kwarg (an AIProvider instance). "

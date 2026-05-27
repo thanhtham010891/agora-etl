@@ -165,3 +165,50 @@ async def test_pipeline_tracing_records_writer_failures_and_dlq_writes() -> None
     assert dlq_span.attributes["stage"] == "sink_write"
     assert dlq_span.attributes["sink"] == "collect_dlq"
     assert dlq_span.parent_name == "source.stream"
+
+
+@pytest.mark.asyncio
+async def test_noop_tracer_trace_span_returns_singleton_and_allocates_no_spans() -> None:
+    from agora.core.context import _NOOP_SPAN_SCOPE, PipelineContext
+    from agora.core.metrics import PipelineMetrics
+    from agora.core.tracing import NoopTracer
+
+    ctx = PipelineContext(
+        pipeline_id="test",
+        metrics=PipelineMetrics(),
+        tracer=NoopTracer(),
+    )
+
+    scope1 = ctx.trace_span("middleware.process", middleware="m1")
+    scope2 = ctx.trace_span("writer.write", writer="SinkFanOut")
+
+    assert scope1 is _NOOP_SPAN_SCOPE
+    assert scope2 is _NOOP_SPAN_SCOPE
+    assert ctx._trace_stack == []
+
+    with ctx.trace_span("some.span"):
+        assert ctx._trace_stack == []
+
+
+@pytest.mark.asyncio
+async def test_real_tracer_trace_span_pushes_and_pops_stack() -> None:
+    from agora.core.context import PipelineContext
+    from agora.core.metrics import PipelineMetrics
+
+    tracer = InMemoryTracer()
+    ctx = PipelineContext(
+        pipeline_id="test",
+        metrics=PipelineMetrics(),
+        tracer=tracer,
+    )
+
+    with ctx.trace_span("outer", key="val") as outer_span:
+        assert len(ctx._trace_stack) == 1
+        assert ctx.current_span() is outer_span
+        with ctx.trace_span("inner"):
+            assert len(ctx._trace_stack) == 2
+        assert len(ctx._trace_stack) == 1
+    assert ctx._trace_stack == []
+    assert len(tracer.spans) == 2
+    assert tracer.spans[0].name == "outer"
+    assert tracer.spans[0].attributes["key"] == "val"

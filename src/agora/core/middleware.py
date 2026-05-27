@@ -32,15 +32,16 @@ Subclass ``Middleware[T, U]`` and implement ``process()``::
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from agora.core.context import PipelineContext
 
@@ -131,16 +132,22 @@ class MapMiddleware(Middleware[T, U]):
         .pipe(MapMiddleware(lambda r: r.to_uppercase(), name="uppercaser"))
     """
 
-    def __init__(self, fn: Callable[[T], U | None], name: str = "map") -> None:
+    def __init__(
+        self,
+        fn: Callable[[T], U | None] | Callable[[T], Awaitable[U | None]],
+        name: str = "map",
+    ) -> None:
         self.name = name
         self._fn = fn
-        self._fn_is_async = asyncio.iscoroutinefunction(fn)
+        self._fn_is_async = inspect.iscoroutinefunction(fn)
 
     async def process(self, record: T, ctx: PipelineContext) -> U | None:
         del ctx
         if self._fn_is_async:
-            return await self._fn(record)  # type: ignore[return-value]
-        return self._fn(record)
+            async_fn = cast("Callable[[T], Awaitable[U | None]]", self._fn)
+            return await async_fn(record)
+        sync_fn = cast("Callable[[T], U | None]", self._fn)
+        return sync_fn(record)
 
 
 class FilterMiddleware(Middleware[T, T]):
@@ -156,8 +163,8 @@ class FilterMiddleware(Middleware[T, T]):
         self._predicate = predicate
 
     async def process(self, record: T, ctx: PipelineContext) -> T | None:
-        if asyncio.iscoroutinefunction(self._predicate):
-            keep = await self._predicate(record)  # type: ignore[misc]
+        if inspect.iscoroutinefunction(self._predicate):
+            keep = await self._predicate(record)  # type: ignore[misc, unused-ignore]
         else:
             keep = self._predicate(record)
         return record if keep else None
@@ -207,8 +214,8 @@ class RouteMiddleware(Middleware[T, U]):
             await self._default.on_stop(ctx)
 
     async def process(self, record: T, ctx: PipelineContext) -> U | None:
-        if asyncio.iscoroutinefunction(self._key):
-            key = await self._key(record)  # type: ignore[misc]
+        if inspect.iscoroutinefunction(self._key):
+            key = await self._key(record)  # type: ignore[misc, unused-ignore]
         else:
             key = self._key(record)
 
@@ -330,7 +337,14 @@ class MiddlewareChain(Generic[T, U]):
 
     async def stop_all(self, ctx: PipelineContext) -> None:
         for m in reversed(self._middlewares):
-            await m.on_stop(ctx)
+            try:
+                await m.on_stop(ctx)
+            except Exception as exc:
+                ctx.log.exception(
+                    "middleware_stop_error",
+                    middleware=getattr(m, "name", type(m).__name__),
+                    error=str(exc),
+                )
 
     async def _rollback_started_middlewares(
         self,

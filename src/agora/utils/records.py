@@ -16,7 +16,7 @@ files (W5 in the audit).  Fix once → fix everywhere.
 from __future__ import annotations
 
 from copy import copy
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -49,11 +49,11 @@ def merge_into_record(record: T, updates: dict[str, Any]) -> T:
 
     # Fast path: plain dict
     if isinstance(record, dict):
-        return {**record, **updates}  # type: ignore[return-value]
+        return cast("T", {**record, **updates})
 
     # Pydantic v2 path
     if hasattr(record, "model_copy"):
-        return record.model_copy(update=updates)  # type: ignore[union-attr]
+        return cast("T", record.model_copy(update=updates))
 
     # Dataclass / plain object — shallow copy + setattr
     enriched = copy(record)

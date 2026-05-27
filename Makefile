@@ -8,6 +8,7 @@ PYTHON := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 RUFF   := $(VENV)/bin/ruff
 PYTEST := $(VENV)/bin/pytest
+MYPY   := $(VENV)/bin/mypy
 
 .PHONY: help setup install lint format fix check test ci clean
 
@@ -46,8 +47,9 @@ test:  ## Run all tests (excluding integration)
 test-all:  ## Run all tests including integration (requires external services)
 	$(PYTEST) tests/ -q
 
-ci:  ## Full CI check: lint + format + tests (mirrors GitHub Actions)
+ci:  ## Full CI check: lint + format + type check + tests (mirrors GitHub Actions)
 	$(MAKE) check
+	$(MYPY) src/agora
 	$(MAKE) test
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────

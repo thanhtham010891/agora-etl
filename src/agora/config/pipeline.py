@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from agora.core.errors import ConfigError
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class ImportRefConfig(BaseModel):
@@ -373,7 +376,7 @@ def _select_name(
     *,
     explicit_value: str | None,
     default_value: str | None,
-    available_names,
+    available_names: Iterable[str],
     label: str,
 ) -> str:
     selected = _select_optional_overlay(explicit_value, default_value)

@@ -28,7 +28,7 @@ The LLM is instructed to return a single JSON object with the listed keys.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
@@ -84,7 +84,7 @@ class AIExtractMiddleware(AIMiddleware[T], Generic[T]):
         max_tokens: int = 1024,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         if not extract:
@@ -139,5 +139,5 @@ class AIExtractMiddleware(AIMiddleware[T], Generic[T]):
         except Exception as exc:
             return await self._handle_error(exc, record, ctx)
 
-    def _merge_into(self, record: T, fields: dict) -> T:
+    def _merge_into(self, record: T, fields: dict[str, Any]) -> T:
         return merge_into_record(record, fields)

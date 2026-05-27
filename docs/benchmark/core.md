@@ -7,33 +7,33 @@
 | | |
 | --- | --- |
 | **Date** | 2026-05-27 |
-| **OS** | Darwin 24.6.0 |
-| **CPU** | Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz (x86_64) |
-| **RAM** | 32 GB |
-| **Python** | 3.11.9 |
+| **OS** | Linux 6.17.0-1012-aws |
+| **CPU** | Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz (x86_64) |
+| **RAM** | 31 GB |
+| **Python** | 3.12.3 |
 | **Repeat** | median of 3 isolated runs per scenario |
 
 ## Source Summary
 
 This section isolates source read cost using `Direct + Null`.
 
-| Source | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap |
-| --- | --- | --- | --- | --- |
-| CSV | 5.24s | 19,092.7 r/s | 1.9 MB/s | 6.6 MB |
-| JSONL | 4.50s | 22,213.9 r/s | 4.8 MB/s | 6.9 MB |
-| Parquet | 6.80s | 14,713.1 r/s | 0.7 MB/s | 6.3 MB |
+| Source | Median Time | Median Rows/s | Median MB/s |
+| --- | --- | --- | --- |
+| CSV | 1.11s | 89,795.2 r/s | 9.0 MB/s |
+| JSONL | 1.03s | 97,328.2 r/s | 21.2 MB/s |
+| Parquet | 1.67s | 59,839.6 r/s | 2.9 MB/s |
 
 ## Sink Summary
 
 This section isolates sink cost using `Direct` scenarios. `Median vs Null` shows how much throughput each sink retains compared with the same-source `Null` baseline.
 
-| Sink | Median Direct Rows/s | Median Direct MB/s | Median vs Null | Median Peak Py Heap |
-| --- | --- | --- | --- | --- |
-| Null | 19,092.7 r/s | 1.9 MB/s | 100.0% | 6.6 MB |
-| JSONL | 16,919.0 r/s | 1.7 MB/s | 88.6% | 13.1 MB |
-| CSV | 16,961.9 r/s | 1.7 MB/s | 88.8% | 6.8 MB |
-| Parquet | 17,493.6 r/s | 1.8 MB/s | 91.6% | 9.1 MB |
-| Stdout | 16,369.3 r/s | 1.6 MB/s | 85.7% | 7.4 MB |
+| Sink | Median Direct Rows/s | Median Direct MB/s | Median vs Null |
+| --- | --- | --- | --- |
+| Null | 89,795.2 r/s | 9.0 MB/s | 100.0% |
+| JSONL | 73,876.7 r/s | 7.4 MB/s | 83.2% |
+| CSV | 68,614.8 r/s | 6.9 MB/s | 76.4% |
+| Parquet | 68,352.3 r/s | 6.9 MB/s | 77.7% |
+| Stdout | 77,701.1 r/s | 7.8 MB/s | 88.5% |
 
 ## Buffered Overhead
 
@@ -41,60 +41,60 @@ This section isolates buffered runtime overhead using the `Null` sink.
 
 | Source | Direct Null Rows/s | Buffered Null Rows/s | Buffered Retention | Buffered In-Flight |
 | --- | --- | --- | --- | --- |
-| CSV | 19,092.7 r/s | 6,954.6 r/s | 36.4% | 4/4 |
-| JSONL | 22,213.9 r/s | 7,326.4 r/s | 33.0% | 4/4 |
-| Parquet | 14,713.1 r/s | 6,528.6 r/s | 44.4% | 4/4 |
+| CSV | 89,795.2 r/s | 39,249.6 r/s | 43.7% | 4/4 |
+| JSONL | 97,328.2 r/s | 39,219.9 r/s | 40.3% | 4/4 |
+| Parquet | 59,839.6 r/s | 31,184.2 r/s | 52.1% | 4/4 |
 
 ## Full Matrix
 
 Rows per scenario: `100,000`
 
-| Source | Middleware | Sink | Repeat | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap | Buffered |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| CSV | Direct | Null | 3 | 5.24s | 19,093 r/s | 1.9 MB/s | 6.6 MB | — |
-| CSV | Direct | JSONL | 3 | 5.91s | 16,919 r/s | 1.7 MB/s | 13.1 MB | — |
-| CSV | Direct | CSV | 3 | 5.90s | 16,962 r/s | 1.7 MB/s | 6.8 MB | — |
-| CSV | Direct | Parquet | 3 | 5.72s | 17,494 r/s | 1.8 MB/s | 9.1 MB | — |
-| CSV | Direct | Stdout | 3 | 6.11s | 16,369 r/s | 1.6 MB/s | 7.4 MB | — |
-| CSV | Map | Null | 3 | 7.22s | 13,859 r/s | 1.4 MB/s | 6.6 MB | — |
-| CSV | Map | JSONL | 3 | 7.80s | 12,816 r/s | 1.3 MB/s | 13.1 MB | — |
-| CSV | Map | CSV | 3 | 7.91s | 12,642 r/s | 1.3 MB/s | 6.8 MB | — |
-| CSV | Map | Parquet | 3 | 8.44s | 11,853 r/s | 1.2 MB/s | 9.1 MB | — |
-| CSV | Map | Stdout | 3 | 8.20s | 12,202 r/s | 1.2 MB/s | 7.4 MB | — |
-| CSV | Buffered | Null | 3 | 14.38s | 6,955 r/s | 0.7 MB/s | 6.6 MB | 4/4 |
-| CSV | Buffered | JSONL | 3 | 15.03s | 6,652 r/s | 0.7 MB/s | 13.1 MB | 4/4 |
-| CSV | Buffered | CSV | 3 | 14.44s | 6,926 r/s | 0.7 MB/s | 6.8 MB | 4/4 |
-| CSV | Buffered | Parquet | 3 | 14.82s | 6,749 r/s | 0.7 MB/s | 9.1 MB | 4/4 |
-| CSV | Buffered | Stdout | 3 | 15.06s | 6,640 r/s | 0.7 MB/s | 7.4 MB | 4/4 |
-| JSONL | Direct | Null | 3 | 4.50s | 22,214 r/s | 4.8 MB/s | 6.9 MB | — |
-| JSONL | Direct | JSONL | 3 | 5.15s | 19,415 r/s | 4.2 MB/s | 13.1 MB | — |
-| JSONL | Direct | CSV | 3 | 5.06s | 19,774 r/s | 4.3 MB/s | 7.1 MB | — |
-| JSONL | Direct | Parquet | 3 | 4.47s | 22,355 r/s | 4.9 MB/s | 9.5 MB | — |
-| JSONL | Direct | Stdout | 3 | 5.26s | 19,005 r/s | 4.1 MB/s | 7.7 MB | — |
-| JSONL | Map | Null | 3 | 6.42s | 15,579 r/s | 3.4 MB/s | 6.9 MB | — |
-| JSONL | Map | JSONL | 3 | 7.38s | 13,546 r/s | 3.0 MB/s | 13.1 MB | — |
-| JSONL | Map | CSV | 3 | 8.24s | 12,133 r/s | 2.6 MB/s | 7.1 MB | — |
-| JSONL | Map | Parquet | 3 | 7.34s | 13,620 r/s | 3.0 MB/s | 9.5 MB | — |
-| JSONL | Map | Stdout | 3 | 7.73s | 12,939 r/s | 2.8 MB/s | 7.7 MB | — |
-| JSONL | Buffered | Null | 3 | 13.65s | 7,326 r/s | 1.6 MB/s | 6.8 MB | 4/4 |
-| JSONL | Buffered | JSONL | 3 | 14.05s | 7,117 r/s | 1.6 MB/s | 13.1 MB | 4/4 |
-| JSONL | Buffered | CSV | 3 | 14.37s | 6,957 r/s | 1.5 MB/s | 6.9 MB | 4/4 |
-| JSONL | Buffered | Parquet | 3 | 13.50s | 7,409 r/s | 1.6 MB/s | 9.2 MB | 4/4 |
-| JSONL | Buffered | Stdout | 3 | 14.02s | 7,132 r/s | 1.6 MB/s | 7.4 MB | 4/4 |
-| Parquet | Direct | Null | 3 | 6.80s | 14,713 r/s | 0.7 MB/s | 6.3 MB | — |
-| Parquet | Direct | JSONL | 3 | 7.58s | 13,199 r/s | 0.6 MB/s | 12.7 MB | — |
-| Parquet | Direct | CSV | 3 | 8.52s | 11,740 r/s | 0.6 MB/s | 6.5 MB | — |
-| Parquet | Direct | Parquet | 3 | 7.55s | 13,253 r/s | 0.6 MB/s | 6.9 MB | — |
-| Parquet | Direct | Stdout | 3 | 7.23s | 13,828 r/s | 0.7 MB/s | 7.0 MB | — |
-| Parquet | Map | Null | 3 | 8.46s | 11,820 r/s | 0.6 MB/s | 6.3 MB | — |
-| Parquet | Map | JSONL | 3 | 9.52s | 10,499 r/s | 0.5 MB/s | 12.7 MB | — |
-| Parquet | Map | CSV | 3 | 10.18s | 9,822 r/s | 0.5 MB/s | 6.5 MB | — |
-| Parquet | Map | Parquet | 3 | 9.26s | 10,801 r/s | 0.5 MB/s | 6.9 MB | — |
-| Parquet | Map | Stdout | 3 | 10.03s | 9,973 r/s | 0.5 MB/s | 7.0 MB | — |
-| Parquet | Buffered | Null | 3 | 15.32s | 6,529 r/s | 0.3 MB/s | 6.2 MB | 4/4 |
-| Parquet | Buffered | JSONL | 3 | 16.28s | 6,141 r/s | 0.3 MB/s | 12.7 MB | 4/4 |
-| Parquet | Buffered | CSV | 3 | 16.95s | 5,900 r/s | 0.3 MB/s | 6.4 MB | 4/4 |
-| Parquet | Buffered | Parquet | 3 | 16.02s | 6,241 r/s | 0.3 MB/s | 6.9 MB | 4/4 |
-| Parquet | Buffered | Stdout | 3 | 15.45s | 6,471 r/s | 0.3 MB/s | 7.0 MB | 4/4 |
+| Source | Middleware | Sink | Repeat | Median Time | Median Rows/s | Median MB/s | Buffered |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| CSV | Direct | Null | 3 | 1.11s | 89,795 r/s | 9.0 MB/s | — |
+| CSV | Direct | JSONL | 3 | 1.35s | 73,877 r/s | 7.4 MB/s | — |
+| CSV | Direct | CSV | 3 | 1.46s | 68,615 r/s | 6.9 MB/s | — |
+| CSV | Direct | Parquet | 3 | 1.46s | 68,352 r/s | 6.9 MB/s | — |
+| CSV | Direct | Stdout | 3 | 1.29s | 77,701 r/s | 7.8 MB/s | — |
+| CSV | Map | Null | 3 | 1.40s | 71,347 r/s | 7.2 MB/s | — |
+| CSV | Map | JSONL | 3 | 1.70s | 58,928 r/s | 5.9 MB/s | — |
+| CSV | Map | CSV | 3 | 1.78s | 56,212 r/s | 5.7 MB/s | — |
+| CSV | Map | Parquet | 3 | 1.83s | 54,764 r/s | 5.5 MB/s | — |
+| CSV | Map | Stdout | 3 | 1.60s | 62,630 r/s | 6.3 MB/s | — |
+| CSV | Buffered | Null | 3 | 2.55s | 39,250 r/s | 4.0 MB/s | 4/4 |
+| CSV | Buffered | JSONL | 3 | 2.81s | 35,584 r/s | 3.6 MB/s | 4/4 |
+| CSV | Buffered | CSV | 3 | 2.87s | 34,837 r/s | 3.5 MB/s | 4/4 |
+| CSV | Buffered | Parquet | 3 | 2.90s | 34,472 r/s | 3.5 MB/s | 4/4 |
+| CSV | Buffered | Stdout | 3 | 2.74s | 36,502 r/s | 3.7 MB/s | 4/4 |
+| JSONL | Direct | Null | 3 | 1.03s | 97,328 r/s | 21.2 MB/s | — |
+| JSONL | Direct | JSONL | 3 | 1.23s | 80,983 r/s | 17.7 MB/s | — |
+| JSONL | Direct | CSV | 3 | 1.42s | 70,214 r/s | 15.3 MB/s | — |
+| JSONL | Direct | Parquet | 3 | 1.32s | 75,600 r/s | 16.5 MB/s | — |
+| JSONL | Direct | Stdout | 3 | 1.16s | 86,143 r/s | 18.8 MB/s | — |
+| JSONL | Map | Null | 3 | 1.28s | 78,407 r/s | 17.1 MB/s | — |
+| JSONL | Map | JSONL | 3 | 1.58s | 63,395 r/s | 13.8 MB/s | — |
+| JSONL | Map | CSV | 3 | 1.82s | 55,032 r/s | 12.0 MB/s | — |
+| JSONL | Map | Parquet | 3 | 1.65s | 60,468 r/s | 13.2 MB/s | — |
+| JSONL | Map | Stdout | 3 | 1.49s | 67,036 r/s | 14.6 MB/s | — |
+| JSONL | Buffered | Null | 3 | 2.55s | 39,220 r/s | 8.6 MB/s | 4/4 |
+| JSONL | Buffered | JSONL | 3 | 2.64s | 37,807 r/s | 8.2 MB/s | 4/4 |
+| JSONL | Buffered | CSV | 3 | 2.84s | 35,271 r/s | 7.7 MB/s | 4/4 |
+| JSONL | Buffered | Parquet | 3 | 2.69s | 37,151 r/s | 8.1 MB/s | 4/4 |
+| JSONL | Buffered | Stdout | 3 | 2.68s | 37,353 r/s | 8.1 MB/s | 4/4 |
+| Parquet | Direct | Null | 3 | 1.67s | 59,840 r/s | 2.9 MB/s | — |
+| Parquet | Direct | JSONL | 3 | 1.82s | 54,966 r/s | 2.6 MB/s | — |
+| Parquet | Direct | CSV | 3 | 2.06s | 48,578 r/s | 2.3 MB/s | — |
+| Parquet | Direct | Parquet | 3 | 1.83s | 54,567 r/s | 2.6 MB/s | — |
+| Parquet | Direct | Stdout | 3 | 1.78s | 56,056 r/s | 2.7 MB/s | — |
+| Parquet | Map | Null | 3 | 2.07s | 48,219 r/s | 2.3 MB/s | — |
+| Parquet | Map | JSONL | 3 | 2.16s | 46,310 r/s | 2.2 MB/s | — |
+| Parquet | Map | CSV | 3 | 2.37s | 42,237 r/s | 2.0 MB/s | — |
+| Parquet | Map | Parquet | 3 | 2.20s | 45,523 r/s | 2.2 MB/s | — |
+| Parquet | Map | Stdout | 3 | 2.10s | 47,657 r/s | 2.3 MB/s | — |
+| Parquet | Buffered | Null | 3 | 3.21s | 31,184 r/s | 1.5 MB/s | 4/4 |
+| Parquet | Buffered | JSONL | 3 | 3.41s | 29,293 r/s | 1.4 MB/s | 4/4 |
+| Parquet | Buffered | CSV | 3 | 3.62s | 27,645 r/s | 1.3 MB/s | 4/4 |
+| Parquet | Buffered | Parquet | 3 | 3.42s | 29,264 r/s | 1.4 MB/s | 4/4 |
+| Parquet | Buffered | Stdout | 3 | 3.29s | 30,359 r/s | 1.5 MB/s | 4/4 |
 
-`Peak Py Heap` reflects Python heap only. It does not include native memory from components such as `pyarrow` or `uvloop`.
+Core throughput is measured without `tracemalloc` so the reported rows/s and MB/s are not distorted by heap sampling overhead.

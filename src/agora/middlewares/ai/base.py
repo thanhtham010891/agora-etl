@@ -69,7 +69,7 @@ class _SafeFormatter(string.Formatter):
                 reason="attribute/index access in prompt templates is not allowed",
             )
             return f"{{{field_name}}}", field_name
-        return super().get_field(field_name, args, kwargs)
+        return super().get_field(field_name, args, kwargs)  # type: ignore[no-any-return]
 
 
 _SAFE_FORMATTER = _SafeFormatter()
@@ -100,7 +100,7 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         *,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         self._provider = provider
         self._cache = cache
@@ -193,7 +193,7 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         Attribute/index access in placeholders (e.g. ``{obj.attr}``) is blocked.
         """
         if isinstance(record, dict):
-            data = record
+            data: dict[str, Any] = record
         elif hasattr(record, "model_dump"):
             data = record.model_dump()
         elif hasattr(record, "__dict__"):
@@ -208,7 +208,7 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         if stripped.startswith("```"):
             lines = stripped.splitlines()
             stripped = "\n".join(lines[1:-1]) if len(lines) > 2 else stripped
-        return json.loads(stripped)
+        return json.loads(stripped)  # type: ignore[no-any-return]
 
     async def _handle_error(
         self,

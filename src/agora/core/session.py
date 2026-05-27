@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.context import PipelineContext
@@ -28,7 +28,7 @@ class PipelineRunState:
     writer_opened: bool = False
     dlq_opened: bool = False
     interrupted: bool = False
-    run_error: Exception | None = None
+    run_error: BaseException | None = None
 
     @property
     def metrics(self) -> PipelineMetrics:
@@ -108,7 +108,8 @@ class PipelineLifecycleController:
                 source=self._spec.source.source_name,
             ) as span:
                 checkpoint = await self._spec.checkpoint_store.load(self._spec.checkpoint_key)
-                span.set_attribute("checkpoint.loaded", checkpoint is not None)
+                if span is not None:
+                    span.set_attribute("checkpoint.loaded", checkpoint is not None)
                 await self._spec.source.prepare_resume(checkpoint)
         except Exception:
             ctx.metrics.runtime.checkpoint_failure_count += 1
@@ -136,7 +137,7 @@ class PipelineLifecycleController:
     async def shutdown_runtime(self, state: PipelineRunState) -> Exception | None:
         first_error: Exception | None = None
 
-        async def _capture(name: str, func) -> None:
+        async def _capture(name: str, func: Any) -> None:
             nonlocal first_error
             try:
                 await func()

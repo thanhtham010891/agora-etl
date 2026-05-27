@@ -86,8 +86,8 @@ class ValidateMiddleware(Middleware[T, U], Generic[T, U]):
 
             # Pydantic path
             if isinstance(record, dict):
-                return self._schema(**record)  # type: ignore[misc]
-            return self._schema.model_validate(record)  # type: ignore[union-attr]
+                return self._schema(**record)  # type: ignore[misc, return-value]
+            return self._schema.model_validate(record)  # type: ignore[union-attr, return-value]
 
         except Exception as exc:
             if self._on_error == "raise":

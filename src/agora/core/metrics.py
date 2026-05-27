@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agora.core.checkpoint import Checkpoint
@@ -54,7 +54,7 @@ class AIMiddlewareMetrics:
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "llm_calls": self.llm_calls,
             "cache_hits": self.cache_hits,
@@ -117,7 +117,7 @@ class AIMetrics:
         self.total_validation_pass += mw.validation_pass
         self.total_validation_fail += mw.validation_fail
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "total_llm_calls": self.total_llm_calls,
             "total_cache_hits": self.total_cache_hits,

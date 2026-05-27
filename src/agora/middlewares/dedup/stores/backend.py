@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from agora.middlewares.dedup.stores.base import DedupStore
 
@@ -26,19 +26,19 @@ class BackendDedupStore(DedupStore[str]):
         self._offload_blocking_calls = offload_blocking_calls
 
     async def exists(self, key: str) -> bool:
-        return await self._call(self._store.contains, key)
+        return cast("bool", await self._call(self._store.contains, key))
 
     async def add(self, key: str) -> None:
         await self._call(self._store.add, key, ttl_s=self._default_ttl_seconds)
 
     async def mark_if_new(self, key: str, *, ttl_seconds: int | None = None) -> bool:
         ttl = self._default_ttl_seconds if ttl_seconds is None else ttl_seconds
-        return await self._call(self._store.mark_if_new, key, ttl_s=ttl)
+        return cast("bool", await self._call(self._store.mark_if_new, key, ttl_s=ttl))
 
     async def close(self) -> None:
         await self._call(self._store.close)
 
-    async def _call(self, func, *args, **kwargs):
+    async def _call(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         if self._offload_blocking_calls:
             return await asyncio.to_thread(func, *args, **kwargs)
         return func(*args, **kwargs)

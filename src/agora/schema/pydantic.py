@@ -24,7 +24,7 @@ def schema_to_pydantic_model(
     model_name: str | None = None,
 ) -> type[BaseModel]:
     """Build a Pydantic model class from *schema*."""
-    fields: dict[str, tuple[Any, Field]] = {}
+    fields: dict[str, tuple[Any, Any]] = {}
     used_field_names: set[str] = set()
 
     for column_name in schema.column_names():
@@ -40,7 +40,7 @@ def schema_to_pydantic_model(
         fields[field_name] = (annotation, field)
 
     generated_name = model_name or _default_model_name(schema.table)
-    return create_model(
+    return create_model(  # type: ignore[call-overload, no-any-return]
         generated_name,
         __base__=BaseModel,
         __config__=ConfigDict(populate_by_name=True),
@@ -48,7 +48,7 @@ def schema_to_pydantic_model(
     )
 
 
-def _annotation_for_column(column) -> Any:
+def _annotation_for_column(column: Any) -> Any:
     base_type = _python_type_for_data_type(column.data_type)
     if column.nullable and column.data_type != DataType.NULL:
         return base_type | None

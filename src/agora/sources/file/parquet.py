@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
@@ -45,7 +45,7 @@ class ParquetSource(FileSource[T], Generic[T]):
     def __init__(
         self,
         path: Path,
-        row_mapper: Callable[[dict], T | None],
+        row_mapper: Callable[[dict[str, Any]], T | None],
         batch_size: int = 1000,
         on_record_error: SourceRecordFailurePolicy = SourceRecordFailurePolicy.FAIL_CLOSED,
     ) -> None:
@@ -88,18 +88,17 @@ class ParquetSource(FileSource[T], Generic[T]):
         self._record_error_count = 0
         self._record_drop_count = 0
 
-        def _open_reader():
+        def _open_reader() -> Any:
             parquet_file = pq.ParquetFile(str(self._path))
             batch_iter = parquet_file.iter_batches(batch_size=self._batch_size, use_threads=True)
             return parquet_file, batch_iter
 
-        def _read_batch(batch_iter) -> list[dict[str, Any]] | None:
+        def _read_batch(batch_iter: Any) -> list[dict[str, Any]] | None:
             try:
                 batch = next(batch_iter)
             except StopIteration:
                 return None
-            # Let PyArrow materialize the batch directly instead of copying row-by-row in Python.
-            return batch.to_pylist()
+            return cast("list[dict[str, Any]]", batch.to_pylist())
 
         pf, batch_iter = await asyncio.to_thread(_open_reader)
         row_number = self._resume_row_number

@@ -454,10 +454,7 @@ def render_core_markdown(
     lines.extend(
         markdown_table(
             ["Source", "Median Time", "Median Rows/s", "Median MB/s"],
-            [
-                [row["source"], row["time"], row["rows_s"], row["mb_s"]]
-                for row in source_summary
-            ],
+            [[row["source"], row["time"], row["rows_s"], row["mb_s"]] for row in source_summary],
         )
     )
     lines.extend(
@@ -477,10 +474,7 @@ def render_core_markdown(
                 "Median Direct MB/s",
                 "Median vs Null",
             ],
-            [
-                [row["sink"], row["rows_s"], row["mb_s"], row["retention"]]
-                for row in sink_summary
-            ],
+            [[row["sink"], row["rows_s"], row["mb_s"], row["retention"]] for row in sink_summary],
         )
     )
     lines.extend(

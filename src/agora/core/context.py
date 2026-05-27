@@ -71,7 +71,7 @@ class PipelineContext:
     @property
     def log(self) -> _BoundLogger:
         """Return the bound structured logger."""
-        return self._logger
+        return self._logger  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------ #
     # Extras helpers                                                       #
@@ -93,13 +93,13 @@ class PipelineContext:
         """Return the currently active span for this run, if any."""
         if not self._trace_stack:
             return None
-        return self._trace_stack[-1]
+        return self._trace_stack[-1]  # type: ignore[no-any-return]
 
-    def trace_span(self, name: str, **attributes: Any) -> _PipelineSpanScope:
+    def trace_span(self, name: str, **attributes: Any) -> _NoopSpanScope | _PipelineSpanScope:
         """Create a nested tracing span scoped to a block of pipeline work."""
         if isinstance(self.tracer, NoopTracer):
             del name, attributes
-            return _NOOP_PIPELINE_SPAN_SCOPE
+            return _NOOP_SPAN_SCOPE
         parent = self.current_span()
         span = self.tracer.start_span(
             name,
@@ -150,6 +150,27 @@ class _BoundLogger:
 
     def exception(self, msg: str, **kw: Any) -> None:
         self._logger.exception(msg, **{**self._bound, **kw})
+
+
+class _NoopSpanScope:
+    """Zero-allocation context manager returned by trace_span() when NoopTracer is active."""
+
+    __slots__ = ()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        pass
+
+
+# Singleton reused for every trace_span() call when NoopTracer is active.
+_NOOP_SPAN_SCOPE = _NoopSpanScope()
 
 
 class _PipelineSpanScope:

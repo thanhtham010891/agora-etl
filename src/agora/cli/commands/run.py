@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import os
 import tomllib
 from pathlib import Path
@@ -116,7 +117,7 @@ class RunCommand(BaseCommand):
 # ------------------------------------------------------------------ #
 
 
-async def _run_pipeline(pipeline, args: argparse.Namespace) -> None:
+async def _run_pipeline(pipeline: Any, args: argparse.Namespace) -> None:
     """Execute the pipeline with CLI-provided arguments.
 
     Parameters
@@ -181,7 +182,7 @@ async def _build_and_run(args: argparse.Namespace) -> None:
 
     if hasattr(module, "build_pipeline"):
         factory = module.build_pipeline
-        pipeline = await factory() if asyncio.iscoroutinefunction(factory) else factory()
+        pipeline = await factory() if inspect.iscoroutinefunction(factory) else factory()
     elif hasattr(module, "pipeline"):
         pipeline = module.pipeline
     else:
@@ -192,12 +193,12 @@ async def _build_and_run(args: argparse.Namespace) -> None:
     await _run_pipeline(pipeline, args)
 
 
-def _load_container_from_config(config_path: str, pipeline_name: str | None = None):
+def _load_container_from_config(config_path: str, pipeline_name: str | None = None) -> Any:
     resolved = _load_resolved_pipeline_config(config_path, pipeline_name=pipeline_name)
     return _build_container_from_pipeline_config(config_path, resolved.pipeline_config)
 
 
-def _build_container_from_pipeline_config(config_path: str, pipeline_cfg: dict):
+def _build_container_from_pipeline_config(config_path: str, pipeline_cfg: dict[str, Any]) -> Any:
     from agora.core.container import AgoraContainer
 
     try:
@@ -212,7 +213,7 @@ def _load_resolved_pipeline_config(
     pipeline_name: str | None = None,
     profile_name: str | None = None,
     environment_name: str | None = None,
-):
+) -> Any:
     path = Path(config_path)
     if not path.exists():
         raise CommandError(f"Config file not found: {config_path}")

@@ -6,7 +6,7 @@ import asyncio
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.middleware import MiddlewareFailure
@@ -244,7 +244,7 @@ class ExecutionCoordinator:
                         SourceRecord(
                             raw=record,
                             checkpoint=self.source.current_checkpoint(),
-                            on_success=self.source.delivery_success_callback()
+                            on_success=cast("Any", self.source).delivery_success_callback()
                             if _has_delivery_hook
                             else None,
                         )
@@ -267,7 +267,7 @@ class ExecutionCoordinator:
                     break
                 if isinstance(item, SourceQueueError):
                     raise item.exc
-                yield item
+                yield cast("SourceRecord", item)
         finally:
             # Drain queue first so producer unblocks from await source_queue.put()
             while not source_queue.empty():
@@ -290,7 +290,7 @@ class ExecutionCoordinator:
                 yield SourceRecord(
                     raw=record,
                     checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
-                    on_success=self.source.delivery_success_callback()
+                    on_success=cast("Any", self.source).delivery_success_callback()
                     if has_delivery_hook
                     else None,
                 )
@@ -356,7 +356,7 @@ class ExecutionCoordinator:
                         failure=result.failure,
                         on_success=source_record.on_success,
                     )
-                if _has_max and state.processed_count >= _max_records:
+                if _has_max and state.processed_count >= _max_records:  # type: ignore[operator]
                     ctx.log.info("pipeline_max_records_reached", max_records=_max_records)
                     break
         except Exception as exc:
@@ -474,6 +474,7 @@ class ExecutionCoordinator:
 
         if self._must_abort_pending_work(source_error):
             await self._abort_pending_work(state, pending_tasks)
+            assert source_error is not None
             raise source_error
 
         try:

@@ -29,10 +29,10 @@ class AgoraContext:
 
     cwd: str = ""
     verbose: bool = False
-    extra: dict = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, args_namespace=None) -> AgoraContext:
+    def build(cls, args_namespace: object = None) -> AgoraContext:
         """Build context from parsed global args (or defaults)."""
         import os
 

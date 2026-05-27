@@ -303,7 +303,7 @@ class AgoraContainer:
 
         return container
 
-    def build_pipeline(self) -> BoundPipeline:
+    def build_pipeline(self) -> BoundPipeline[Any]:
         """Assemble a ``BoundPipeline`` from the registered components.
 
         Requires that the container was built via ``from_config()`` or
@@ -445,7 +445,7 @@ def _build_tracer_from_config(
     tracing_cfg: dict[str, Any],
     *,
     pipeline_id: str,
-):
+) -> tuple[Any, str]:
     enabled = tracing_cfg.get("enabled", True)
     backend = str(tracing_cfg.get("backend", "opentelemetry")).strip().lower()
     service_name = tracing_cfg.get("service_name") or pipeline_id

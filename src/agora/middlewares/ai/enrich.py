@@ -42,7 +42,7 @@ Pydantic records are re-validated after enrichment if ``revalidate=True``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
@@ -104,7 +104,7 @@ class AIEnrichMiddleware(AIMiddleware[T], Generic[T]):
         revalidate: bool = False,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         self._prompt_template = prompt_template
@@ -134,6 +134,6 @@ class AIEnrichMiddleware(AIMiddleware[T], Generic[T]):
         except Exception as exc:
             return await self._handle_error(exc, record, ctx)
 
-    def _merge(self, record: T, fields: dict) -> T:
+    def _merge(self, record: T, fields: dict[str, Any]) -> T:
         """Merge *fields* into *record* without mutation."""
         return merge_into_record(record, fields)

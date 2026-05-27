@@ -47,6 +47,7 @@ allowing stateful enrichers (connection pool, cache, etc.)::
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -89,7 +90,7 @@ class EnrichMiddleware(Middleware[T, T], Generic[T]):
 
     def __init__(
         self,
-        enricher: EnricherFn,
+        enricher: EnricherFn[T],
         on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         self._enricher = enricher
@@ -97,17 +98,17 @@ class EnrichMiddleware(Middleware[T, T], Generic[T]):
 
     async def on_start(self, ctx: PipelineContext) -> None:
         if hasattr(self._enricher, "on_start"):
-            await self._enricher.on_start(ctx)  # type: ignore[union-attr]
+            await self._enricher.on_start(ctx)  # type: ignore[union-attr, unused-ignore]
 
     async def on_stop(self, ctx: PipelineContext) -> None:
         if hasattr(self._enricher, "on_stop"):
-            await self._enricher.on_stop(ctx)  # type: ignore[union-attr]
+            await self._enricher.on_stop(ctx)  # type: ignore[union-attr, unused-ignore]
 
     async def process(self, record: T, ctx: PipelineContext) -> T | None:
         try:
             # Check if enricher is async before calling it, so we don't miss
             # async callable objects whose __call__ is a coroutinefunction.
-            if asyncio.iscoroutinefunction(self._enricher):
+            if inspect.iscoroutinefunction(self._enricher):
                 result = await self._enricher(record, ctx)
             else:
                 result = self._enricher(record, ctx)

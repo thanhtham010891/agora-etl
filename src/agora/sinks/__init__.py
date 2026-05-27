@@ -20,6 +20,8 @@ Registry
         ...
 """
 
+from typing import Any
+
 from agora.core.registry import Registry
 from agora.core.sink import BaseSink
 from agora.sinks.io.stdout import StdoutSink
@@ -28,7 +30,7 @@ from agora.sinks.io.stdout import StdoutSink
 # Sink Registry
 # ======================================================================
 
-sink_registry: Registry[type[BaseSink]] = Registry(name="sink")
+sink_registry: Registry[type[BaseSink[Any]]] = Registry(name="sink")
 
 # Register built-in sinks
 sink_registry.register("stdout", StdoutSink)
@@ -37,32 +39,32 @@ sink_registry.register("stdout", StdoutSink)
 def _register_lazy_sinks() -> None:
     """Register optional sinks as factories to avoid import-time errors."""
 
-    def _jsonl_factory(**kwargs):
+    def _jsonl_factory(**kwargs: Any) -> Any:
         from agora.sinks.file.jsonlines import JsonLinesSink
 
         return JsonLinesSink(**kwargs)
 
-    def _csv_sink_factory(**kwargs):
+    def _csv_sink_factory(**kwargs: Any) -> Any:
         from agora.sinks.file.csv import CsvSink
 
         return CsvSink(**kwargs)
 
-    def _parquet_sink_factory(**kwargs):
+    def _parquet_sink_factory(**kwargs: Any) -> Any:
         from agora.sinks.file.parquet import ParquetSink
 
         return ParquetSink(**kwargs)
 
-    def _log_factory(**kwargs):
+    def _log_factory(**kwargs: Any) -> Any:
         from agora.sinks.io.log import LogSink
 
         return LogSink(**kwargs)
 
-    def _webhook_factory(**kwargs):
+    def _webhook_factory(**kwargs: Any) -> Any:
         from agora.sinks.http.webhook import WebhookSink
 
         return WebhookSink(**kwargs)
 
-    def _sqlite_dlq_factory(**kwargs):
+    def _sqlite_dlq_factory(**kwargs: Any) -> Any:
         from agora.core.dlq import SQLiteDLQSink
 
         return SQLiteDLQSink(**kwargs)

@@ -108,7 +108,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
     def __init__(
         self,
         provider: AIProvider,
-        prompt_fn: Callable[[list[dict]], str],
+        prompt_fn: Callable[[list[dict[str, Any]]], str],
         *,
         output_fields: list[str] | None = None,
         batch_size: int = 20,
@@ -117,7 +117,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
         max_tokens: int = 4096,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         if batch_size < 1:
@@ -131,9 +131,9 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
         self.min_concurrency = batch_size
 
         # Runtime state (initialized in on_start)
-        self._queue: asyncio.Queue[tuple[Any, asyncio.Future]] | None = None
-        self._flush_task: asyncio.Task | None = None
-        self._size_flush_task: asyncio.Task | None = None
+        self._queue: asyncio.Queue[tuple[Any, asyncio.Future[Any]]] | None = None
+        self._flush_task: asyncio.Task[None] | None = None
+        self._size_flush_task: asyncio.Task[None] | None = None
         self._flush_lock: asyncio.Lock | None = None
         self._ctx: PipelineContext | None = None
 
@@ -200,8 +200,8 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
             return future
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[T | None] = loop.create_future()
-        await self._queue.put((record, future))
+        future2: asyncio.Future[T | None] = loop.create_future()
+        await self._queue.put((record, future2))
 
         # Schedule flush as a background task (not awaited here) to avoid
         # deadlock: process() cannot both trigger flush AND await the future
@@ -211,7 +211,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
         ):
             self._size_flush_task = asyncio.create_task(self._flush_pending(flush_partial=False))
 
-        return future
+        return future2
 
     async def drain_pending(self, ctx: PipelineContext | None = None) -> None:
         """Flush any partial batch waiting in the queue."""
@@ -244,7 +244,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
                 if not flush_partial and self._queue.qsize() < self._batch_size:
                     break
 
-                batch: list[tuple[Any, asyncio.Future]] = []
+                batch: list[tuple[Any, asyncio.Future[Any]]] = []
                 while not self._queue.empty() and len(batch) < self._batch_size:
                     try:
                         item = self._queue.get_nowait()
@@ -268,7 +268,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
                     )
                     for record, future in zip(records, futures, strict=True):
                         if not future.done():
-                            result = await self._handle_error(exc, record, self._ctx)
+                            result = await self._handle_error(exc, record, self._ctx)  # type: ignore[arg-type]
                             future.set_result(result)
                     continue
 
@@ -323,14 +323,14 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _serialize_record(record: Any) -> dict:
+    def _serialize_record(record: Any) -> dict[str, Any]:
         """Convert any record type to a plain dict for the prompt."""
         if isinstance(record, dict):
             return record
         if hasattr(record, "model_dump"):
-            return record.model_dump()
+            return record.model_dump()  # type: ignore[no-any-return]
         if hasattr(record, "__dict__"):
-            return record.__dict__
+            return record.__dict__  # type: ignore[no-any-return]
         return {"record": str(record)}
 
     # ``process()`` is overridden above and satisfies the abstract requirement

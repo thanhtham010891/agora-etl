@@ -867,14 +867,16 @@ async def test_shutdown_closes_sink_even_if_middleware_stop_fails() -> None:
         async def close(self) -> None:
             events.append("sink.close")
 
-    with pytest.raises(RuntimeError, match="middleware stop broke"):
-        await (
-            Pipeline(IterableSource([1]))
-            .pipe(FailingStopMiddleware())
-            .build(TrackingSink())  # type: ignore[arg-type]
-            .run()
-        )
+    # stop_all now logs and continues on error instead of raising,
+    # so the pipeline completes and sink is still flushed/closed.
+    summary = await (
+        Pipeline(IterableSource([1]))
+        .pipe(FailingStopMiddleware())
+        .build(TrackingSink())  # type: ignore[arg-type]
+        .run()
+    )
 
+    assert summary.records_written == 1
     assert events == [
         "sink.open",
         "sink.write:1",
@@ -882,3 +884,44 @@ async def test_shutdown_closes_sink_even_if_middleware_stop_fails() -> None:
         "sink.flush",
         "sink.close",
     ]
+
+
+@pytest.mark.asyncio
+async def test_stop_all_continues_stopping_remaining_middlewares_after_one_fails() -> None:
+    events: list[str] = []
+
+    class _FailingStopMiddleware(Middleware[int, int]):
+        name = "failing_stop"
+
+        async def on_stop(self, ctx) -> None:
+            events.append("failing.stop")
+            raise RuntimeError("stop broke")
+
+        async def process(self, record: int, ctx) -> int | None:
+            return record
+
+    class _TrackingMiddleware(Middleware[int, int]):
+        name = "tracking"
+
+        async def on_stop(self, ctx) -> None:
+            events.append("tracking.stop")
+
+        async def process(self, record: int, ctx) -> int | None:
+            return record
+
+    sink = CollectSink()
+    # _FailingStopMiddleware is first, _TrackingMiddleware is second.
+    # stop_all iterates reversed, so tracking.stop runs first, then failing.stop.
+    # Both must run regardless of failure order.
+    summary = await (
+        Pipeline(IterableSource([1]))
+        .pipe(_TrackingMiddleware())
+        .pipe(_FailingStopMiddleware())
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 1
+    # Both middlewares must have been stopped even though one raised.
+    assert "tracking.stop" in events
+    assert "failing.stop" in events

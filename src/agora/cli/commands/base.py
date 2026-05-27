@@ -59,7 +59,7 @@ class BaseCommand(ABC):
     name: str
     description: str
 
-    def register(self, subparsers: argparse._SubParsersAction) -> None:
+    def register(self, subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         """Register into the argparse subparser group.
 
         Default implementation creates a subparser and delegates to

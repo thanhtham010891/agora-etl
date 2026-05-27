@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
@@ -56,7 +56,7 @@ class CsvSource(FileSource[T], Generic[T]):
     def __init__(
         self,
         path: Path,
-        row_mapper: Callable[[dict], T | None],
+        row_mapper: Callable[[dict[str, Any]], T | None],
         delimiter: str = ",",
         has_header: bool = True,
         fieldnames: list[str] | None = None,
@@ -106,7 +106,7 @@ class CsvSource(FileSource[T], Generic[T]):
         self._record_error_count = 0
         self._record_drop_count = 0
 
-        def _open_reader():
+        def _open_reader() -> Any:
             file_obj = open(self._path, encoding=self._encoding, newline="")  # noqa: SIM115
             if self._has_header:
                 reader = csv.DictReader(file_obj, delimiter=self._delimiter)
@@ -118,8 +118,10 @@ class CsvSource(FileSource[T], Generic[T]):
                 )
             return file_obj, reader
 
-        def _read_batch(reader, row_number: int) -> tuple[list[tuple[int, dict]], int]:
-            batch: list[tuple[int, dict]] = []
+        def _read_batch(
+            reader: Any, row_number: int
+        ) -> tuple[list[tuple[int, dict[str, Any]]], int]:
+            batch: list[tuple[int, dict[str, Any]]] = []
             for row in reader:
                 row_number += 1
                 if row_number <= self._resume_row_number:

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from agora.core.checkpoint import Checkpoint, CheckpointValue
 
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +63,7 @@ class SourceRuntimeMetrics:
 
 
 @runtime_checkable
-class PrefetchCapableSource(Protocol[T]):
+class PrefetchCapableSource(Protocol[T_co]):
     """Capability protocol for sources that support bounded prefetch."""
 
     source_name: str

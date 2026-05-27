@@ -83,7 +83,7 @@ class JsonLinesSink(BaseSink[T], Generic[T]):
         self._flush_every = flush_every
         self._encoding = encoding
         self._buffer: list[T] = []
-        self._file = None
+        self._file: Any = None
 
     async def open(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,14 +135,14 @@ class JsonLinesSink(BaseSink[T], Generic[T]):
             )
             self._file.write(chunk.decode("utf-8"))
         else:
-            chunk = (
+            chunk_str = (
                 "\n".join(
-                    _json_lib.dumps(self._serializer(r), ensure_ascii=False, default=str)
+                    _json_lib.dumps(self._serializer(r), ensure_ascii=False, default=str)  # type: ignore[call-arg, misc]
                     for r in rows
                 )
                 + "\n"
             )
-            self._file.write(chunk)
+            self._file.write(chunk_str)
         self._file.flush()
 
     async def close(self) -> None:

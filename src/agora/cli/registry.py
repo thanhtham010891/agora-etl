@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agora.cli.console import console
 
@@ -60,7 +60,7 @@ def _render_rich_help(parser: argparse.ArgumentParser) -> None:
     # ------------------------------------------------------------------ #
     # Build renderable groups                                              #
     # ------------------------------------------------------------------ #
-    groups: list = []
+    groups: list[Any] = []
 
     # Usage line
     raw_usage = parser.format_usage().replace("usage: ", "").strip()
@@ -127,7 +127,7 @@ def _render_rich_help(parser: argparse.ArgumentParser) -> None:
 class _RichArgParser(argparse.ArgumentParser):
     """argparse subclass that renders help with Rich instead of plain text."""
 
-    def print_help(self, file=None) -> None:  # type: ignore[override]
+    def print_help(self, file: Any = None) -> None:  # type: ignore[override, unused-ignore]
         _render_rich_help(self)
 
     def error(self, message: str) -> None:  # type: ignore[override]
@@ -198,7 +198,7 @@ class CommandRegistry:
         )
 
         for cmd in self._commands.values():
-            cmd.register(sub)
+            cmd.register(sub)  # type: ignore[arg-type]
 
         return parser
 

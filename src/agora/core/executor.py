@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from agora.core.runtime import (
     CheckpointState,
     ExecutionCoordinator,
+    RecordDeliveryCoordinator,
     RecordDeliveryError,
 )
 from agora.core.session import PipelineLifecycleController, PipelineRunState
@@ -101,8 +102,8 @@ class PipelineExecutor:
     async def _handle_run_error(
         self,
         state: PipelineRunState,
-        coordinator,
-        exc: Exception,
+        coordinator: RecordDeliveryCoordinator,
+        exc: BaseException,
     ) -> None:
         if isinstance(exc, KeyboardInterrupt):
             state.ctx.log.info("pipeline_interrupted")
@@ -132,7 +133,7 @@ class PipelineExecutor:
             ctx=state.ctx,
             record=None,
             stage="source_stream",
-            exc=exc,
+            exc=exc if isinstance(exc, Exception) else Exception(str(exc)),
         )
 
     def _raise_terminal_error(

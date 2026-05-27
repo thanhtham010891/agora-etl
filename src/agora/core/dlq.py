@@ -101,7 +101,7 @@ class DLQSource(BaseSource[DLQRecord]):
     source_name = "dlq_source"
 
     @abstractmethod
-    async def _iter_records(self) -> AsyncGenerator[DLQRecord, None]:
+    def _iter_records(self) -> AsyncGenerator[DLQRecord, None]:
         """Yield DLQRecord objects from the underlying storage backend."""
         ...
 

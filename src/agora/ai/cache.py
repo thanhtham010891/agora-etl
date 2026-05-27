@@ -205,7 +205,7 @@ def _build_state_backend(cfg: dict[str, Any]) -> StateBackend:
         backend_cfg["prefix"] = backend_cfg.pop("key_prefix")
 
     try:
-        return state_backend_registry.create(backend_type, **backend_cfg)
+        return state_backend_registry.create(backend_type, **backend_cfg)  # type: ignore[return-value]
     except TypeError as exc:
         raise ConfigError(
             f"Failed to instantiate AI cache state backend '{backend_type}': {exc}"
@@ -238,14 +238,14 @@ def build_llm_cache(
         raise ConfigError(f"Missing 'type' in AI cache config: {cfg}")
 
     try:
-        return ai_cache_registry.create(cache_type, **cache_cfg)
+        return ai_cache_registry.create(cache_type, **cache_cfg)  # type: ignore[return-value]
     except TypeError as exc:
         raise ConfigError(f"Failed to instantiate AI cache '{cache_type}': {exc}") from exc
 
 
 ai_cache_registry: Registry[type[LLMCache]] = Registry(name="ai_cache")
-ai_cache_registry.register_factory("memory", InMemoryLLMCache)
-ai_cache_registry.register_factory("sqlite", SQLiteLLMCache)
+ai_cache_registry.register_factory("memory", InMemoryLLMCache)  # type: ignore[arg-type]
+ai_cache_registry.register_factory("sqlite", SQLiteLLMCache)  # type: ignore[arg-type]
 
 
 def _backend_cache_factory(
@@ -261,5 +261,5 @@ def _backend_cache_factory(
     )
 
 
-ai_cache_registry.register_factory("backend", _backend_cache_factory)
+ai_cache_registry.register_factory("backend", _backend_cache_factory)  # type: ignore[arg-type]
 ai_cache_registry.load_entrypoints("agora.ai.caches")

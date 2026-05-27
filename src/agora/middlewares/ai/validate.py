@@ -32,7 +32,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 import logstruct
 
@@ -106,7 +106,7 @@ class AIValidateMiddleware(AIMiddleware[T], Generic[T]):
         system: str | None = None,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         self._criteria = criteria.strip()
@@ -177,5 +177,5 @@ class AIValidateMiddleware(AIMiddleware[T], Generic[T]):
         except Exception as exc:
             return await self._handle_error(exc, record, ctx)
 
-    def _attach_flag(self, record: T, data: dict) -> T:
+    def _attach_flag(self, record: T, data: dict[str, Any]) -> T:
         return merge_into_record(record, {self._flag_field: data})

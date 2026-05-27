@@ -259,7 +259,7 @@ class Registry(Generic[P]):
         plugin = self._plugins.get(key)
         if plugin is not None:
             if callable(plugin):
-                return plugin(**kwargs)  # type: ignore[operator]
+                return plugin(**kwargs)  # type: ignore[no-any-return]
             raise TypeError(
                 f"Registry '{self._name}': plugin '{key}' is not callable. "
                 f"Use get() for pre-built instances, or register_factory() "

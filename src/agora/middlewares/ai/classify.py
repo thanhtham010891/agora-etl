@@ -42,7 +42,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
@@ -99,7 +99,7 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
         confidence_field: str | None = None,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         if not categories:
@@ -206,7 +206,7 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
             ai_m = ctx.metrics.middleware(self.name).ai
             ai_m.category_counts[category] = ai_m.category_counts.get(category, 0) + 1
 
-            updates: dict = {self._output_field: category}
+            updates: dict[str, Any] = {self._output_field: category}
             if self._confidence_field:
                 updates[self._confidence_field] = round(confidence, 4)
 

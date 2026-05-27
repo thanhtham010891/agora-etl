@@ -107,6 +107,7 @@ class SchemaMiddleware(Middleware[T, T], Generic[T]):
             and self._processor.metrics.records_observed == 1
         )
         if is_first_inference:
+            assert current_schema is not None
             ctx.log.info(
                 "schema_inferred",
                 table=self._table,

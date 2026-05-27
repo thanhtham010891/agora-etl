@@ -8,7 +8,7 @@ Automatically infers schemas by observing Python dicts, Pydantic models, and dat
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from agora.schema.types import Column, DataType, Schema, infer_python_type
 
@@ -16,13 +16,13 @@ from agora.schema.types import Column, DataType, Schema, infer_python_type
 def extract_record_fields(record: Any) -> dict[str, Any]:
     """Extract fields from a record-like object."""
     if isinstance(record, dict):
-        return record
+        return cast("dict[str, Any]", record)
 
     if hasattr(record, "model_dump"):
-        return record.model_dump()
+        return cast("dict[str, Any]", record.model_dump())
 
     if hasattr(record, "__dict__"):
-        return record.__dict__
+        return cast("dict[str, Any]", record.__dict__)
 
     return {}
 

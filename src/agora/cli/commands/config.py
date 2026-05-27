@@ -39,7 +39,7 @@ class ConfigCommand(BaseCommand):
                 sys.path.insert(0, p)
 
         try:
-            from settings import get_settings  # type: ignore[import]
+            from settings import get_settings  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:
             raise CommandError(
                 "Cannot import 'settings'.\n"

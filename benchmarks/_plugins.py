@@ -562,7 +562,9 @@ def render_plugin_markdown(
                 "—" if result.throughput_mbps is None else f"{result.throughput_mbps:,.1f} MB/s",
             ]
             if include_peak_heap:
-                row.append("—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB")
+                row.append(
+                    "—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB"
+                )
             lines.append("| " + " | ".join(row) + " |")
     else:
         lines.append("No benchmark results are included in this snapshot.")
@@ -711,7 +713,9 @@ async def run_plugin_benchmarks(args) -> None:
                 "—" if result.throughput_mbps is None else f"{result.throughput_mbps:,.1f} MB/s",
             ]
             if include_peak_heap:
-                row.append("—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB")
+                row.append(
+                    "—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB"
+                )
             table.add_row(*row)
         elif result.status == "skipped":
             row = [result.family, result.scenario, str(result.repeat_count), "—", "SKIPPED", "—"]

@@ -31,11 +31,11 @@ class FileSource(BaseSource[T], Generic[T]):
     supports_checkpoint: bool = True
 
     @abstractmethod
-    async def read_records(self) -> AsyncIterator[T]:
+    def read_records(self) -> AsyncIterator[T]:
         """Yield records from the file."""
         raise NotImplementedError
 
-    async def stream(self) -> AsyncIterator[T]:
+    async def stream(self) -> AsyncIterator[T]:  # type: ignore[override]
         async for record in self.read_records():
             yield record
 

@@ -9,7 +9,7 @@ try:
     import orjson as _json_lib
 except ImportError:
     import json as _json_lib  # type: ignore[no-redef]
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
@@ -49,7 +49,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
     def __init__(
         self,
         path: Path,
-        row_mapper: Callable[[dict], T | None],
+        row_mapper: Callable[[dict[str, Any]], T | None],
         encoding: str = "utf-8",
         batch_size: int = 1000,
         queue_maxsize: int = 2,
@@ -89,10 +89,12 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         self._record_error_count = 0
         self._record_drop_count = 0
 
-        def _open_file():
+        def _open_file() -> Any:
             return open(self._path, encoding=self._encoding)
 
-        def _read_batch(file_obj, line_number: int) -> tuple[list[tuple[int, str, object]], int]:
+        def _read_batch(
+            file_obj: Any, line_number: int
+        ) -> tuple[list[tuple[int, str, object]], int]:
             batch: list[tuple[int, str, object]] = []
             for line in file_obj:
                 line_number += 1
@@ -126,7 +128,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
                     try:
                         if isinstance(parsed, Exception):
                             raise parsed
-                        record = self._row_mapper(parsed)
+                        record = self._row_mapper(cast("dict[str, Any]", parsed))
                         if record is not None:
                             yield record
                         else:

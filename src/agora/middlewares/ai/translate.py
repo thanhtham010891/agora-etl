@@ -87,7 +87,7 @@ class AITranslateMiddleware(AIMiddleware[T], Generic[T]):
         max_tokens: int = 2048,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400 * 7,  # translations are stable — cache for 7 days
-        on_error: OnError = "passthrough",
+        on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
         super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
         if not fields:

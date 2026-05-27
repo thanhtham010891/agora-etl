@@ -119,7 +119,7 @@ class HealthServer:
         )
         self._responses = HealthResponseBuilder(
             collector=self._collector,
-            metrics_exporter=self._prometheus,
+            metrics_exporter=self._prometheus,  # type: ignore[arg-type]
         )
 
     def __repr__(self) -> str:

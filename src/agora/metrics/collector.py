@@ -33,7 +33,7 @@ import asyncio
 import copy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agora.core.metrics import MiddlewareMetrics, PipelineRunSummary, RuntimeMetrics
@@ -63,7 +63,7 @@ class RuntimeRunStats:
         self.total_adaptive_scale_down_count += runtime.adaptive_backpressure_scale_down_count
         self.last_runtime = runtime.copy()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         payload = {
             "total_source_prefetch_block_count": self.total_source_prefetch_block_count,
             "total_checkpoint_save_count": self.total_checkpoint_save_count,
@@ -74,7 +74,7 @@ class RuntimeRunStats:
             "total_adaptive_scale_down_count": self.total_adaptive_scale_down_count,
         }
         if self.last_runtime is not None:
-            payload["last_run"] = self.last_runtime.to_dict()
+            payload["last_run"] = self.last_runtime.to_dict()  # type: ignore[assignment]
         return payload
 
 
@@ -108,7 +108,7 @@ class MiddlewareRunStats:
         self.last_total_time_ms = metrics.total_time_ms
         self.last_avg_time_ms = metrics.avg_time_ms
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "total_records_in": self.total_records_in,
@@ -156,7 +156,7 @@ class AIRunStats:
         total = self.total_validation_pass + self.total_validation_fail
         return self.total_validation_pass / total if total > 0 else 0.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "total_llm_calls": self.total_llm_calls,
             "total_cache_hits": self.total_cache_hits,
@@ -234,8 +234,8 @@ class PipelineStats:
         self.ai.total_validation_pass += getattr(ai_summary, "total_validation_pass", 0)
         self.ai.total_validation_fail += getattr(ai_summary, "total_validation_fail", 0)
 
-    def to_dict(self) -> dict:
-        d: dict = {
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "pipeline_id": self.pipeline_id,
             "status": self.status,
             "total_runs": self.total_runs,
@@ -383,7 +383,7 @@ class MetricsCollector:
             return "idle"
         return "ok"
 
-    def to_health_dict(self) -> dict:
+    def to_health_dict(self) -> dict[str, Any]:
         """Render full health payload (used by /health endpoint)."""
         return {
             "status": self.overall_status,

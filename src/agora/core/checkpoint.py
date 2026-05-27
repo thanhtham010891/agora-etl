@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from agora.state.backend import StateBackend
 
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
 
 CheckpointValue = StateValue
 """Serializable checkpoint value."""
@@ -50,7 +51,7 @@ class CheckpointStore(ABC):
 
 
 @runtime_checkable
-class CheckpointableSource(Protocol[T]):
+class CheckpointableSource(Protocol[T_co]):
     """Protocol for sources that support checkpoint/resume."""
 
     source_name: str

@@ -39,7 +39,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import logstruct
 
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 logger = logstruct.getLogger(__name__)
 
 # Factory type: async callable that returns a BoundPipeline
-PipelineFactory = Callable[[], Awaitable["BoundPipeline"]]
+PipelineFactory = Callable[[], Awaitable["BoundPipeline[Any]"]]
 
 
 # ======================================================================

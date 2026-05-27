@@ -109,7 +109,7 @@ class ParquetSink(BaseSink[T], Generic[T]):
                     if key not in self._fieldnames:
                         self._fieldnames.append(key)
 
-        columns = {name: [] for name in self._fieldnames}
+        columns: dict[str, list[Any]] = {name: [] for name in self._fieldnames}
         for row in rows:
             for name in self._fieldnames:
                 columns[name].append(row.get(name))

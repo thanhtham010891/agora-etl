@@ -54,7 +54,7 @@ except ImportError:
     _HTTPX_AVAILABLE = False
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
     from pathlib import Path
 
     from agora.sources._internal.cache import HttpCache
@@ -149,7 +149,7 @@ class HTTPSource(BaseSource[T], Generic[T]):
     # ------------------------------------------------------------------ #
 
     @abstractmethod
-    async def fetch_batch(self) -> AsyncIterator[T]:
+    def fetch_batch(self) -> AsyncIterator[T]:
         """Yield one batch of records from the remote API.
 
         agora calls this in a loop until ``StopFetching`` is raised.
@@ -165,8 +165,8 @@ class HTTPSource(BaseSource[T], Generic[T]):
     async def get(
         self,
         url: str,
-        params: dict | None = None,
-        headers: dict | None = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         use_cache: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
@@ -200,7 +200,7 @@ class HTTPSource(BaseSource[T], Generic[T]):
         self,
         url: str,
         json: Any = None,
-        headers: dict | None = None,
+        headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
         """Rate-limited POST with retries (no caching — POST is not idempotent)."""
@@ -290,7 +290,7 @@ class HTTPSource(BaseSource[T], Generic[T]):
     # Stream — agora pipeline calls this                                   #
     # ------------------------------------------------------------------ #
 
-    async def stream(self):  # type: ignore[override]
+    async def stream(self) -> AsyncGenerator[T, None]:
         """Drive fetch_batch() in a loop until StopFetching or _STOP_SENTINEL is raised."""
         while True:
             try:

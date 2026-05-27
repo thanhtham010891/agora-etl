@@ -98,8 +98,8 @@ class HttpCache:
     def get(
         self,
         url: str,
-        params: dict | None = None,
-        headers: dict | None = None,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         source: str = "",
     ) -> str | None:
         """Return cached response body, or None if missing/expired."""
@@ -115,14 +115,14 @@ class HttpCache:
                 self._execute("DELETE FROM http_cache WHERE key = ?", (key,))
                 self._commit_if_not_bulk()
                 return None
-            return body
+            return str(body)
 
     def set(
         self,
         url: str,
         body: str,
-        params: dict | None = None,
-        headers: dict | None = None,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         source: str = "",
     ) -> None:
         """Cache a response body."""
@@ -138,8 +138,8 @@ class HttpCache:
     def invalidate(
         self,
         url: str,
-        params: dict | None = None,
-        headers: dict | None = None,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         source: str = "",
     ) -> None:
         """Remove a single cached entry."""
@@ -185,7 +185,7 @@ class HttpCache:
     # ------------------------------------------------------------------ #
 
     @contextmanager
-    def bulk_write(self):
+    def bulk_write(self) -> Any:
         """Context manager: batch multiple writes into one commit.
 
         Usage::
@@ -234,10 +234,10 @@ class HttpCache:
                 self._conn = None
         self._kv_store.close()
 
-    def __enter__(self):
+    def __enter__(self) -> HttpCache:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: Any) -> None:
         self.close()
 
     # ------------------------------------------------------------------ #
@@ -252,7 +252,7 @@ class HttpCache:
             self._conn.execute("PRAGMA temp_store=MEMORY")
         return self._conn
 
-    def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
         return self._raw_conn().execute(sql, params)
 
     def _commit_if_not_bulk(self) -> None:
@@ -286,7 +286,7 @@ class HttpCache:
 # ------------------------------------------------------------------ #
 
 
-def _normalize_mapping(mapping: dict | None) -> str:
+def _normalize_mapping(mapping: dict[str, str] | None) -> str:
     if not mapping:
         return ""
     return json.dumps(sorted(mapping.items()), ensure_ascii=False, separators=(",", ":"))
@@ -294,8 +294,8 @@ def _normalize_mapping(mapping: dict | None) -> str:
 
 def _make_key(
     url: str,
-    params: dict | None,
-    headers: dict | None = None,
+    params: dict[str, str] | None,
+    headers: dict[str, str] | None = None,
     source: str = "",
 ) -> str:
     """SHA-256 cache key from source + URL + params + semantic headers."""

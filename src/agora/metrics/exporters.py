@@ -215,7 +215,7 @@ class PrometheusTextExporter:
 
 
 metrics_exporter_registry: Registry[type[MetricsExporter]] = Registry(name="metrics_exporter")
-metrics_exporter_registry.register_factory("prometheus", PrometheusTextExporter)
+metrics_exporter_registry.register_factory("prometheus", PrometheusTextExporter)  # type: ignore[arg-type]
 metrics_exporter_registry.load_entrypoints("agora.metrics.exporters")
 
 __all__ = ["MetricsExporter", "PrometheusTextExporter", "metrics_exporter_registry"]

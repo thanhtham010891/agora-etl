@@ -25,9 +25,11 @@ class ExponentialBackoffPolicy:
         """Return the bounded exponential delay for the error streak."""
         if consecutive_errors <= 0:
             return 0.0
-        return min(
-            self.base_delay_seconds * (2 ** (consecutive_errors - 1)),
-            self.max_delay_seconds,
+        return float(
+            min(
+                self.base_delay_seconds * (2 ** (consecutive_errors - 1)),
+                self.max_delay_seconds,
+            )
         )
 
 

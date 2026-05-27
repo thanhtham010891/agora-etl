@@ -34,7 +34,7 @@ from agora.core.writer import WriteResult
 _WRITE_OK = WriteResult(written=True, errors=[])
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Iterator
     from types import TracebackType
 
 T = TypeVar("T")
@@ -243,7 +243,7 @@ class SinkFanOut(Generic[T]):
         if self._max_concurrency is not None and self._max_concurrency > 1:
             semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        async def _execute(call):
+        async def _execute(call: Awaitable[object]) -> object:
             if semaphore is None:
                 return await call
             async with semaphore:
@@ -267,7 +267,7 @@ class SinkFanOut(Generic[T]):
         capabilities: SinkCapabilities,
     ) -> object:
         if batch_writable:
-            await sink.write_batch(records)  # type: ignore[attr-defined]
+            await sink.write_batch(records)
             return None
 
         if (
@@ -283,13 +283,13 @@ class SinkFanOut(Generic[T]):
                     return index, exc
                 return index, None
 
-            per_record_errors: list[Exception | None] = [None] * len(records)
+            per_record_errors_concurrent: list[Exception | None] = [None] * len(records)
             results = await asyncio.gather(
                 *(_write_one(index, record) for index, record in enumerate(records))
             )
             for index, error in results:
-                per_record_errors[index] = error
-            return per_record_errors
+                per_record_errors_concurrent[index] = error
+            return per_record_errors_concurrent
 
         per_record_errors: list[Exception | None] = [None] * len(records)
         for index, record in enumerate(records):
@@ -311,6 +311,14 @@ class SinkFanOut(Generic[T]):
 
     async def write(self, record: T) -> WriteResult:
         """Write *record* to all sinks.  Returns ``WriteResult``."""
+        # Fast path: single sink, no concurrent-writes overhead.
+        if len(self._sinks) == 1 and not self._concurrent_writes:
+            try:
+                await self._sinks[0].write(record)
+                return _WRITE_OK
+            except Exception as exc:
+                return WriteResult(written=False, errors=[exc])
+
         errors: list[Exception] = []
         successful_writes = 0
         if not self._concurrent_writes:
@@ -338,7 +346,7 @@ class SinkFanOut(Generic[T]):
         # Fast path: single batch-writable sink — skip fanout overhead entirely.
         if len(self._sinks) == 1 and self._sink_batch_writable[0]:
             try:
-                await self._sinks[0].write_batch(records)  # type: ignore[attr-defined]
+                await self._sinks[0].write_batch(records)
                 n = len(records)
                 return [_WRITE_OK] * n
             except Exception as exc:
@@ -413,7 +421,7 @@ class SinkFanOut(Generic[T]):
     async def close_all(self) -> None:
         await self.close()
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[BaseSink[T]]:
         return iter(self._sinks)
 
     def bind_context(self, ctx: Any) -> None:
@@ -429,7 +437,7 @@ class SinkFanOut(Generic[T]):
 class SinkRoute(Generic[T]):
     """A predicate + sink pair."""
 
-    def __init__(self, predicate, sink: BaseSink[T]) -> None:
+    def __init__(self, predicate: Any, sink: BaseSink[T]) -> None:
         self.predicate = predicate
         self.sink = sink
 
@@ -453,7 +461,7 @@ class SinkRouter(Generic[T]):
         self._routes: list[SinkRoute[T]] = []
         self._default: BaseSink[T] | None = None
 
-    def route(self, predicate, sink: BaseSink[T]) -> SinkRouter[T]:
+    def route(self, predicate: Any, sink: BaseSink[T]) -> SinkRouter[T]:
         """Add a conditional route."""
         self._routes.append(SinkRoute(predicate, sink))
         return self

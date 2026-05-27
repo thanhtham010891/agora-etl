@@ -25,7 +25,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
@@ -88,7 +88,7 @@ class LogSink(BaseSink[T], Generic[T]):
 def _default_extra(record: Any) -> dict[str, Any]:
     """Smart dump: model_dump() → __dict__ → str fallback."""
     if hasattr(record, "model_dump"):
-        return record.model_dump()
+        return cast("dict[str, Any]", record.model_dump())
     if hasattr(record, "__dict__"):
-        return record.__dict__
+        return cast("dict[str, Any]", record.__dict__)
     return {"record": str(record)}

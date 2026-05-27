@@ -32,7 +32,7 @@ import os
 import signal
 import socket
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import logstruct
@@ -40,8 +40,10 @@ import logstruct
 from agora.metrics.collector import MetricsCollector
 
 if TYPE_CHECKING:
+    from agora.health import HealthServer
     from agora.runner.coordinator import WorkerCoordinator
-    from agora.runner.scheduled import RunRecord, ScheduledPipeline
+    from agora.runner.runtime import RunRecord
+    from agora.runner.scheduled import ScheduledPipeline
 
 logger = logstruct.getLogger(__name__)
 
@@ -77,9 +79,9 @@ class WorkerPool:
         self._health_port = health_port
         self._health_host = health_host
         self._health_auth_token = health_auth_token
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: list[asyncio.Task[None]] = []
         self._shutdown_event: asyncio.Event | None = None
-        self._health_server = None
+        self._health_server: HealthServer | None = None
         self.metrics = metrics or MetricsCollector()
         self._coordinator = coordinator
         self._metrics_observers: dict[ScheduledPipeline, object] = {}
@@ -165,7 +167,7 @@ class WorkerPool:
         )
 
         try:
-            pending: set[asyncio.Task] = {shutdown_wait, *pipeline_tasks, *health_tasks}
+            pending: set[asyncio.Task[Any]] = {shutdown_wait, *pipeline_tasks, *health_tasks}
             while pending:
                 done, pending = await asyncio.wait(
                     pending,
@@ -273,7 +275,7 @@ class WorkerPool:
     # Metrics                                                              #
     # ------------------------------------------------------------------ #
 
-    def _make_metrics_callback(self, pipeline_id: str):
+    def _make_metrics_callback(self, pipeline_id: str) -> Any:
         async def _callback(record: RunRecord) -> None:
             await self.metrics.record_run(
                 pipeline_id=pipeline_id,
@@ -286,6 +288,7 @@ class WorkerPool:
     def _wire_lease_gating(self, pipeline: ScheduledPipeline) -> None:
         """Attach lease acquire/release hooks to a pipeline for distributed mode."""
         coordinator = self._coordinator
+        assert coordinator is not None
 
         async def _pre_run_hook() -> bool:
             return await coordinator.try_acquire_lease(pipeline.pipeline_id, pipeline.run_count + 1)
@@ -300,9 +303,9 @@ class WorkerPool:
 
     def _terminal_pipeline_error(
         self,
-        completed: set[asyncio.Task],
-        pipeline_task_map: dict[asyncio.Task, ScheduledPipeline],
-    ) -> Exception | None:
+        completed: set[asyncio.Task[None]],
+        pipeline_task_map: dict[asyncio.Task[None], ScheduledPipeline],
+    ) -> BaseException | None:
         for task, pipeline in pipeline_task_map.items():
             if task not in completed:
                 continue

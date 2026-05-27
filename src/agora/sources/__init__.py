@@ -20,6 +20,8 @@ Registry
         ...
 """
 
+from typing import Any
+
 from agora.core.registry import Registry
 from agora.core.source import BaseSource
 
@@ -27,43 +29,43 @@ from agora.core.source import BaseSource
 # Source Registry
 # ======================================================================
 
-source_registry: Registry[type[BaseSource]] = Registry(name="source")
+source_registry: Registry[type[BaseSource[Any]]] = Registry(name="source")
 
 
 def _register_lazy_sources() -> None:
     """Register optional sources as factories to avoid import-time errors."""
 
-    def _http_factory(**kwargs):
+    def _http_factory(**kwargs: Any) -> Any:
         from agora.sources.http.http import HTTPSource
 
-        return HTTPSource(**kwargs)
+        return HTTPSource(**kwargs)  # type: ignore[abstract]
 
-    def _jsonl_factory(**kwargs):
+    def _jsonl_factory(**kwargs: Any) -> Any:
         from agora.sources.file.jsonlines import JsonLinesSource
 
         return JsonLinesSource(**kwargs)
 
-    def _parquet_factory(**kwargs):
+    def _parquet_factory(**kwargs: Any) -> Any:
         from agora.sources.file.parquet import ParquetSource
 
         return ParquetSource(**kwargs)
 
-    def _file_factory(**kwargs):
+    def _file_factory(**kwargs: Any) -> Any:
         from agora.sources.file.base import FileSource
 
-        return FileSource(**kwargs)
+        return FileSource(**kwargs)  # type: ignore[abstract]
 
-    def _csv_factory(**kwargs):
+    def _csv_factory(**kwargs: Any) -> Any:
         from agora.sources.file.csv import CsvSource
 
         return CsvSource(**kwargs)
 
-    def _iterable_factory(**kwargs):
+    def _iterable_factory(**kwargs: Any) -> Any:
         from agora.core.source import IterableSource
 
         return IterableSource(kwargs["records"])
 
-    def _sqlite_dlq_factory(**kwargs):
+    def _sqlite_dlq_factory(**kwargs: Any) -> Any:
         from agora.core.dlq import SQLiteDLQSource
 
         return SQLiteDLQSource(**kwargs)
