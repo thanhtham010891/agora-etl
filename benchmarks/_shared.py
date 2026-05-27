@@ -11,7 +11,6 @@ import string
 import subprocess
 import sys
 import time
-import tracemalloc
 import uuid
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
@@ -569,13 +568,8 @@ async def run_plugin_with_measurement(
     runner,
 ) -> PluginBenchmarkResult:
     payload = payload_mb(records)
-    tracemalloc.start()
     t0 = time.monotonic()
-    try:
-        consumed, written = await runner()
-    finally:
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+    consumed, written = await runner()
     return PluginBenchmarkResult(
         family=family,
         scenario=scenario,
@@ -584,5 +578,5 @@ async def run_plugin_with_measurement(
         records_written=written,
         elapsed_seconds=time.monotonic() - t0,
         payload_mb=payload,
-        peak_py_heap_mb=peak / 1024 / 1024,
+        peak_py_heap_mb=None,
     )

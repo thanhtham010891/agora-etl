@@ -134,9 +134,11 @@ class MapMiddleware(Middleware[T, U]):
     def __init__(self, fn: Callable[[T], U | None], name: str = "map") -> None:
         self.name = name
         self._fn = fn
+        self._fn_is_async = asyncio.iscoroutinefunction(fn)
 
     async def process(self, record: T, ctx: PipelineContext) -> U | None:
-        if asyncio.iscoroutinefunction(self._fn):
+        del ctx
+        if self._fn_is_async:
             return await self._fn(record)  # type: ignore[return-value]
         return self._fn(record)
 

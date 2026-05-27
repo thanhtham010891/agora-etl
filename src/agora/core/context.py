@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import logstruct
 
-from agora.core.tracing import NoopTracer
+from agora.core.tracing import NoopSpan, NoopTracer
 
 if TYPE_CHECKING:
     from agora.core.metrics import PipelineMetrics
@@ -97,17 +97,15 @@ class PipelineContext:
 
     def trace_span(self, name: str, **attributes: Any) -> _PipelineSpanScope:
         """Create a nested tracing span scoped to a block of pipeline work."""
-        parent = self.current_span()
         if isinstance(self.tracer, NoopTracer):
-            span = self.tracer.start_span(name)
-        else:
-            span = self.tracer.start_span(
-                name,
-                attributes={
-                    key: _normalize_trace_value(value) for key, value in attributes.items()
-                },
-                parent=parent,
-            )
+            del name, attributes
+            return _NOOP_PIPELINE_SPAN_SCOPE
+        parent = self.current_span()
+        span = self.tracer.start_span(
+            name,
+            attributes={key: _normalize_trace_value(value) for key, value in attributes.items()},
+            parent=parent,
+        )
         return _PipelineSpanScope(self, span)
 
 
@@ -180,6 +178,27 @@ class _PipelineSpanScope:
             self._span.record_exception(exc_val)
             self._span.set_attribute("error", True)
         self._span.end()
+
+
+class _NoopPipelineSpanScope:
+    """Cheap scope object returned when tracing is disabled."""
+
+    __slots__ = ()
+
+    def __enter__(self) -> NoopSpan:
+        return _NOOP_SPAN
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        del exc_type, exc_val, exc_tb
+
+
+_NOOP_SPAN = NoopSpan(name="noop")
+_NOOP_PIPELINE_SPAN_SCOPE = _NoopPipelineSpanScope()
 
 
 def _normalize_trace_value(value: Any) -> Any:
