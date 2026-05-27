@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tracemalloc
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -169,7 +168,6 @@ async def run_core_case(
         sink_profile.run_context_factory() if sink_profile.run_context_factory else nullcontext()
     )
 
-    tracemalloc.start()
     t0 = __import__("time").monotonic()
     try:
         with run_context:
@@ -185,8 +183,6 @@ async def run_core_case(
             detail=f"{type(exc).__name__}: {exc}",
         )
     finally:
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
         if sink_profile.cleanup is not None:
             sink_profile.cleanup()
 
@@ -200,7 +196,7 @@ async def run_core_case(
         rows=int(summary.records_consumed),
         records_written=int(summary.records_written),
         elapsed_seconds=__import__("time").monotonic() - t0,
-        peak_py_heap_mb=peak / 1024 / 1024,
+        peak_py_heap_mb=None,
         source_input_mb=source_input_mb,
         writer_flush_count=runtime.writer_flush_count,
         checkpoint_save_count=runtime.checkpoint_save_count,
@@ -282,9 +278,6 @@ def build_source_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]
                 "time": "—" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.2f}s",
                 "rows_s": format_rate(result.throughput_rps, "r/s"),
                 "mb_s": format_rate(result.throughput_mbps, "MB/s"),
-                "peak": "—"
-                if result.peak_py_heap_mb is None
-                else f"{result.peak_py_heap_mb:.1f} MB",
             }
         )
     return rows
@@ -325,9 +318,6 @@ def build_sink_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]:
                     median_or_none([result.throughput_mbps for result in direct_results]), "MB/s"
                 ),
                 "retention": format_percent(median_or_none(retention_samples)),
-                "peak": format_rate(
-                    median_or_none([result.peak_py_heap_mb for result in direct_results]), "MB"
-                ),
             }
         )
     return rows
@@ -379,7 +369,6 @@ def build_rich_table(results: list[BenchmarkResult], rows_requested: int):
     table.add_column("Time", justify="right")
     table.add_column("Rows/s", justify="right", style="bold green")
     table.add_column("MB/s", justify="right", style="bold cyan")
-    table.add_column("Peak Py Heap", justify="right", style="dim")
     table.add_column("Buffered", justify="right", style="dim")
 
     previous_source: str | None = None
@@ -398,7 +387,6 @@ def build_rich_table(results: list[BenchmarkResult], rows_requested: int):
                 "[yellow]SKIPPED[/]",
                 "—",
                 "—",
-                "—",
             )
             continue
         if result.status == "failed":
@@ -411,10 +399,9 @@ def build_rich_table(results: list[BenchmarkResult], rows_requested: int):
                 "[red]FAILED[/]",
                 "—",
                 "—",
-                "—",
             )
             if result.detail:
-                table.add_row("", "", "", "", "", result.detail, "", "", "")
+                table.add_row("", "", "", "", "", result.detail, "", "")
             continue
 
         buffered = (
@@ -430,7 +417,6 @@ def build_rich_table(results: list[BenchmarkResult], rows_requested: int):
             "—" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.2f}s",
             "—" if result.throughput_rps is None else f"{result.throughput_rps:,.0f} r/s",
             "—" if result.throughput_mbps is None else f"{result.throughput_mbps:,.1f} MB/s",
-            "—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB",
             buffered,
         )
     return table
@@ -467,9 +453,9 @@ def render_core_markdown(
     ]
     lines.extend(
         markdown_table(
-            ["Source", "Median Time", "Median Rows/s", "Median MB/s", "Median Peak Py Heap"],
+            ["Source", "Median Time", "Median Rows/s", "Median MB/s"],
             [
-                [row["source"], row["time"], row["rows_s"], row["mb_s"], row["peak"]]
+                [row["source"], row["time"], row["rows_s"], row["mb_s"]]
                 for row in source_summary
             ],
         )
@@ -490,10 +476,9 @@ def render_core_markdown(
                 "Median Direct Rows/s",
                 "Median Direct MB/s",
                 "Median vs Null",
-                "Median Peak Py Heap",
             ],
             [
-                [row["sink"], row["rows_s"], row["mb_s"], row["retention"], row["peak"]]
+                [row["sink"], row["rows_s"], row["mb_s"], row["retention"]]
                 for row in sink_summary
             ],
         )
@@ -535,21 +520,21 @@ def render_core_markdown(
             "",
             f"Rows per scenario: `{rows_requested:,}`",
             "",
-            "| Source | Middleware | Sink | Repeat | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap | Buffered |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Source | Middleware | Sink | Repeat | Median Time | Median Rows/s | Median MB/s | Buffered |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
 
     for result in results:
         if result.status == "skipped":
             lines.append(
-                f"| {result.source} | {result.middleware} | {result.sink} | {result.repeat_count} | — | SKIPPED | — | — | — |"
+                f"| {result.source} | {result.middleware} | {result.sink} | {result.repeat_count} | — | SKIPPED | — | — |"
             )
             continue
         if result.status == "failed":
             detail = result.detail or ""
             lines.append(
-                f"| {result.source} | {result.middleware} | {result.sink} | {result.repeat_count} | — | FAILED: {detail} | — | — | — |"
+                f"| {result.source} | {result.middleware} | {result.sink} | {result.repeat_count} | — | FAILED: {detail} | — | — |"
             )
             continue
 
@@ -571,7 +556,6 @@ def render_core_markdown(
                     "—"
                     if result.throughput_mbps is None
                     else f"{result.throughput_mbps:,.1f} MB/s",
-                    "—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB",
                     buffered,
                 ]
             )
@@ -581,7 +565,7 @@ def render_core_markdown(
     lines.extend(
         [
             "",
-            "`Peak Py Heap` reflects Python heap only. It does not include native memory from components such as `pyarrow` or `uvloop`.",
+            "Core throughput is measured without `tracemalloc` so the reported rows/s and MB/s are not distorted by heap sampling overhead.",
         ]
     )
     return "\n".join(lines) + "\n"

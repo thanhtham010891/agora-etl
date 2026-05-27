@@ -446,6 +446,7 @@ def render_plugin_markdown(
     env: dict[str, str],
 ) -> str:
     repeat_count = results[0].repeat_count if results else 1
+    include_peak_heap = any(result.peak_py_heap_mb is not None for result in results)
     counterpart_link = "redis.md" if family == "Kafka" else "kafka.md"
     service_label = env["kafka_bootstrap"] if family == "Kafka" else env["redis_url"]
     service_name = "Kafka" if family == "Kafka" else "Redis"
@@ -519,42 +520,50 @@ def render_plugin_markdown(
         "",
     ]
     if results:
-        lines.extend(
-            [
-                "| Scenario | Repeat | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap |",
-                "| --- | ---: | ---: | ---: | ---: | ---: |",
-            ]
-        )
+        if include_peak_heap:
+            lines.extend(
+                [
+                    "| Scenario | Repeat | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "| Scenario | Repeat | Median Time | Median Rows/s | Median MB/s |",
+                    "| --- | ---: | ---: | ---: | ---: |",
+                ]
+            )
         for result in results:
             if result.status == "skipped":
-                lines.append(f"| {result.scenario} | {result.repeat_count} | — | SKIPPED | — | — |")
+                if include_peak_heap:
+                    lines.append(
+                        f"| {result.scenario} | {result.repeat_count} | — | SKIPPED | — | — |"
+                    )
+                else:
+                    lines.append(f"| {result.scenario} | {result.repeat_count} | — | SKIPPED | — |")
                 continue
             if result.status == "failed":
                 detail = result.detail or ""
-                lines.append(
-                    f"| {result.scenario} | {result.repeat_count} | — | FAILED: {detail} | — | — |"
-                )
+                if include_peak_heap:
+                    lines.append(
+                        f"| {result.scenario} | {result.repeat_count} | — | FAILED: {detail} | — | — |"
+                    )
+                else:
+                    lines.append(
+                        f"| {result.scenario} | {result.repeat_count} | — | FAILED: {detail} | — |"
+                    )
                 continue
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        result.scenario,
-                        str(result.repeat_count),
-                        "—" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.2f}s",
-                        "—"
-                        if result.throughput_rps is None
-                        else f"{result.throughput_rps:,.0f} r/s",
-                        "—"
-                        if result.throughput_mbps is None
-                        else f"{result.throughput_mbps:,.1f} MB/s",
-                        "—"
-                        if result.peak_py_heap_mb is None
-                        else f"{result.peak_py_heap_mb:.1f} MB",
-                    ]
-                )
-                + " |"
-            )
+            row = [
+                result.scenario,
+                str(result.repeat_count),
+                "—" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.2f}s",
+                "—" if result.throughput_rps is None else f"{result.throughput_rps:,.0f} r/s",
+                "—" if result.throughput_mbps is None else f"{result.throughput_mbps:,.1f} MB/s",
+            ]
+            if include_peak_heap:
+                row.append("—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB")
+            lines.append("| " + " | ".join(row) + " |")
     else:
         lines.append("No benchmark results are included in this snapshot.")
     lines.extend(
@@ -563,10 +572,22 @@ def render_plugin_markdown(
             "## Reading the results",
             "",
             *notes,
-            "",
-            "`Peak Py Heap` reflects Python heap only. It does not include broker/server memory or native allocations.",
         ]
     )
+    if include_peak_heap:
+        lines.extend(
+            [
+                "",
+                "`Peak Py Heap` reflects Python heap only. It does not include broker/server memory or native allocations.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Plugin throughput is measured without `tracemalloc` so the reported rows/s and MB/s are not distorted by heap sampling overhead.",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -670,32 +691,38 @@ async def run_plugin_benchmarks(args) -> None:
             )
 
     table = Table(title=f"Agora ETL Plugin Benchmarks ({args.rows:,} rows)")
+    include_peak_heap = any(result.peak_py_heap_mb is not None for result in results)
     table.add_column("Family", style="bold")
     table.add_column("Scenario")
     table.add_column("Repeat", justify="right")
     table.add_column("Time", justify="right")
     table.add_column("Rows/s", justify="right", style="bold green")
     table.add_column("MB/s", justify="right", style="bold cyan")
-    table.add_column("Peak Py Heap", justify="right", style="dim")
+    if include_peak_heap:
+        table.add_column("Peak Py Heap", justify="right", style="dim")
     for result in results:
         if result.status == "ok":
-            table.add_row(
+            row = [
                 result.family,
                 result.scenario,
                 str(result.repeat_count),
                 "—" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.2f}s",
                 "—" if result.throughput_rps is None else f"{result.throughput_rps:,.0f} r/s",
                 "—" if result.throughput_mbps is None else f"{result.throughput_mbps:,.1f} MB/s",
-                "—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB",
-            )
+            ]
+            if include_peak_heap:
+                row.append("—" if result.peak_py_heap_mb is None else f"{result.peak_py_heap_mb:.1f} MB")
+            table.add_row(*row)
         elif result.status == "skipped":
-            table.add_row(
-                result.family, result.scenario, str(result.repeat_count), "—", "SKIPPED", "—", "—"
-            )
+            row = [result.family, result.scenario, str(result.repeat_count), "—", "SKIPPED", "—"]
+            if include_peak_heap:
+                row.append("—")
+            table.add_row(*row)
         else:
-            table.add_row(
-                result.family, result.scenario, str(result.repeat_count), "—", "FAILED", "—", "—"
-            )
+            row = [result.family, result.scenario, str(result.repeat_count), "—", "FAILED", "—"]
+            if include_peak_heap:
+                row.append("—")
+            table.add_row(*row)
     console.print()
     console.print(table)
 
