@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agora-etl"
-version = "0.1.9"
+version = "0.2.0"
 description = "Agora — async-first ETL framework for Python."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -42,6 +42,9 @@ Repository = "https://github.com/thanhtham010891/agora-etl"
 BugTracker = "https://github.com/thanhtham010891/agora-etl/issues"
 
 [project.optional-dependencies]
+rs = [
+    "agora-etl-rs>=0.1.0",
+]
 file = [
     "pyarrow>=18.0,<20",
     "orjson>=3.11,<4",

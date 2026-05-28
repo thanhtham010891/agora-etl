@@ -12,10 +12,8 @@ from agora.runner.scheduled import ScheduledPipeline, Schedule
 async def build_pipeline() -> BoundPipeline:
     db = await connect_db(settings.DATABASE_URL)
     return (
-        Pipeline("events_ingest")
-        .source(CsvSource("events.csv"))
-        .sink(DatabaseSink(db))
-        .build()
+        Pipeline(CsvSource("events.csv"), id="events_ingest")
+        .build(DatabaseSink(db))
     )
 
 scheduled = ScheduledPipeline(

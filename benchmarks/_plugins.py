@@ -26,7 +26,7 @@ from _shared import (
     run_subprocess_json,
 )
 
-from agora import IterableSource, Pipeline
+from agora import DeliveryConfig, IterableSource, Pipeline
 
 
 class _RoundRobinPartitioner:
@@ -167,7 +167,7 @@ async def run_kafka_roundtrip(records_count: int) -> PluginBenchmarkResult:
                     poll_timeout_ms=50,
                 )
             )
-            .build(sink, batch_size=PLUGIN_BATCH_SIZE)
+            .build(sink, config=DeliveryConfig(batch_size=PLUGIN_BATCH_SIZE))
             .run(max_records=records_count)
         )
         return int(consume_summary.records_consumed), int(produce_summary.records_written)
@@ -290,7 +290,7 @@ async def run_redis_xreadgroup(records_count: int) -> PluginBenchmarkResult:
                     decode_responses=False,
                 )
             )
-            .build(sink, batch_size=PLUGIN_BATCH_SIZE)
+            .build(sink, config=DeliveryConfig(batch_size=PLUGIN_BATCH_SIZE))
             .run(max_records=records_count)
         )
         return int(consume_summary.records_consumed), int(consume_summary.records_consumed)
@@ -347,7 +347,7 @@ async def run_redis_stream_roundtrip(records_count: int) -> PluginBenchmarkResul
                     decode_responses=False,
                 )
             )
-            .build(sink, batch_size=PLUGIN_BATCH_SIZE)
+            .build(sink, config=DeliveryConfig(batch_size=PLUGIN_BATCH_SIZE))
             .run(max_records=records_count)
         )
 
@@ -458,6 +458,10 @@ def render_plugin_markdown(
             [
                 f"| **Kafka max pending acks** | {KAFKA_MAX_PENDING_ACKS} |",
                 f"| **Kafka commit every** | {KAFKA_COMMIT_EVERY} |",
+                "| **Kafka acks** | 1 |",
+                "| **Kafka idempotence** | disabled |",
+                "| **Kafka linger ms** | 0 |",
+                "| **Kafka partitioner** | round robin |",
             ]
         )
         scenario_rows = [
@@ -467,6 +471,7 @@ def render_plugin_markdown(
         notes = [
             "- `Produce` isolates write-side throughput.",
             "- `Roundtrip` includes producer, consumer, commit, and broker coordination cost.",
+            "- Kafka scenarios use a throughput-biased producer profile (`acks=1`, idempotence disabled, `linger_ms=0`), so treat them as transport benchmarks rather than durability-maximized production settings.",
         ]
     else:
         settings_rows.extend(

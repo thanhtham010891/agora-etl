@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from agora import (
+    DeliveryConfig,
     InMemoryCheckpointStore,
     IterableSource,
     Pipeline,
@@ -199,7 +200,7 @@ async def test_r02_prepare_resume_failure_aborts_run_under_fail_closed() -> None
     source = _PrepareResumeRaisingSource([1, 2, 3], RuntimeError("resume boom"))
 
     with pytest.raises(RuntimeError, match="resume boom"):
-        await Pipeline(source).build(_CollectSink(), checkpoint=store).run()
+        await Pipeline(source).build(_CollectSink(), config=DeliveryConfig(checkpoint=store)).run()
 
 
 # ======================================================================
@@ -232,8 +233,10 @@ async def test_r03_prepare_resume_failure_log_and_continue_starts_from_scratch()
         Pipeline(source)
         .build(
             sink,
-            checkpoint=store,
-            checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            ),
         )
         .run()
     )
@@ -260,7 +263,7 @@ async def test_r04_checkpoint_load_failure_aborts_run_under_fail_closed() -> Non
     source = _CheckpointedSequenceSource([1, 2, 3])
 
     with pytest.raises(RuntimeError, match="load broke"):
-        await Pipeline(source).build(_CollectSink(), checkpoint=store).run()
+        await Pipeline(source).build(_CollectSink(), config=DeliveryConfig(checkpoint=store)).run()
 
 
 # ======================================================================
@@ -282,8 +285,10 @@ async def test_r05_checkpoint_load_failure_log_and_continue_runs_from_start() ->
         Pipeline(_CheckpointedSequenceSource([1, 2, 3]))
         .build(
             sink,
-            checkpoint=store,
-            checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            ),
         )
         .run()
     )
@@ -315,8 +320,10 @@ async def test_r06_save_failure_log_and_continue_does_not_retry_per_record() -> 
         Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4, 5]))
         .build(
             sink,
-            checkpoint=store,
-            checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            ),
         )
         .run()
     )
@@ -349,7 +356,7 @@ async def test_r07_non_checkpointable_source_with_store_runs_without_checkpointi
     source = IterableSource([1, 2, 3])
     assert is_checkpoint_capable(source) is False
 
-    summary = await Pipeline(source).build(sink, checkpoint=store).run()
+    summary = await Pipeline(source).build(sink, config=DeliveryConfig(checkpoint=store)).run()
 
     assert sink.records == [1, 2, 3]
     assert summary.runtime.checkpoint_enabled is False
@@ -373,7 +380,7 @@ async def test_r08_second_run_resumes_from_saved_position() -> None:
     first_sink = _CollectSink()
     await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(first_sink, checkpoint=store)
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))
         .run(max_records=2)
     )
     assert first_sink.records == [10, 20]
@@ -382,7 +389,7 @@ async def test_r08_second_run_resumes_from_saved_position() -> None:
     second_sink = _CollectSink()
     summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(second_sink, checkpoint=store)
+        .build(second_sink, config=DeliveryConfig(checkpoint=store))
         .run()
     )
 
@@ -410,7 +417,7 @@ async def test_r09_sqlite_checkpoint_survives_store_close_and_reopen(tmp_path) -
     store = SQLiteCheckpointStore(path=str(db_path))
     await (
         Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4]))
-        .build(_CollectSink(), checkpoint=store)
+        .build(_CollectSink(), config=DeliveryConfig(checkpoint=store))
         .run(max_records=2)
     )
     await store.close()
@@ -419,7 +426,7 @@ async def test_r09_sqlite_checkpoint_survives_store_close_and_reopen(tmp_path) -
     reopened = SQLiteCheckpointStore(path=str(db_path))
     sink = _CollectSink()
     summary = await (
-        Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4])).build(sink, checkpoint=reopened).run()
+        Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4])).build(sink, config=DeliveryConfig(checkpoint=reopened)).run()
     )
 
     assert sink.records == [3, 4], "[RECOVERY-09] SQLite checkpoint must survive store close/reopen"

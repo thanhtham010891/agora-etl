@@ -14,17 +14,19 @@ Every pipeline is composed of five parts. Understanding what each one owns makes
 
 **CheckpointStore** persists the source's position so a pipeline can resume after a restart. The runtime calls `checkpoint_store.save()` every `checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)` is called before streaming begins. Not all sources support checkpointing — see [Sources](sources.md) for which ones do.
 
-## Linear vs buffered execution
+## Execution lanes
 
-**Linear mode** is the default. Records move through the chain one at a time:
+The runtime selects one of three execution lanes based on the pipeline's source and middleware chain.
+
+**Linear lane** is the default. Records move through the chain one at a time:
 
 ```
 source.stream() → chain.process(record) → writer.write(result)
 ```
 
-This is the right mode for most pipelines. It is simple, predictable, and easy to reason about under failure.
+This is the right lane for most pipelines. Simple, predictable, easy to reason about under failure.
 
-**Buffered mode** activates automatically when a middleware in the chain exposes a `submit` method — in practice, `AIBatchMiddleware`. The runtime splits the chain at that middleware and runs the buffered stage concurrently up to the configured limit, then drains results in source order before passing them to the suffix of the chain and the writer.
+**Buffered lane** activates when a middleware in the chain exposes a `submit` method **and** declares `min_concurrency > 1` — in practice, `AIBatchMiddleware`. The runtime splits the chain at that middleware and runs the buffered stage concurrently up to the configured limit, then drains results in source order before passing them to the suffix of the chain and the writer.
 
 ```
 source.stream()
@@ -34,7 +36,27 @@ source.stream()
   → writer.write(result)
 ```
 
+A submit-capable middleware with `min_concurrency == 1` runs on the linear lane — there is no concurrency benefit to pay the per-record task overhead for.
+
 The key point: buffered mode increases throughput for slow async stages (LLM calls, external APIs) without changing the ordering or failure semantics. Output order is still source order. A sink failure or cancellation still aborts pending buffered work rather than committing later records out of order.
+
+**Batch lane** activates when the source sets `supports_batch_emit = True` (e.g. `CsvSource(emit_batches=True)`, `ArrowCsvSource`, `ParquetSource(use_arrow_batches=True)`). The runtime calls `source.stream_batches()` instead of `stream()` and processes whole batches at once:
+
+```
+source.stream_batches() → chain.process_batch(batch) → writer.write_batch(results)
+```
+
+Checkpointing, DLQ routing, and ordering guarantees are all preserved — the checkpoint advances once per batch, after the batch is durably written.
+
+**Arrow fast path** is a sub-case of the batch lane. When the source emits `pa.RecordBatch` objects (`emits_arrow_batches = True`) **and** every middleware in the chain is an `ArrowBatchMiddleware` subclass **and** the sink is Arrow-native (`write_arrow_batch` present), the runtime keeps data columnar end-to-end:
+
+```
+source.stream_batches()          # yields pa.RecordBatch
+  → chain.process_arrow_batch()  # each stage: RecordBatch → RecordBatch (no to_pylist)
+  → sink.write_arrow_batch()     # zero Python object allocation per row
+```
+
+Measured throughput: ~1.2M r/s (CSV→Parquet with ArrowMap+Filter) vs ~110k r/s for the row-path baseline. If any stage is a regular `Middleware` or `BatchMiddleware`, the runtime falls back to `to_pylist()` and the Arrow advantage is lost.
 
 ## Runtime guarantees
 

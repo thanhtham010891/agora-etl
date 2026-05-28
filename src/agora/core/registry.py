@@ -54,21 +54,16 @@ if TYPE_CHECKING:
 P = TypeVar("P")
 
 logger = logstruct.getLogger(__name__)
-AGORA_PLUGIN_MANIFEST_VERSION = "0.3"
+AGORA_PLUGIN_MANIFEST_VERSION = "0.4"
 """Version of the optional plugin manifest contract understood by this release.
 
 This value tracks the shape of ``MANIFEST`` metadata used for diagnostics and
 compatibility hints. It is intentionally separate from the ``agora-etl``
 package version.
-"""
 
-AGORA_API_VERSION = AGORA_PLUGIN_MANIFEST_VERSION
-"""Deprecated alias for ``AGORA_PLUGIN_MANIFEST_VERSION``.
-
-.. deprecated:: 0.1.9
-    Import ``AGORA_PLUGIN_MANIFEST_VERSION`` instead. This alias will be
-    removed in ``0.2.0``. Both names resolve to the same value — updating
-    is a one-line change with no behavioral effect.
+Bumped from ``"0.3"`` to ``"0.4"`` in ``0.2.0`` — the batch-native protocols
+(``BatchableSource``, ``BatchMiddleware``, ``ArrowNativeSink``) are a breaking
+change for plugin authors who implement source or middleware extensions.
 """
 
 

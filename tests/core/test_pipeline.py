@@ -8,7 +8,14 @@ import asyncio
 
 import pytest
 
-from agora import FilterMiddleware, IterableSource, MapMiddleware, Pipeline, SinkFailurePolicy
+from agora import (
+    DeliveryConfig,
+    FilterMiddleware,
+    IterableSource,
+    MapMiddleware,
+    Pipeline,
+    SinkFailurePolicy,
+)
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 from agora.sinks.io.stdout import StdoutSink
@@ -481,7 +488,7 @@ async def test_writer_batch_size_uses_sink_batch_path_and_flushes_tail() -> None
 
     summary = await (
         Pipeline(IterableSource(list(range(7))))
-        .build(sink, batch_size=3)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(batch_size=3))  # type: ignore[arg-type]
         .run()
     )
 
@@ -492,6 +499,22 @@ async def test_writer_batch_size_uses_sink_batch_path_and_flushes_tail() -> None
     assert summary.runtime.writer_flush_count == 3
     assert summary.runtime.writer_flush_max_batch_size == 3
     assert summary.runtime.writer_flush_time_ms >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_writer_batch_size_preserves_delivery_success_hooks_with_batch_sink() -> None:
+    acknowledged: list[int] = []
+    sink = BatchCollectSink()
+
+    summary = await (
+        Pipeline(HookTrackingSource([1, 2, 3, 4], acknowledged))
+        .build(sink, config=DeliveryConfig(batch_size=2))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 4
+    assert sink.records == [1, 2, 3, 4]
+    assert acknowledged == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio
@@ -688,7 +711,7 @@ async def test_partial_sink_errors_can_log_and_continue_when_opted_in() -> None:
 
     summary = await (
         Pipeline(IterableSource([1]))
-        .fan_out([OkSink(), FailingSink()], sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE)  # type: ignore[list-item]
+        .fan_out([OkSink(), FailingSink()], config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE))  # type: ignore[list-item]
         .run()
     )
 
@@ -831,7 +854,7 @@ async def test_dlq_open_failure_closes_started_writer() -> None:
     with pytest.raises(RuntimeError, match="dlq open broke"):
         await (
             Pipeline(IterableSource([1]))
-            .build(TrackingWriterSink(), dlq=FailingDLQSink())  # type: ignore[arg-type]
+            .build(TrackingWriterSink(), config=DeliveryConfig(dlq=FailingDLQSink()))  # type: ignore[arg-type]
             .run()
         )
 

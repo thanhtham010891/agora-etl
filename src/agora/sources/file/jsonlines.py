@@ -54,6 +54,9 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         batch_size: int = 1000,
         queue_maxsize: int = 2,
         on_record_error: SourceRecordFailurePolicy = SourceRecordFailurePolicy.FAIL_CLOSED,
+        *,
+        emit_batches: bool = False,
+        emit_batch_size: int = 5000,
     ) -> None:
         self._path = Path(path)
         self._row_mapper = row_mapper
@@ -65,6 +68,10 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         self._last_line_number = 0
         self._record_error_count = 0
         self._record_drop_count = 0
+        self.supports_rust_prefetch: bool = True
+        self.supports_prefetch: bool = False  # linear path uses sync stream() directly
+        self._emit_batch_size = max(emit_batch_size, 1)
+        self.supports_batch_emit: bool = emit_batches
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
         if checkpoint is None:
@@ -84,6 +91,78 @@ class JsonLinesSource(FileSource[T], Generic[T]):
             record_error_count=self._record_error_count,
             record_drop_count=self._record_drop_count,
         )
+
+    def stream_sync_batches(self):
+        """Synchronous generator yielding processed records one by one.
+
+        Called by the Rust thread in iter_source_records_rust() — runs in a
+        background thread so the asyncio event loop is not blocked.
+        """
+        self._record_error_count = 0
+        self._record_drop_count = 0
+
+        with open(self._path, encoding=self._encoding) as file_obj:
+            line_number = 0
+            for line in file_obj:
+                line_number += 1
+                if line_number <= self._resume_line_number:
+                    continue
+                self._last_line_number = line_number
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed = _json_lib.loads(stripped)
+                    record = self._row_mapper(parsed)
+                    if record is not None:
+                        yield record
+                    else:
+                        self._record_drop_count += 1
+                except Exception as exc:
+                    self._record_error_count += 1
+                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                        self._record_drop_count += 1
+                        continue
+                    from agora.core.source import SourceRecordError
+                    raise SourceRecordError(
+                        exc,
+                        record=stripped,
+                        checkpoint=self.current_checkpoint(),
+                        source=self.source_name,
+                    ) from exc
+
+    async def stream_batches(self) -> AsyncIterator[list[T]]:
+        """Yield ``list[T]`` batches for the batch execution lane.
+
+        Reuses the per-record parse path (``stream_sync_batches``) and groups
+        records into lists of ``emit_batch_size``. Enabled via ``emit_batches=True``.
+        """
+        batch: list[T] = []
+        batches_emitted = 0
+        for record in self.stream_sync_batches():
+            batch.append(record)
+            if len(batch) >= self._emit_batch_size:
+                yield batch
+                batch = []
+                batches_emitted += 1
+                if batches_emitted % 4 == 0:
+                    await asyncio.sleep(0)
+        if batch:
+            yield batch
+
+    async def stream(self) -> AsyncIterator[T]:  # type: ignore[override]
+        """Stream records synchronously in the event loop thread.
+
+        Avoids thread boundary and asyncio.Queue overhead entirely.
+        Yields control to the event loop every 5000 records so other
+        coroutines remain responsive.
+        """
+        count = 0
+        for record in self.stream_sync_batches():
+            yield record
+            count += 1
+            if count % 5000 == 0:
+                await asyncio.sleep(0)
 
     async def read_records(self) -> AsyncIterator[T]:
         self._record_error_count = 0
@@ -147,3 +226,70 @@ class JsonLinesSource(FileSource[T], Generic[T]):
                         ) from exc
         finally:
             await asyncio.to_thread(file_obj.close)
+
+
+# ======================================================================
+# ArrowJsonLinesSource — Arrow-native JSONL reader
+# ======================================================================
+
+
+class ArrowJsonLinesSource(FileSource[Any]):
+    """Read a JSONL file as ``pa.RecordBatch`` objects via ``pyarrow.json``.
+
+    Yields batches directly to the Arrow execution lane — no ``row_mapper``,
+    no per-row Python dict allocation. Pair with an Arrow-native sink and
+    ``ArrowMapMiddleware``/``ArrowFilterMiddleware`` to keep data columnar.
+
+    Requires: ``pip install "agora-etl[file]"``
+
+    Parameters
+    ----------
+    path:
+        Path to the ``.jsonl`` file.
+    batch_size:
+        Rows per ``pa.RecordBatch`` (default: 65 536).
+    """
+
+    source_name = "arrow_jsonl"
+    supports_batch_emit: bool = True
+    emits_arrow_batches: bool = True
+
+    def __init__(
+        self,
+        path: Path,
+        batch_size: int = 65_536,
+    ) -> None:
+        self._path = Path(path)
+        self._batch_size = max(batch_size, 1)
+        self._rows_read: int = 0
+
+    def current_checkpoint(self) -> dict[str, int] | None:
+        return {"rows": self._rows_read} if self._rows_read else None
+
+    async def prepare_resume(self, checkpoint: Any) -> None:
+        return None
+
+    async def stream_batches(self) -> AsyncIterator[Any]:
+        try:
+            import pyarrow.json as pajson
+        except ImportError as exc:
+            raise ImportError(
+                "ArrowJsonLinesSource requires pyarrow. Install via: pip install 'agora-etl[file]'"
+            ) from exc
+
+        def _read() -> list[Any]:
+            table = pajson.read_json(str(self._path))
+            return table.to_batches(max_chunksize=self._batch_size)
+
+        for batch in await asyncio.to_thread(_read):
+            self._rows_read += batch.num_rows
+            yield batch
+
+    async def stream(self) -> AsyncIterator[Any]:  # type: ignore[override]
+        async for batch in self.stream_batches():
+            for row in batch.to_pylist():
+                yield row
+
+    async def read_records(self) -> AsyncIterator[Any]:  # type: ignore[override]
+        async for row in self.stream():
+            yield row

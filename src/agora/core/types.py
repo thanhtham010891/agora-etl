@@ -12,7 +12,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from agora.core.checkpoint import CheckpointStore
+    from agora.core.dlq import DLQRecord
+    from agora.core.sink import BaseSink
+    from agora.core.tracing import PipelineTracer
 
 # ======================================================================
 # Generic TypeVars
@@ -128,3 +134,26 @@ class Backpressure:
             writer_slow_ms=writer_slow_ms,
             checkpoint_slow_ms=checkpoint_slow_ms,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryConfig:
+    """Delivery-side configuration for a pipeline: DLQ, checkpointing, batching,
+    failure policies, sink concurrency, and backpressure.
+
+    Passed to ``Pipeline.build()`` / ``fan_out()`` / ``route()`` via the
+    ``config`` keyword to keep their signatures stable as options grow.
+    """
+
+    dlq: BaseSink[DLQRecord] | None = None
+    dlq_failure_policy: DLQFailurePolicy = DLQFailurePolicy.LOG_ONLY
+    checkpoint: CheckpointStore | None = None
+    checkpoint_key: str | None = None
+    checkpoint_every: int = 1
+    checkpoint_failure_policy: CheckpointFailurePolicy = CheckpointFailurePolicy.FAIL_CLOSED
+    batch_size: int = 1
+    sink_failure_policy: SinkFailurePolicy = SinkFailurePolicy.FAIL_CLOSED
+    sink_concurrency: int | None = None
+    max_buffer_size: int | None = None
+    backpressure: Backpressure | None = None
+    tracer: PipelineTracer | None = None

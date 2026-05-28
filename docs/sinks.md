@@ -150,9 +150,11 @@ class MyDatabaseSink(BaseSink[MyRecord]):
 Write each record to multiple sinks:
 
 ```python
+from agora import DeliveryConfig
+
 summary = await (
     Pipeline(src)
-    .fan_out([file_sink, webhook_sink], batch_size=50)
+    .fan_out([file_sink, webhook_sink], config=DeliveryConfig(batch_size=50))
     .run()
 )
 ```

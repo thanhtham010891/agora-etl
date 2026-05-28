@@ -203,7 +203,7 @@ class SQLiteDLQSink(DLQSink):
     Usage::
 
         dlq = SQLiteDLQSink(".agora_dlq.db")
-        pipeline = Pipeline(src).pipe(mw).build(sink, dlq=dlq)
+        pipeline = Pipeline(src).pipe(mw).build(sink, config=DeliveryConfig(dlq=dlq))
         await pipeline.run()
     """
 

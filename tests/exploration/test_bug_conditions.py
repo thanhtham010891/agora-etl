@@ -305,7 +305,7 @@ def test_code2_pipeline_with_dlq_mutates_intermediate_object() -> None:
 
     Validates: Requirements 1.11, 1.12
     """
-    from agora import IterableSource, Pipeline
+    from agora import DeliveryConfig, IterableSource, Pipeline
 
     class _FakeDLQSink:
         sink_name = "fake_dlq"
@@ -327,7 +327,7 @@ def test_code2_pipeline_with_dlq_mutates_intermediate_object() -> None:
     dlq = _FakeDLQSink()
 
     base = pipeline.build()
-    with_dlq = pipeline.build(dlq=dlq)  # type: ignore[arg-type]
+    with_dlq = pipeline.build(config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
 
     # Must be different objects
     assert base is not with_dlq, (
@@ -335,15 +335,15 @@ def test_code2_pipeline_with_dlq_mutates_intermediate_object() -> None:
     )
 
     # base must not have been mutated
-    assert base._dlq_sink is None, (
+    assert base._config.dlq is None, (
         f"[CODE-2] BUG CONFIRMED: build(dlq=...) mutated the intermediate BoundPipeline. "
-        f"base._dlq_sink={base._dlq_sink!r} (expected None)"
+        f"base._config.dlq={base._config.dlq!r} (expected None)"
     )
 
     # with_dlq must have the DLQ set
-    assert with_dlq._dlq_sink is dlq, (
+    assert with_dlq._config.dlq is dlq, (
         f"[CODE-2] BUG CONFIRMED: build(dlq=...) did not set _dlq_sink correctly. "
-        f"with_dlq._dlq_sink={with_dlq._dlq_sink!r}"
+        f"with_dlq._config.dlq={with_dlq._config.dlq!r}"
     )
 
 
@@ -491,19 +491,23 @@ async def test_perf4_in_flight_grows_unbounded_with_slow_sink() -> None:
         async def close(self) -> None:
             pass
 
-    # Bug is fixed: BoundPipeline now accepts backpressure via build(backpressure=...)
+    # Bug is fixed: BoundPipeline now accepts backpressure via build(config=DeliveryConfig(...))
     import inspect
 
+    from agora import DeliveryConfig
     from agora.core.pipeline import BoundPipeline
 
-    # Confirm backpressure is configurable via build() kwargs, not a missing method
+    # Confirm backpressure is configurable via the DeliveryConfig passed to build()
 
     build_sig = inspect.signature(BoundPipeline.__init__)
-    has_backpressure_param = "backpressure" in build_sig.parameters
+    has_config_param = "config" in build_sig.parameters
+    config_fields = inspect.signature(DeliveryConfig).parameters
+    has_backpressure_param = "backpressure" in config_fields
 
-    assert has_backpressure_param, (
+    assert has_config_param and has_backpressure_param, (
         f"[PERF-4] BUG CONFIRMED: BoundPipeline has no backpressure configuration. "
-        f"BoundPipeline.__init__ params: {list(build_sig.parameters)}. "
+        f"BoundPipeline.__init__ params: {list(build_sig.parameters)}; "
+        f"DeliveryConfig fields: {list(config_fields)}. "
         f"Without backpressure support, in_flight will grow unbounded with fast sources and slow sinks."
     )
 
@@ -511,8 +515,8 @@ async def test_perf4_in_flight_grows_unbounded_with_slow_sink() -> None:
 def test_perf4_bound_pipeline_has_no_max_buffer_size_attribute() -> None:
     """[PERF-4] Bug Condition: BoundPipeline has no max_buffer_size configuration.
 
-    Expected (correct): BoundPipeline has with_max_buffer_size() method and _max_buffer_size attr
-    Observed (buggy):   No such method or attribute exists
+    Expected (correct): BoundPipeline exposes max_buffer_size and backpressure via _config
+    Observed (buggy):   No such configuration exists
 
     Validates: Requirements 1.9, 1.10
     """
@@ -521,12 +525,12 @@ def test_perf4_bound_pipeline_has_no_max_buffer_size_attribute() -> None:
 
     bound = Pipeline(IterableSource([])).build(StdoutSink())
 
-    has_attr = hasattr(bound, "_max_buffer_size")
-    backpressure_via_build = hasattr(bound, "_backpressure")
+    has_attr = hasattr(bound._config, "max_buffer_size")
+    backpressure_via_build = hasattr(bound._config, "backpressure")
 
     assert has_attr and backpressure_via_build, (
         f"[PERF-4] BUG CONFIRMED: BoundPipeline missing backpressure configuration. "
-        f"has_attr='_max_buffer_size': {has_attr} (expected True), "
-        f"has_attr='_backpressure': {backpressure_via_build} (expected True). "
+        f"_config has 'max_buffer_size': {has_attr} (expected True), "
+        f"_config has 'backpressure': {backpressure_via_build} (expected True). "
         f"Without these, there is no way to bound memory usage for fast-source/slow-sink pipelines."
     )

@@ -115,6 +115,33 @@ class ParquetSink(BaseSink[T], Generic[T]):
                 columns[name].append(row.get(name))
         return columns
 
+    async def write_arrow_batch(self, batch: Any) -> None:
+        """Write a ``pa.RecordBatch`` directly — zero row materialization.
+
+        This is the Arrow-native fast path used by the 0.2.0 batch execution
+        lane when both source and sink are Arrow-native.  ``row_mapper`` is
+        not called; the batch is written as-is to the Parquet file.
+        """
+        await asyncio.to_thread(self._write_arrow_batch, batch)
+        logger.debug("parquet_sink_arrow_flush", path=str(self._path), count=len(batch))
+
+    def _write_arrow_batch(self, batch: Any) -> None:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            raise ImportError(
+                "ParquetSink requires pyarrow. Install via: pip install 'agora-etl[file]'"
+            ) from None
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if self._writer is None:
+            self._schema = batch.schema
+            self._writer = pq.ParquetWriter(
+                str(self._path), batch.schema, compression=self._compression
+            )
+        # write_batch() accepts RecordBatch directly — no Table.from_batches() conversion
+        self._writer.write_batch(batch)
+
     async def close(self) -> None:
         await self.flush()
         if self._writer is not None:

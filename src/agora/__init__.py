@@ -42,6 +42,17 @@ The most important classes are importable directly from ``agora``::
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
+from agora.core.batch import (
+    ArrowBatchMiddleware,
+    ArrowNativeSink,
+    BatchableSource,
+    BatchFailure,
+    BatchMiddleware,
+    BatchProcessResult,
+    is_arrow_batch_middleware,
+    is_arrow_native_sink,
+    is_batch_capable_source,
+)
 from agora.core.checkpoint import (
     Checkpoint,
     CheckpointStore,
@@ -55,23 +66,29 @@ from agora.core.dlq import DLQRecord, DLQSink
 from agora.core.errors import AgoraError
 from agora.core.metrics import PipelineMetrics, PipelineRunSummary
 from agora.core.middleware import (
+    BatchFilterMiddleware,
+    BatchMapMiddleware,
     FilterMiddleware,
     MapMiddleware,
     Middleware,
     RetryMiddleware,
     RouteMiddleware,
 )
+from agora.middlewares.arrow import ArrowFilterMiddleware, ArrowMapMiddleware
 from agora.core.pipeline import BoundPipeline, Pipeline
 from agora.core.plugin import Configurable, Lifecycle, Plugin
 from agora.core.registry import Registry
 from agora.core.retry import RetryPolicy, retry_async
 from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
 from agora.core.source import BaseSource, IterableSource, SourceRecordError, SourceRuntimeMetrics
+from agora.sources.file.csv import ArrowCsvSource
+from agora.sources.file.jsonlines import ArrowJsonLinesSource
 from agora.core.tracing import InMemoryTracer, NoopTracer, OpenTelemetryTracer
 from agora.core.types import (
     Backpressure,
     CheckpointFailurePolicy,
     DedupStoreFailurePolicy,
+    DeliveryConfig,
     DLQFailurePolicy,
     OnError,
     SinkFailurePolicy,
@@ -96,9 +113,21 @@ except PackageNotFoundError:
 __all__ = [
     "AgoraContainer",
     "AgoraError",
+    "ArrowBatchMiddleware",
+    "ArrowCsvSource",
+    "ArrowFilterMiddleware",
+    "ArrowJsonLinesSource",
+    "ArrowMapMiddleware",
+    "ArrowNativeSink",
     "Backpressure",
     "BaseSink",
     "BaseSource",
+    "BatchFailure",
+    "BatchFilterMiddleware",
+    "BatchMapMiddleware",
+    "BatchMiddleware",
+    "BatchProcessResult",
+    "BatchableSource",
     "BoundPipeline",
     "Checkpoint",
     "CheckpointFailurePolicy",
@@ -108,6 +137,7 @@ __all__ = [
     "DLQRecord",
     "DLQSink",
     "DedupStoreFailurePolicy",
+    "DeliveryConfig",
     "FilterMiddleware",
     "InMemoryCheckpointStore",
     "InMemoryTracer",
@@ -145,6 +175,9 @@ __all__ = [
     "Writer",
     "__version__",
     "discover_plugins",
+    "is_arrow_batch_middleware",
+    "is_arrow_native_sink",
+    "is_batch_capable_source",
     "retry_async",
     "state_backend_registry",
 ]

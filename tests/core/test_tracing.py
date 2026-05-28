@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agora import InMemoryCheckpointStore, InMemoryTracer, Pipeline
+from agora import DeliveryConfig, InMemoryCheckpointStore, InMemoryTracer, Pipeline
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 
@@ -91,8 +91,10 @@ async def test_pipeline_tracing_captures_core_runtime_spans() -> None:
         .pipe(_TagMiddleware())
         .build(
             sink,  # type: ignore[arg-type]
-            checkpoint=store,
-            tracer=tracer,
+            config=DeliveryConfig(
+                checkpoint=store,
+                tracer=tracer,
+            ),
         )
         .run(run_id="trace-run")
     )
@@ -149,8 +151,10 @@ async def test_pipeline_tracing_records_writer_failures_and_dlq_writes() -> None
         Pipeline(_CheckpointedSource([{"id": 1}]))
         .build(
             _BoomSink(),  # type: ignore[arg-type]
-            dlq=dlq,  # type: ignore[arg-type]
-            tracer=tracer,
+            config=DeliveryConfig(
+                dlq=dlq,  # type: ignore[arg-type]
+                tracer=tracer,
+            ),
         )
         .run(run_id="trace-fail")
     )

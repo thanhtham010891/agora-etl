@@ -252,6 +252,38 @@ async def test_sink_fan_out_concurrent_batch_path_preserves_per_record_errors() 
 
 
 @pytest.mark.asyncio
+async def test_sink_fan_out_single_sink_batch_path_continues_after_mid_batch_failure() -> None:
+    class _TrackingSingleWriteSink:
+        sink_name = "tracking_single_write"
+
+        def __init__(self) -> None:
+            self.seen: list[str] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: str) -> None:
+            self.seen.append(record)
+            if record == "b":
+                raise RuntimeError("single-write-broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sink = _TrackingSingleWriteSink()
+    fan_out = SinkFanOut([sink])  # type: ignore[list-item]
+
+    results = await fan_out.write_batch(["a", "b", "c"])
+
+    assert sink.seen == ["a", "b", "c"]
+    assert [result.ok for result in results] == [True, False, True]
+    assert [str(error) for error in results[1].errors] == ["single-write-broke"]
+
+
+@pytest.mark.asyncio
 async def test_sink_fan_out_uses_parallel_fallback_for_capability_advertised_sink() -> None:
     sink = _ParallelCapableFallbackSink(expected_active=3)
     fan_out = SinkFanOut([sink]).with_concurrency()  # type: ignore[list-item]

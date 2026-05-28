@@ -54,16 +54,19 @@ store = SQLiteCheckpointStore(path="/var/lib/myapp/checkpoints.db")
 Pass the store and a checkpoint key when building the pipeline. The key is the lookup key in the store — use something stable and unique per pipeline:
 
 ```python
+from agora import DeliveryConfig
+from agora.core.checkpoint import SQLiteCheckpointStore
+
 pipeline = (
-    Pipeline("nightly_events")
-    .source(CsvSource("events.csv"))
-    .sink(DatabaseSink(db))
-    .checkpoint(
-        store=SQLiteCheckpointStore("/var/lib/myapp/checkpoints.db"),
-        key="nightly_events:events_csv",
-        every=500,
+    Pipeline(CsvSource("events.csv"), id="nightly_events")
+    .build(
+        DatabaseSink(db),
+        config=DeliveryConfig(
+            checkpoint=SQLiteCheckpointStore("/var/lib/myapp/checkpoints.db"),
+            checkpoint_key="nightly_events:events_csv",
+            checkpoint_every=500,
+        ),
     )
-    .build()
 )
 ```
 
@@ -74,19 +77,21 @@ pipeline = (
 By default, a checkpoint store failure (disk full, corrupted DB) raises and stops the pipeline. You can relax this:
 
 ```python
+from agora import DeliveryConfig
+from agora.core.checkpoint import SQLiteCheckpointStore
 from agora.core.types import CheckpointFailurePolicy
 
 pipeline = (
-    Pipeline("nightly_events")
-    .source(CsvSource("events.csv"))
-    .sink(DatabaseSink(db))
-    .checkpoint(
-        store=SQLiteCheckpointStore("/var/lib/myapp/checkpoints.db"),
-        key="nightly_events:events_csv",
-        every=500,
-        failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+    Pipeline(CsvSource("events.csv"), id="nightly_events")
+    .build(
+        DatabaseSink(db),
+        config=DeliveryConfig(
+            checkpoint=SQLiteCheckpointStore("/var/lib/myapp/checkpoints.db"),
+            checkpoint_key="nightly_events:events_csv",
+            checkpoint_every=500,
+            checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+        ),
     )
-    .build()
 )
 ```
 

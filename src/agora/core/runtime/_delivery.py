@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from abc import ABC
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -17,10 +18,11 @@ from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy, SinkFail
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from agora.core.batch import BatchFailure
     from agora.core.context import PipelineContext
     from agora.core.middleware import MiddlewareFailure
+    from agora.core.runtime._writer_transport import WriterTransport
     from agora.core.sink import BaseSink
-    from agora.core.writer import Writer
 
 
 @dataclass(slots=True)
@@ -58,6 +60,39 @@ class RecordDeliveryError(RuntimeError):
         self.original = exc
 
 
+class CommitOutcome(ABC):
+    """Abstract base for typed delivery outcomes."""
+    __slots__ = ()
+
+
+@dataclass(slots=True)
+class CheckpointedOutcome(CommitOutcome):
+    """Base for outcomes that carry a checkpoint and optional hook."""
+    checkpoint: CheckpointValue
+    on_success: Callable[[], Awaitable[None]] | None = None
+
+
+@dataclass(slots=True)
+class Written(CheckpointedOutcome):
+    """Record was durably written to the sink."""
+
+
+@dataclass(slots=True)
+class Dropped(CheckpointedOutcome):
+    """Record was filtered or had no sink route — not an error."""
+
+
+@dataclass(slots=True)
+class ErroredRouted(CheckpointedOutcome):
+    """Record failed but was successfully routed to the DLQ."""
+
+
+@dataclass(slots=True)
+class ErroredUnrouted(CommitOutcome):
+    """Record failed and could not be routed to the DLQ."""
+    exc: Exception
+
+
 @dataclass
 class CheckpointState:
     """Encapsulates mutable checkpoint state during pipeline execution."""
@@ -67,6 +102,9 @@ class CheckpointState:
 
     def increment(self) -> None:
         self.processed_count += 1
+
+    def increment_by(self, count: int) -> None:
+        self.processed_count += max(0, count)
 
     def should_save(self, current_value: CheckpointValue, every: int) -> bool:
         if current_value is None or current_value == self.last_saved_value:
@@ -88,10 +126,10 @@ class RunState:
 
 
 @dataclass(slots=True)
-class RecordDeliveryCoordinator:
-    """Owns sink, DLQ, and checkpoint side effects for processed records."""
+class DeliveryEngine:
+    """Own sink, DLQ, and checkpoint side effects for processed records."""
 
-    writer: Writer[Any]
+    transport: WriterTransport
     source_name: str
     current_checkpoint: Callable[[], CheckpointValue]
     dlq_sink: BaseSink[DLQRecord] | None
@@ -253,6 +291,66 @@ class RecordDeliveryCoordinator:
         if on_success is not None:
             await on_success()
 
+    async def _resolve_write_result(
+        self,
+        ctx: PipelineContext,
+        write_result: Any,
+        raw_record: Any,
+        processed_record: Any,
+        checkpoint_value: CheckpointValue,
+        on_success: Callable[[], Awaitable[None]] | None,
+    ) -> CommitOutcome:
+        """Convert a WriteResult into a typed CommitOutcome.
+
+        Metrics are applied only after all DLQ routing is complete to keep
+        records_written and records_errored consistent even if DLQ raises.
+        """
+        if write_result.errors:
+            routed_all = True
+            for err in write_result.errors:
+                ctx.log.error("pipeline_sink_error", error=str(err))
+                routed = await self.write_to_dlq(
+                    ctx=ctx,
+                    stage="sink_write",
+                    exc=err,
+                    record=raw_record,
+                    original_record=raw_record,
+                    processed_record=processed_record,
+                    checkpoint=checkpoint_value,
+                )
+                routed_all = routed_all and routed
+            # Count one error per record, not per error object.
+            ctx.metrics.records_errored += 1
+            if write_result.written:
+                ctx.metrics.records_written += 1
+            if routed_all or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                return ErroredRouted(checkpoint=checkpoint_value, on_success=on_success)
+            return ErroredUnrouted(exc=write_result.errors[0])
+
+        if not write_result.written:
+            ctx.log.warning("pipeline_unrouted_record")
+            ctx.metrics.records_dropped += 1
+            return Dropped(checkpoint=checkpoint_value, on_success=on_success)
+
+        ctx.metrics.records_written += 1
+        return Written(checkpoint=checkpoint_value, on_success=on_success)
+
+    async def _commit_outcome(
+        self,
+        state: RunState,
+        outcome: CommitOutcome,
+    ) -> None:
+        """Apply checkpoint and hook side effects for a CommitOutcome."""
+        if isinstance(outcome, ErroredUnrouted):
+            if self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                raise RecordDeliveryError(outcome.exc) from outcome.exc
+            # LOG_AND_CONTINUE: still advance checkpoint so we don't fall behind.
+            return
+        assert isinstance(outcome, CheckpointedOutcome)
+        await self.save_checkpoint(state.ctx, state.checkpoint_state, outcome.checkpoint)
+        if outcome.on_success is not None:
+            await outcome.on_success()
+
     async def write_processed_record(
         self,
         state: RunState,
@@ -268,8 +366,7 @@ class RecordDeliveryCoordinator:
             return
 
         try:
-            with state.ctx.trace_span("writer.write", writer=type(self.writer).__name__):
-                write_result = await self.writer.write(result)
+            write_result = await self.transport.write_one(state.ctx, result)
         except Exception as exc:
             state.ctx.log.exception("pipeline_write_error")
             routed = await self.write_to_dlq(
@@ -290,43 +387,10 @@ class RecordDeliveryCoordinator:
                 raise RecordDeliveryError(exc) from exc
             return
 
-        if write_result.errors:
-            if write_result.written:
-                state.ctx.metrics.records_written += 1
-            routed_all = True
-            for err in write_result.errors:
-                state.ctx.log.error("pipeline_sink_error", error=str(err))
-                routed = await self.write_to_dlq(
-                    ctx=state.ctx,
-                    stage="sink_write",
-                    exc=err,
-                    record=raw_record,
-                    original_record=raw_record,
-                    processed_record=result,
-                    checkpoint=checkpoint_value,
-                )
-                routed_all = routed_all and routed
-            state.ctx.metrics.records_errored += len(write_result.errors)
-            if routed_all or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
-                await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
-                if on_success is not None:
-                    await on_success()
-            elif self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-                raise RecordDeliveryError(write_result.errors[0]) from write_result.errors[0]
-            return
-
-        if not write_result.written:
-            state.ctx.log.warning("pipeline_unrouted_record")
-            state.ctx.metrics.records_dropped += 1
-            await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
-            if on_success is not None:
-                await on_success()
-            return
-
-        state.ctx.metrics.records_written += 1
-        await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
-        if on_success is not None:
-            await on_success()
+        outcome = await self._resolve_write_result(
+            state.ctx, write_result, raw_record, result, checkpoint_value, on_success
+        )
+        await self._commit_outcome(state, outcome)
 
     async def flush_pending_writes(self, state: RunState) -> None:
         if not state.pending_writes:
@@ -334,27 +398,17 @@ class RecordDeliveryCoordinator:
 
         batch = list(state.pending_writes)
         state.pending_writes.clear()
-        state.ctx.metrics.runtime.writer_flush_count += 1
-        state.ctx.metrics.runtime.writer_flush_max_batch_size = max(
-            state.ctx.metrics.runtime.writer_flush_max_batch_size,
-            len(batch),
-        )
 
-        t0 = time.monotonic()
-        delivered_hooks: list[Callable[[], Awaitable[None]]] = []
         try:
-            with state.ctx.trace_span(
-                "writer.write_batch",
-                writer=type(self.writer).__name__,
-                batch_size=len(batch),
-            ):
-                write_results = await self.writer.write_batch([item.processed for item in batch])
+            write_results, _ = await self.transport.write_batch(
+                state.ctx, [item.processed for item in batch]
+            )
         except Exception as exc:
-            state.ctx.metrics.runtime.writer_flush_time_ms += (time.monotonic() - t0) * 1000
             state.ctx.log.exception("pipeline_write_batch_error", batch_size=len(batch))
-            unrouted_error: Exception | None = None
             pending_checkpoint: Checkpoint | None = None
             pending_checkpoint_batch_size = 0
+            delivered_hooks: list[Callable[[], Awaitable[None]]] = []
+            unrouted_error: Exception | None = None
             for item in batch:
                 routed = await self.write_to_dlq(
                     ctx=state.ctx,
@@ -378,9 +432,7 @@ class RecordDeliveryCoordinator:
                 elif unrouted_error is None:
                     if pending_checkpoint is not None:
                         await self.persist_checkpoint(
-                            state.ctx,
-                            state.checkpoint_state,
-                            pending_checkpoint,
+                            state.ctx, state.checkpoint_state, pending_checkpoint,
                             batch_size=pending_checkpoint_batch_size,
                         )
                         pending_checkpoint = None
@@ -388,20 +440,14 @@ class RecordDeliveryCoordinator:
                     unrouted_error = exc
             if pending_checkpoint is not None:
                 await self.persist_checkpoint(
-                    state.ctx,
-                    state.checkpoint_state,
-                    pending_checkpoint,
+                    state.ctx, state.checkpoint_state, pending_checkpoint,
                     batch_size=pending_checkpoint_batch_size,
                 )
             for hook in delivered_hooks:
                 await hook()
-            if (
-                unrouted_error is not None
-                and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED
-            ):
+            if unrouted_error is not None and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
                 raise RecordDeliveryError(unrouted_error) from unrouted_error
             return
-        state.ctx.metrics.runtime.writer_flush_time_ms += (time.monotonic() - t0) * 1000
 
         if len(write_results) != len(batch):
             raise RuntimeError(
@@ -409,75 +455,47 @@ class RecordDeliveryCoordinator:
                 f"Expected {len(batch)}, got {len(write_results)}."
             )
 
+        outcomes: list[CommitOutcome] = []
+        for item, wr in zip(batch, write_results, strict=True):
+            outcome = await self._resolve_write_result(
+                state.ctx, wr, item.raw, item.processed, item.checkpoint, item.on_success
+            )
+            outcomes.append(outcome)
+
         pending_checkpoint = None
         pending_checkpoint_batch_size = 0
+        delivered_hooks = []
 
-        for item, write_result in zip(batch, write_results, strict=True):
-            if write_result.errors:
-                if write_result.written:
-                    state.ctx.metrics.records_written += 1
-                routed_all = True
-                for err in write_result.errors:
-                    state.ctx.log.error("pipeline_sink_error", error=str(err))
-                    routed = await self.write_to_dlq(
-                        ctx=state.ctx,
-                        stage="sink_write",
-                        exc=err,
-                        record=item.raw,
-                        original_record=item.raw,
-                        processed_record=item.processed,
-                        checkpoint=item.checkpoint,
+        for outcome in outcomes:
+            if isinstance(outcome, ErroredUnrouted):
+                # Flush accumulated checkpoint/hooks before raising or continuing.
+                if pending_checkpoint is not None:
+                    await self.persist_checkpoint(
+                        state.ctx, state.checkpoint_state, pending_checkpoint,
+                        batch_size=pending_checkpoint_batch_size,
                     )
-                    routed_all = routed_all and routed
-                state.ctx.metrics.records_errored += len(write_result.errors)
-                if routed_all or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
-                    checkpoint = self.prepare_checkpoint(
-                        state.ctx, state.checkpoint_state, item.checkpoint
-                    )
-                    if checkpoint is not None:
-                        pending_checkpoint = checkpoint
-                        pending_checkpoint_batch_size += 1
-                    if item.on_success is not None:
-                        delivered_hooks.append(item.on_success)
-                elif self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-                    if pending_checkpoint is not None:
-                        await self.persist_checkpoint(
-                            state.ctx,
-                            state.checkpoint_state,
-                            pending_checkpoint,
-                            batch_size=pending_checkpoint_batch_size,
-                        )
-                    for hook in delivered_hooks:
-                        await hook()
-                    raise RecordDeliveryError(write_result.errors[0]) from write_result.errors[0]
+                    pending_checkpoint = None
+                    pending_checkpoint_batch_size = 0
+                for hook in delivered_hooks:
+                    await hook()
+                delivered_hooks = []
+                if self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                    raise RecordDeliveryError(outcome.exc) from outcome.exc
+                # LOG_AND_CONTINUE: skip checkpoint advancement for this record.
                 continue
-
-            if not write_result.written:
-                state.ctx.log.warning("pipeline_unrouted_record")
-                state.ctx.metrics.records_dropped += 1
-                checkpoint = self.prepare_checkpoint(
-                    state.ctx, state.checkpoint_state, item.checkpoint
-                )
-                if checkpoint is not None:
-                    pending_checkpoint = checkpoint
-                    pending_checkpoint_batch_size += 1
-                if item.on_success is not None:
-                    delivered_hooks.append(item.on_success)
-                continue
-
-            state.ctx.metrics.records_written += 1
-            checkpoint = self.prepare_checkpoint(state.ctx, state.checkpoint_state, item.checkpoint)
+            assert isinstance(outcome, CheckpointedOutcome)
+            checkpoint = self.prepare_checkpoint(
+                state.ctx, state.checkpoint_state, outcome.checkpoint
+            )
             if checkpoint is not None:
                 pending_checkpoint = checkpoint
                 pending_checkpoint_batch_size += 1
-            if item.on_success is not None:
-                delivered_hooks.append(item.on_success)
+            if outcome.on_success is not None:
+                delivered_hooks.append(outcome.on_success)
 
         if pending_checkpoint is not None:
             await self.persist_checkpoint(
-                state.ctx,
-                state.checkpoint_state,
-                pending_checkpoint,
+                state.ctx, state.checkpoint_state, pending_checkpoint,
                 batch_size=pending_checkpoint_batch_size,
             )
         for hook in delivered_hooks:
@@ -538,4 +556,187 @@ class RecordDeliveryCoordinator:
             writer_batch_size,
             failure=failure,
             on_success=on_success,
+        )
+
+    async def flush_batch_direct(
+        self,
+        state: RunState,
+        processed_list: list[Any],
+        raw_list: list[Any],
+        checkpoint_list: list[Any],
+    ) -> None:
+        """Flush a pre-built batch directly to the writer — no PendingWrite allocation.
+
+        Fast path for the Rust LinearBatchBuffer integration. Assumes:
+        - No dropped records (None values already filtered by caller)
+        - No per-record on_success hooks
+        """
+        if not processed_list:
+            return
+
+        try:
+            write_results, _ = await self.transport.write_batch(state.ctx, processed_list)
+        except Exception as exc:
+            state.ctx.log.exception("pipeline_write_batch_error", batch_size=len(processed_list))
+            state.ctx.metrics.records_errored += len(processed_list)
+            if self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                raise RecordDeliveryError(exc) from exc
+            return
+
+        if all(wr.ok for wr in write_results):
+            state.ctx.metrics.records_written += len(processed_list)
+            if checkpoint_list and self.checkpoint_store is not None:
+                last_checkpoint = checkpoint_list[-1]
+                if last_checkpoint is not None:
+                    await self.save_batch_checkpoint(state, last_checkpoint, len(processed_list))
+            return
+
+        first_unrouted_error: Exception | None = None
+        for processed, raw, checkpoint, wr in zip(
+            processed_list, raw_list, checkpoint_list, write_results, strict=True
+        ):
+            if wr.errors:
+                state.ctx.metrics.records_errored += 1
+                routed = True
+                for err in wr.errors:
+                    ok = await self.write_to_dlq(
+                        ctx=state.ctx,
+                        stage="sink_write",
+                        exc=err,
+                        record=raw,
+                        original_record=raw,
+                        processed_record=processed,
+                        checkpoint=checkpoint,
+                    )
+                    routed = routed and ok
+                if not routed and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                    if first_unrouted_error is None:
+                        first_unrouted_error = wr.errors[0]
+            elif wr.written:
+                state.ctx.metrics.records_written += 1
+
+        if first_unrouted_error is not None:
+            raise RecordDeliveryError(first_unrouted_error) from first_unrouted_error
+
+    async def write_batch_result(
+        self,
+        state: RunState,
+        results: list[Any | None],
+        raw_batch: list[Any],
+        checkpoint_value: CheckpointValue,
+        *,
+        batch_failure: BatchFailure | None = None,
+    ) -> None:
+        if batch_failure is not None:
+            state.ctx.metrics.records_errored += len(raw_batch)
+            if self.dlq_sink is not None:
+                for raw_record in raw_batch:
+                    await self.write_to_dlq(
+                        ctx=state.ctx,
+                        stage="batch_middleware",
+                        exc=batch_failure.exception,
+                        record=raw_record,
+                        original_record=raw_record,
+                        middleware=batch_failure.middleware,
+                        checkpoint=checkpoint_value,
+                    )
+                await self.save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
+            elif self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                state.ctx.log.exception(
+                    "batch_middleware_error_log_and_continue",
+                    middleware=batch_failure.middleware,
+                    batch_size=len(raw_batch),
+                    error=str(batch_failure.exception),
+                )
+                await self.save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
+            else:
+                raise RecordDeliveryError(batch_failure.exception) from batch_failure.exception
+            return
+
+        active_items = [
+            (raw_record, processed_record)
+            for raw_record, processed_record in zip(raw_batch, results, strict=True)
+            if processed_record is not None
+        ]
+        to_write = [processed_record for _raw_record, processed_record in active_items]
+        dropped = len(results) - len(to_write)
+        state.ctx.metrics.records_dropped += dropped
+
+        if not to_write:
+            await self.save_batch_checkpoint(state, checkpoint_value, len(results))
+            return
+
+        try:
+            write_results, _ = await self.transport.write_batch(state.ctx, to_write)
+        except Exception as exc:
+            state.ctx.log.exception("batch_write_error", batch_size=len(to_write))
+            routed = True
+            for raw_record, processed_record in active_items:
+                ok = await self.write_to_dlq(
+                    ctx=state.ctx,
+                    stage="sink_write",
+                    exc=exc,
+                    record=raw_record,
+                    original_record=raw_record,
+                    processed_record=processed_record,
+                    checkpoint=checkpoint_value,
+                )
+                routed = routed and ok
+            state.ctx.metrics.records_errored += len(to_write)
+            if routed or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                await self.save_batch_checkpoint(state, checkpoint_value, len(results))
+            elif self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                raise RecordDeliveryError(exc) from exc
+            return
+
+        if len(write_results) != len(to_write):
+            raise RuntimeError(
+                "Writer.write_batch() must return one WriteResult per batch input record. "
+                f"Expected {len(to_write)}, got {len(write_results)}."
+            )
+
+        # Resolve each write result into a CommitOutcome.
+        outcomes: list[CommitOutcome] = []
+        for (raw_record, processed_record), wr in zip(active_items, write_results, strict=True):
+            outcome = await self._resolve_write_result(
+                state.ctx, wr, raw_record, processed_record, checkpoint_value, None
+            )
+            outcomes.append(outcome)
+
+        errored_unrouted: Exception | None = None
+        for outcome in outcomes:
+            if isinstance(outcome, ErroredUnrouted):
+                if errored_unrouted is None:
+                    errored_unrouted = outcome.exc
+            # Written/Dropped/ErroredRouted all advance the batch checkpoint below.
+
+        routed_all = errored_unrouted is None
+        if routed_all or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+            await self.save_batch_checkpoint(state, checkpoint_value, len(results))
+        if not routed_all and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+            raise RecordDeliveryError(errored_unrouted) from errored_unrouted  # type: ignore[arg-type]
+
+    async def save_batch_checkpoint(
+        self,
+        state: RunState,
+        checkpoint_value: CheckpointValue,
+        batch_size: int,
+    ) -> None:
+        """Save checkpoint for an entire batch while honoring checkpoint_every."""
+        if self.checkpoint_store is None or checkpoint_value is None or batch_size <= 0:
+            return
+        state.checkpoint_state.increment_by(batch_size)
+        if not state.checkpoint_state.should_save(checkpoint_value, self.checkpoint_every):
+            return
+        checkpoint = Checkpoint(
+            pipeline_id=state.ctx.pipeline_id,
+            run_id=state.ctx.run_id,
+            source=self.source_name,
+            value=checkpoint_value,
+        )
+        await self.persist_checkpoint(
+            state.ctx,
+            state.checkpoint_state,
+            checkpoint,
+            batch_size=batch_size,
         )

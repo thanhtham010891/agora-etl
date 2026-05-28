@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from agora import (
+    DeliveryConfig,
     InMemoryCheckpointStore,
     Pipeline,
     SourceRecordError,
@@ -122,13 +123,13 @@ class TestCsvSource:
 
         await (
             Pipeline(CsvSource(path=csv_file, row_mapper=lambda row: row, batch_size=1))
-            .build(_CollectSink(first_records), checkpoint=store)  # type: ignore[arg-type]
+            .build(_CollectSink(first_records), config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run(max_records=2)
         )
 
         await (
             Pipeline(CsvSource(path=csv_file, row_mapper=lambda row: row, batch_size=1))
-            .build(_CollectSink(second_records), checkpoint=store)  # type: ignore[arg-type]
+            .build(_CollectSink(second_records), config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run()
         )
 
@@ -193,6 +194,8 @@ class TestCsvSource:
         await asyncio.wait_for(stream.aclose(), timeout=1.0)
 
     async def test_queue_maxsize_controls_runtime_prefetch_limit(self, csv_file: Path) -> None:
+        # CsvSource now uses sync stream() in the event loop — no thread prefetch.
+        # queue_maxsize is accepted for API compat but prefetch is disabled.
         summary = await (
             Pipeline(
                 CsvSource(
@@ -206,9 +209,8 @@ class TestCsvSource:
             .run(max_records=3)
         )
 
-        assert summary.runtime.source_prefetch_enabled is True
-        assert summary.runtime.source_prefetch_limit == 1
-        assert summary.runtime.source_prefetch_max_depth <= 1
+        assert summary.records_consumed == 3
+        assert summary.records_written == 3
 
 
 # ======================================================================
@@ -391,6 +393,8 @@ class TestJsonLinesSource:
         await asyncio.wait_for(stream.aclose(), timeout=1.0)
 
     async def test_queue_maxsize_controls_runtime_prefetch_limit(self, jsonl_file: Path) -> None:
+        # JsonLinesSource now uses sync stream() in the event loop — no thread prefetch.
+        # queue_maxsize is accepted for API compat but prefetch is disabled.
         summary = await (
             Pipeline(
                 JsonLinesSource(
@@ -404,9 +408,8 @@ class TestJsonLinesSource:
             .run(max_records=3)
         )
 
-        assert summary.runtime.source_prefetch_enabled is True
-        assert summary.runtime.source_prefetch_limit == 1
-        assert summary.runtime.source_prefetch_max_depth <= 1
+        assert summary.records_consumed == 3
+        assert summary.records_written == 3
 
 
 class TestParquetSource:
@@ -449,3 +452,241 @@ class TestParquetSource:
         assert first["id"] == 1
 
         await asyncio.wait_for(stream.aclose(), timeout=1.0)
+
+    async def test_stream_batches_does_not_duplicate_rows(self, tmp_path: Path) -> None:
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
+
+        path = tmp_path / "records.parquet"
+        row_count = 5000
+        table = pa.Table.from_pylist([{"id": i} for i in range(row_count)])
+        pq.write_table(table, path)
+
+        # Small arrow batch + small prefetch buffer forces the consumer's
+        # drain-queue path (the inner `while not queue.empty()` loop) to run,
+        # which previously yielded each drained batch twice.
+        source = ParquetSource(path=path, row_mapper=lambda row: row, use_arrow_batches=True)
+        source._arrow_batch_size = 256
+        source.prefetch_limit = 2
+
+        seen_ids: list[int] = []
+        async for batch in source.stream_batches():
+            seen_ids.extend(batch.column("id").to_pylist())
+
+        assert len(seen_ids) == row_count
+        assert seen_ids == list(range(row_count))
+
+
+# ======================================================================
+# Tier A — batch-emit (emit_batches=True) for CSV / JSONL
+# ======================================================================
+
+
+class _ListCollectSink:
+    sink_name = "collect"
+
+    def __init__(self) -> None:
+        self.records: list = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record) -> None:
+        self.records.append(record)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class TestBatchEmit:
+    @pytest.fixture
+    def csv_file(self, tmp_path: Path) -> Path:
+        path = tmp_path / "batch.csv"
+        with path.open("w", encoding="utf-8", newline="") as file_obj:
+            writer = csv.DictWriter(file_obj, fieldnames=["id", "name"])
+            writer.writeheader()
+            for i in range(2500):
+                writer.writerow({"id": str(i), "name": f"row{i}"})
+        return path
+
+    @pytest.fixture
+    def jsonl_file(self, tmp_path: Path) -> Path:
+        path = tmp_path / "batch.jsonl"
+        with path.open("w", encoding="utf-8") as file_obj:
+            for i in range(2500):
+                file_obj.write(json.dumps({"id": i, "name": f"row{i}"}) + "\n")
+        return path
+
+    async def test_csv_batch_emit_matches_row_path(self, csv_file: Path) -> None:
+        row_sink = _ListCollectSink()
+        batch_sink = _ListCollectSink()
+
+        row_summary = await (
+            Pipeline(CsvSource(path=csv_file, row_mapper=lambda r: r)).build(row_sink).run()  # type: ignore[arg-type]
+        )
+        batch_summary = await (
+            Pipeline(
+                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+            )
+            .build(batch_sink)  # type: ignore[arg-type]
+            .run()
+        )
+
+        assert batch_sink.records == row_sink.records
+        assert batch_summary.records_consumed == row_summary.records_consumed
+        assert batch_summary.records_written == row_summary.records_written
+
+    async def test_jsonl_batch_emit_matches_row_path(self, jsonl_file: Path) -> None:
+        row_sink = _ListCollectSink()
+        batch_sink = _ListCollectSink()
+
+        await (
+            Pipeline(JsonLinesSource(path=jsonl_file, row_mapper=lambda r: r)).build(row_sink).run()  # type: ignore[arg-type]
+        )
+        await (
+            Pipeline(
+                JsonLinesSource(
+                    path=jsonl_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500
+                )
+            )
+            .build(batch_sink)  # type: ignore[arg-type]
+            .run()
+        )
+
+        assert batch_sink.records == row_sink.records
+
+    async def test_csv_batch_emit_uses_batch_lane(self, csv_file: Path) -> None:
+        from agora.core.batch import is_batch_capable_source
+
+        row_source = CsvSource(path=csv_file, row_mapper=lambda r: r)
+        batch_source = CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True)
+        assert is_batch_capable_source(row_source) is False
+        assert is_batch_capable_source(batch_source) is True
+
+    async def test_csv_batch_emit_checkpoint_resume(self, csv_file: Path) -> None:
+        store = InMemoryCheckpointStore()
+        first = _ListCollectSink()
+        second = _ListCollectSink()
+
+        await (
+            Pipeline(
+                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+            )
+            .build(first, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+            .run(max_records=1000)
+        )
+        await (
+            Pipeline(
+                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+            )
+            .build(second, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+            .run()
+        )
+
+        # No record processed twice, every record processed exactly once across both runs.
+        all_ids = [r["id"] for r in first.records] + [r["id"] for r in second.records]
+        assert len(all_ids) == 2500
+        assert sorted(all_ids, key=int) == [str(i) for i in range(2500)]
+
+
+# ======================================================================
+# ArrowCsvSource / ArrowJsonLinesSource
+# ======================================================================
+
+
+class TestArrowCsvSource:
+    async def test_yields_record_batches(self, tmp_path: Path) -> None:
+        pa = pytest.importorskip("pyarrow")
+        path = tmp_path / "data.csv"
+        path.write_text("id,name\n1,Alice\n2,Bob\n3,Charlie\n")
+
+        from agora.sources.file.csv import ArrowCsvSource
+        src = ArrowCsvSource(path=path)
+        batches = [b async for b in src.stream_batches()]
+
+        assert len(batches) == 1
+        assert isinstance(batches[0], pa.RecordBatch)
+        assert batches[0].num_rows == 3
+
+    async def test_emits_arrow_batches_flag(self, tmp_path: Path) -> None:
+        from agora.sources.file.csv import ArrowCsvSource
+        from agora.core.batch import is_batch_capable_source
+        src = ArrowCsvSource(path=tmp_path / "x.csv")
+        assert src.emits_arrow_batches is True
+        assert is_batch_capable_source(src) is True
+
+    async def test_stream_fallback_yields_dicts(self, tmp_path: Path) -> None:
+        pytest.importorskip("pyarrow")
+        path = tmp_path / "data.csv"
+        path.write_text("id,v\n1,10\n2,20\n")
+
+        from agora.sources.file.csv import ArrowCsvSource
+        src = ArrowCsvSource(path=path)
+        rows = [r async for r in src.stream()]
+        assert len(rows) == 2
+        assert int(rows[0]["id"]) == 1
+
+    async def test_pipeline_with_arrow_middleware(self, tmp_path: Path) -> None:
+        pa = pytest.importorskip("pyarrow")
+        import pyarrow.compute as pc
+        path = tmp_path / "data.csv"
+        path.write_text("id,score\n1,5\n2,0\n3,10\n")
+
+        from agora import ArrowCsvSource, ArrowFilterMiddleware
+
+        class _ArrowSink:
+            sink_name = "arrow"
+            def __init__(self): self.batches = []
+            async def open(self): ...
+            async def write_arrow_batch(self, b): self.batches.append(b)
+            async def flush(self): ...
+            async def close(self): ...
+
+        sink = _ArrowSink()
+        summary = await (
+            Pipeline(ArrowCsvSource(path=path))
+            .pipe(ArrowFilterMiddleware(lambda b: pc.greater(
+                pc.cast(b.column("score"), pa.float64()), 0.0
+            )))
+            .build(sink)  # type: ignore[arg-type]
+            .run()
+        )
+        assert summary.records_consumed == 3
+        assert summary.records_written == 2  # score=0 filtered out
+        assert sink.batches[0].num_rows == 2
+
+
+class TestArrowJsonLinesSource:
+    async def test_yields_record_batches(self, tmp_path: Path) -> None:
+        pa = pytest.importorskip("pyarrow")
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"id":1,"v":10}\n{"id":2,"v":20}\n')
+
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+        src = ArrowJsonLinesSource(path=path)
+        batches = [b async for b in src.stream_batches()]
+
+        assert len(batches) == 1
+        assert isinstance(batches[0], pa.RecordBatch)
+        assert batches[0].num_rows == 2
+
+    async def test_emits_arrow_batches_flag(self, tmp_path: Path) -> None:
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+        from agora.core.batch import is_batch_capable_source
+        src = ArrowJsonLinesSource(path="x.jsonl")
+        assert src.emits_arrow_batches is True
+        assert is_batch_capable_source(src) is True
+
+    async def test_stream_fallback_yields_dicts(self, tmp_path: Path) -> None:
+        pytest.importorskip("pyarrow")
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"id":1}\n{"id":2}\n')
+
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+        src = ArrowJsonLinesSource(path=path)
+        rows = [r async for r in src.stream()]
+        assert len(rows) == 2
+        assert rows[0]["id"] == 1

@@ -22,6 +22,8 @@ If a middleware raises an exception, the chain stops for that record. The runtim
 |---|---|
 | `MapMiddleware` | Apply a sync or async function to every record |
 | `FilterMiddleware` | Drop records that don't match a predicate |
+| `BatchMapMiddleware` | `MapMiddleware` on the batch lane — transform a whole batch in one call |
+| `BatchFilterMiddleware` | `FilterMiddleware` on the batch lane — filter a whole batch in one call |
 | `RetryMiddleware` | Wrap another middleware with exponential backoff retry |
 | `ValidateMiddleware` | Validate records against a Pydantic model |
 | `EnrichMiddleware` | Add fields via an async callable |
@@ -51,6 +53,79 @@ pipeline.filter(lambda r: r.score > 0.5)
 from agora import FilterMiddleware
 pipeline.pipe(FilterMiddleware(lambda r: r.score > 0.5))
 ```
+
+### BatchMapMiddleware / BatchFilterMiddleware
+
+Batch-native counterparts of `MapMiddleware` and `FilterMiddleware`. On the
+[batch execution lane](sources.md#batch-execution-lane) a regular `Middleware`
+still works, but the runtime applies it record-by-record inside the batch. The
+`Batch*` variants implement `process_batch()` so the whole batch is transformed
+in one call — keeping the batch lane's throughput advantage.
+
+```python
+from agora import BatchMapMiddleware, BatchFilterMiddleware
+
+pipeline = (
+    Pipeline(CsvSource(path="data.csv", row_mapper=lambda r: r, emit_batches=True))
+    .pipe(BatchMapMiddleware(lambda r: {**r, "score": int(r["score"]) * 100}))
+    .pipe(BatchFilterMiddleware(lambda r: r["score"] > 50))
+)
+```
+
+Semantics match the per-record versions: a map function returning `None` drops
+that record, and a filter predicate returning `False` drops it. Both accept sync
+or async callables. Use them only with a batch-capable source; on the per-record
+lane, prefer `MapMiddleware` / `FilterMiddleware`.
+
+### ArrowBatchMiddleware / ArrowMapMiddleware / ArrowFilterMiddleware
+
+Arrow-native middleware that operates on `pa.RecordBatch` objects directly — no per-row Python dict allocation. Use these with `ArrowCsvSource`, `ArrowJsonLinesSource`, or `ParquetSource(use_arrow_batches=True)` to keep data columnar end-to-end.
+
+Requires: `pip install "agora-etl[file]"`
+
+**`ArrowMapMiddleware(fn)`** — apply a vectorised transform to the whole batch. `fn` receives a `pa.RecordBatch` and must return a `pa.RecordBatch`. Use `pyarrow.compute` kernels inside `fn` to stay columnar:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+from agora import ArrowMapMiddleware
+
+def scale_price(batch: pa.RecordBatch) -> pa.RecordBatch:
+    idx = batch.schema.get_field_index("price")
+    scaled = pc.multiply(pc.cast(batch.column(idx), pa.float64()), 100.0)
+    return batch.set_column(idx, "price", scaled)
+
+pipeline.pipe(ArrowMapMiddleware(scale_price))
+```
+
+**`ArrowFilterMiddleware(predicate)`** — filter rows using a vectorised predicate. `predicate` receives the `pa.RecordBatch` and must return a `pa.BooleanArray` mask. Rows where the mask is `False` are dropped; a zero-row result drops the whole batch:
+
+```python
+from agora import ArrowFilterMiddleware
+import pyarrow.compute as pc
+
+pipeline.pipe(ArrowFilterMiddleware(lambda b: pc.greater(b.column("price"), 0.0)))
+```
+
+**`ArrowBatchMiddleware` (ABC)** — subclass this to implement custom Arrow-native transforms. Override `process_arrow_batch(batch, ctx) -> pa.RecordBatch`:
+
+```python
+from agora import ArrowBatchMiddleware
+import pyarrow.compute as pc
+
+class NormaliseScore(ArrowBatchMiddleware):
+    name = "normalise_score"
+
+    async def process_arrow_batch(self, batch, ctx):
+        idx = batch.schema.get_field_index("score")
+        normed = pc.divide(pc.cast(batch.column(idx), pa.float64()), 100.0)
+        return batch.set_column(idx, "score", normed)
+```
+
+**Constraints:**
+- Only work on the Arrow execution lane (source with `emits_arrow_batches=True`, all-Arrow middleware chain, Arrow-native sink). A chain mixing Arrow and regular middleware falls back to `to_pylist()` — the Arrow stages pass through unchanged.
+- Only for vectorisable transforms (`pyarrow.compute` ops). Arbitrary per-row Python logic belongs on `MapMiddleware` (per-record lane).
+- `pyarrow` must be installed (`agora-etl[file]`).
 
 ### RetryMiddleware
 

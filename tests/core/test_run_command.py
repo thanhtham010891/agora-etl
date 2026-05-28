@@ -119,10 +119,10 @@ type = "prod_dlq_test"
     local_pipeline = local_container.build_pipeline()
     prod_pipeline = prod_container.build_pipeline()
 
-    assert local_pipeline._dlq_sink.sink_name == "sqlite_dlq"
-    assert local_pipeline._dlq_failure_policy == "log_only"
-    assert prod_pipeline._dlq_sink.sink_name == "prod_dlq_test"
-    assert prod_pipeline._dlq_failure_policy == "raise"
+    assert local_pipeline._config.dlq.sink_name == "sqlite_dlq"
+    assert local_pipeline._config.dlq_failure_policy == "log_only"
+    assert prod_pipeline._config.dlq.sink_name == "prod_dlq_test"
+    assert prod_pipeline._config.dlq_failure_policy == "raise"
 
 
 def test_load_container_from_config_applies_tracing_environment_overlay(tmp_path: Path) -> None:
@@ -176,8 +176,8 @@ enabled = false
     local_pipeline = local_container.build_pipeline()
     prod_pipeline = prod_container.build_pipeline()
 
-    assert isinstance(local_pipeline._tracer, InMemoryTracer)
-    assert isinstance(prod_pipeline._tracer, NoopTracer)
+    assert isinstance(local_pipeline._config.tracer, InMemoryTracer)
+    assert isinstance(prod_pipeline._config.tracer, NoopTracer)
 
 
 def test_load_container_from_config_defaults_to_builtin_sqlite_dlq(tmp_path: Path) -> None:
@@ -207,8 +207,8 @@ path = ".fallback_dlq.db"
     container = _load_container_from_config(str(config_path))
     pipeline = container.build_pipeline()
 
-    assert pipeline._dlq_sink.sink_name == "sqlite_dlq"
-    assert pipeline._dlq_failure_policy == "log_only"
+    assert pipeline._config.dlq.sink_name == "sqlite_dlq"
+    assert pipeline._config.dlq_failure_policy == "log_only"
 
 
 @pytest.mark.asyncio

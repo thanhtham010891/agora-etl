@@ -289,17 +289,7 @@ def _build_replay_pipeline(
         chain=chain,
         writer=template._writer,
         pipeline_id=template.pipeline_id,
-        dlq=template._dlq_sink,
-        dlq_failure_policy=template._dlq_failure_policy,
-        checkpoint=template._checkpoint_store,
-        checkpoint_key=template._checkpoint_key,
-        checkpoint_every=template._checkpoint_every,
-        checkpoint_failure_policy=template._checkpoint_failure_policy,
-        batch_size=template._writer_batch_size,
-        sink_failure_policy=template._sink_failure_policy,
-        max_buffer_size=template._max_buffer_size,
-        backpressure=template._backpressure,
-        tracer=template._tracer,
+        config=template._config,
     )
 
 

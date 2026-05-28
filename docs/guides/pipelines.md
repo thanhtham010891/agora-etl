@@ -40,19 +40,40 @@ Name your middlewares. The name shows up in `PipelineRunSummary.by_middleware` a
 ## .build() — one sink
 
 `.build(sink)` is the right choice when every record goes to one destination.
+Delivery options (batching, DLQ, checkpointing, backpressure, tracing) are
+passed as a single `DeliveryConfig` via the `config=` keyword:
 
 ```python
+from agora import DeliveryConfig
+
 bound = (
     Pipeline(source)
     .pipe(NormalizeMiddleware())
     .build(
         PostgresSink(dsn=dsn),
-        batch_size=200,
-        sink_concurrency=4,
+        config=DeliveryConfig(batch_size=200, sink_concurrency=4),
     )
 )
 summary = await bound.run()
 ```
+
+`DeliveryConfig` is a frozen dataclass — construct it once and reuse it across
+`build()`, `fan_out()`, and `route()`. Its fields:
+
+| Field | Default | What it controls |
+|---|---|---|
+| `dlq` | `None` | Dead-letter sink for failed records |
+| `dlq_failure_policy` | `LOG_ONLY` | What happens when the DLQ write itself fails |
+| `checkpoint` | `None` | Checkpoint store for resumable runs |
+| `checkpoint_key` | `None` (→ pipeline id) | Key the checkpoint is stored under |
+| `checkpoint_every` | `1` | Save checkpoint every N records/batches |
+| `checkpoint_failure_policy` | `FAIL_CLOSED` | Behavior when a checkpoint save fails |
+| `batch_size` | `1` | Records buffered before the writer flushes |
+| `sink_failure_policy` | `FAIL_CLOSED` | Behavior after a sink write error |
+| `sink_concurrency` | `None` | Concurrent sink writes (build/fan_out only) |
+| `max_buffer_size` | `None` | Hard ceiling on in-flight records |
+| `backpressure` | `None` | Adaptive backpressure config (see below) |
+| `tracer` | `None` (→ NoopTracer) | Pipeline tracer |
 
 ### batch_size
 
@@ -70,9 +91,10 @@ Leave it unset (the default) for sinks that require ordered writes or manage the
 
 ### backpressure
 
-Without backpressure, the source can produce records faster than the sink can consume them, growing memory unboundedly. Use `Backpressure.adaptive()` when your source is faster than your sink and you want the runtime to self-regulate:
+Without backpressure, the source can produce records faster than the sink can consume them, growing memory unboundedly. Use `Backpressure.adaptive()` when your source is faster than your sink and you want the runtime to self-regulate — pass it through `DeliveryConfig(backpressure=...)`:
 
 ```python
+from agora import DeliveryConfig
 from agora.core.types import Backpressure
 
 bound = (
@@ -80,10 +102,12 @@ bound = (
     .pipe(NormalizeMiddleware())
     .build(
         SlowSink(),
-        backpressure=Backpressure.adaptive(
-            max_buffer_size=500,
-            writer_slow_ms=50.0,    # slow threshold for sink writes
-            checkpoint_slow_ms=20.0,
+        config=DeliveryConfig(
+            backpressure=Backpressure.adaptive(
+                max_buffer_size=500,
+                writer_slow_ms=50.0,    # slow threshold for sink writes
+                checkpoint_slow_ms=20.0,
+            ),
         ),
     )
 )
@@ -111,13 +135,14 @@ If your source is bounded (a file, a list) and you're not worried about memory, 
 Use `.fan_out()` when every record must reach every sink. A common case is writing to both a database and an audit log:
 
 ```python
+from agora import DeliveryConfig
+
 summary = await (
     Pipeline(source)
     .pipe(NormalizeMiddleware())
     .fan_out(
         [PostgresSink(dsn=dsn), AuditLogSink(path="audit.jsonl")],
-        batch_size=100,
-        sink_concurrency=2,
+        config=DeliveryConfig(batch_size=100, sink_concurrency=2),
     )
     .run()
 )
@@ -151,7 +176,7 @@ summary = await (
 
 Each record goes to exactly one sink — unlike `fan_out`, which sends every record to all sinks. If no predicate matches and there's no `.default()`, the record is silently dropped (no error, no DLQ entry). Add a `.default()` if unmatched records are unexpected.
 
-`route` does not accept `sink_concurrency` because routing is inherently sequential — the predicate must be evaluated before the target is known.
+`route` ignores `DeliveryConfig.sink_concurrency` because routing is inherently sequential — the predicate must be evaluated before the target is known. The other `DeliveryConfig` fields (batching, DLQ, checkpointing) apply as usual.
 
 ## When to use fan_out vs route
 
