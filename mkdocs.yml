@@ -13,8 +13,10 @@ nav:
   - Guides:
       - Quickstart: guides/quickstart.md
       - Pipelines: guides/pipelines.md
+      - Runtime Guarantees: guides/runtime-guarantees.md
       - Failure Handling: guides/failure-handling.md
       - Checkpointing: guides/checkpointing.md
+      - Recovery Matrix: guides/recovery-matrix.md
       - Scheduling: guides/scheduling.md
       - Testing: guides/testing.md
       - Observability: guides/observability.md

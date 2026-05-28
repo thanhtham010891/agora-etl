@@ -38,21 +38,14 @@ The key point: buffered mode increases throughput for slow async stages (LLM cal
 
 ## Runtime guarantees
 
-These are promises the runtime makes to you:
+The full contract — what is guaranteed, what is intentionally not — lives in [Runtime Guarantees](guides/runtime-guarantees.md). The high points:
 
-- Records are committed to sinks in source order, whether execution is linear or buffered.
-- A sink failure or checkpoint failure stops the run. The runtime does not silently skip a failed record and advance the checkpoint past it.
-- The source checkpoint advances only through records that were successfully handled under the active failure policy. If a record goes to the DLQ, the checkpoint still advances (the record was handled). If the sink itself fails, the checkpoint does not advance.
-- DLQ replay acknowledges a record only after replay produces one successful write. Records that fail replay remain in the DLQ.
+- Records are committed to sinks in source order in both linear and buffered modes.
+- The source checkpoint advances only through records that were durably handled under the active failure policy.
+- DLQ replay acknowledges a record only after replay produces one successful write.
+- At-least-once delivery is the model. There is no exactly-once guarantee and no transactional coupling between sink writes and the checkpoint store.
 
-## Non-guarantees
-
-These are things the runtime does not claim:
-
-- **Exactly-once delivery** across arbitrary sinks. At-least-once is the model. If your sink is not idempotent, duplicate writes are possible after a restart.
-- **Transactional coupling** between sink writes and external checkpoint stores. The runtime saves the checkpoint after the sink write succeeds, but there is no two-phase commit.
-- **Safe execution of untrusted config**. Config import references execute trusted project code. Do not load configs from untrusted sources.
-- **Public-edge hardening** for the built-in health server. Keep it behind private network boundaries.
+For the per-source resume contract (which sources support checkpointing, what their resume position means), see the [Recovery Support Matrix](guides/recovery-matrix.md).
 
 ## Backpressure
 

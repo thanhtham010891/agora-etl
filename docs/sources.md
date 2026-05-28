@@ -17,6 +17,8 @@ Sources emit records via an async generator. The pipeline consumes them one at a
 
 Checkpointing is opt-in per source. A source must explicitly set `supports_checkpoint = True`, implement `current_checkpoint()`, and restore state in `prepare_resume()`.
 
+For the full per-source contract (resume keys, granularity, known limitations), see the [Recovery Support Matrix](guides/recovery-matrix.md). Quick reference:
+
 | Source | Checkpoint support | Resume position |
 |---|---|---|
 | `JsonLinesSource` | Yes | line number |

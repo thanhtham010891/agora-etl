@@ -12,7 +12,9 @@ Checkpointing is opt-in. If your source is cheap to re-read (a small API call, a
 
 ## Which sources support it
 
-A source supports checkpointing when it implements the `CheckpointableSource` protocol and sets `supports_checkpoint = True`. The built-in sources that do this are `CsvSource`, `JsonLinesSource`, and `ParquetSource`. You can verify at runtime:
+A source supports checkpointing when it implements the `CheckpointableSource` protocol and sets `supports_checkpoint = True`. The built-in sources that do this are `CsvSource`, `JsonLinesSource`, and `ParquetSource`. For the full per-source resume contract (resume keys, granularity, edge cases), see the [Recovery Support Matrix](recovery-matrix.md).
+
+You can verify at runtime:
 
 ```python
 from agora.core.checkpoint import is_checkpoint_capable

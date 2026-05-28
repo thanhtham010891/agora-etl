@@ -4,6 +4,7 @@ Release notes are versioned as separate documents so the top-level changelog can
 
 ## Releases
 
+- [0.1.8](0.1.8.md) — runtime contract clarity and recovery hardening
 - [0.1.7](0.1.7.md) — runtime correctness, API clarity, docs overhaul
 - [0.1.6](0.1.6.md) — confidence release: CI hygiene, truthful benchmarks, and hot-path cleanup
 - [0.1.5](0.1.5.md) — benchmark split, runtime polish, and docs refresh

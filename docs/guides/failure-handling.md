@@ -2,6 +2,8 @@
 
 **When to read this:** something in your pipeline is failing and you need to decide whether to crash, skip, or queue for later.
 
+For the full list of runtime promises this page builds on (sink fail-closed semantics, checkpoint advancement under failure, DLQ replay acknowledgement), see [Runtime Guarantees](runtime-guarantees.md).
+
 ## What happens when a middleware raises
 
 When a middleware's `process()` raises an exception, the chain stops for that record. No subsequent middlewares run, and the record does not reach the sink. The runtime calls the middleware's `on_error()` hook (which logs by default), then checks whether a DLQ is configured.
