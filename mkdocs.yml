@@ -35,6 +35,8 @@ nav:
           - PostgreSQL: plugins/postgresql.md
           - Scheduling: plugins/scheduling.md
           - Distributed Coordination: plugins/distributed.md
+          - Plugin Contract: plugins/contract.md
+          - Manifest Contract: plugins/manifest.md
           - Developing Plugins: plugins/developing.md
   - Benchmark:
       - Overview: benchmark/index.md

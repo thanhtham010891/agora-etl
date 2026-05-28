@@ -19,6 +19,8 @@ This section focuses on the public plugin story:
 - Need calendar scheduling: [Scheduling](scheduling.md)
 - Need multi-worker lease ownership: [Distributed Coordination](distributed.md)
 - Want to build your own package: [Developing Plugins](developing.md)
+- Need to know which extension points are stable: [Plugin Contract](contract.md)
+- Need to understand manifest versioning: [Manifest Contract](manifest.md)
 
 ## What counts as a plugin?
 
@@ -89,4 +91,4 @@ sink = sink_registry.create("my_sink", dsn="postgresql://example/db")
 ```
 
 For the full plugin contract and entry-point groups, see
-[Developing Plugins](developing.md).
+[Plugin Contract](contract.md) and [Developing Plugins](developing.md).

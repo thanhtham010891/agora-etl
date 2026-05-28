@@ -72,19 +72,13 @@ pipeline = Pipeline(source).build(sink)
 
 ## Manifest compatibility
 
-If a plugin package exposes a `MANIFEST`, Agora uses it for compatibility
-diagnostics and CLI reporting.
+For the full manifest contract — what `AGORA_PLUGIN_MANIFEST_VERSION` tracks,
+when it bumps, and the full compatibility matrix — see
+[Manifest Contract](manifest.md).
 
-Important:
-
-- manifest compatibility is a plugin-contract concern
-- it is not the same thing as the `agora-etl` package version
-- incompatible plugins are excluded from the active registry but still shown in
-  diagnostics so operators can see why they were rejected
-
-For older plugins, `agora.core.registry.AGORA_API_VERSION` still aliases the
-same manifest-contract version constant. New plugins should prefer
-`AGORA_PLUGIN_MANIFEST_VERSION`.
+Quick summary: declare a `MANIFEST` object at your package root with
+`agora_api_version = "0.3"` to opt into compatibility diagnostics. Without a
+`MANIFEST`, your plugin loads normally with `compatible=None`.
 
 ## Authoring examples
 

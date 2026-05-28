@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.1.9](docs/change-log/0.1.9.md) — plugin contract stabilization
 - [0.1.8](docs/change-log/0.1.8.md) — runtime contract clarity and recovery hardening
 - [0.1.7](docs/change-log/0.1.7.md) — runtime correctness, API clarity, docs overhaul
 - [0.1.6](docs/change-log/0.1.6.md) — confidence release: CI hygiene, truthful benchmarks, and hot-path cleanup

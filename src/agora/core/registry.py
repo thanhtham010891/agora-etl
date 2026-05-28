@@ -62,9 +62,14 @@ compatibility hints. It is intentionally separate from the ``agora-etl``
 package version.
 """
 
-# Backward-compatible alias kept for plugin packages that already import it.
-# Prefer ``AGORA_PLUGIN_MANIFEST_VERSION`` in new code.
 AGORA_API_VERSION = AGORA_PLUGIN_MANIFEST_VERSION
+"""Deprecated alias for ``AGORA_PLUGIN_MANIFEST_VERSION``.
+
+.. deprecated:: 0.1.9
+    Import ``AGORA_PLUGIN_MANIFEST_VERSION`` instead. This alias will be
+    removed in ``0.2.0``. Both names resolve to the same value — updating
+    is a one-line change with no behavioral effect.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +495,12 @@ class Registry(Generic[P]):
                         name=ep.name,
                         plugin_api_version=metadata.get("agora_api_version"),
                         expected_manifest_version=AGORA_PLUGIN_MANIFEST_VERSION,
+                        hint=(
+                            f"Update MANIFEST.agora_api_version to "
+                            f"{AGORA_PLUGIN_MANIFEST_VERSION!r} in the plugin package "
+                            f"and verify it still works with the current base classes. "
+                            f"See docs/plugins/manifest.md for the compatibility model."
+                        ),
                     )
                     continue
                 self.register(ep.name, plugin)
