@@ -22,6 +22,17 @@ HTTP_MAX_BACKOFF_S: float = 600.0
 SCHEDULER_MAX_BACKOFF_S: float = 600.0
 """Maximum error-backoff cap (10 minutes) for ScheduledPipeline."""
 
+# ── Runtime ──────────────────────────────────────────────────────────────
+LINEAR_FLUSH_INTERVAL: int = 100
+"""Record count between flushes for the Rust linear batch buffer."""
+
+DEFAULT_PREFETCH_LIMIT: int = 10
+"""Default in-flight prefetch limit when a source does not specify one."""
+
+PRODUCER_JOIN_TIMEOUT_S: float = 5.0
+"""Seconds to wait for the prefetch producer thread to join on shutdown."""
+
+
 # ── Redis ────────────────────────────────────────────────────────────────
 REDIS_DEFAULT_URL: str = "redis://localhost:6379"
 """Default Redis connection URL, shared by Redis-backed plugin integrations."""

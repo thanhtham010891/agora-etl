@@ -27,7 +27,7 @@ All test functions marked `async def` will run under asyncio automatically.
 The simplest way to feed known records into a pipeline is `IterableSource`. It wraps any Python iterable and streams it as pipeline records.
 
 ```python
-from agora.sources.iterable import IterableSource
+from agora import IterableSource
 
 records = [
     {"id": 1, "name": "Alice", "score": 95},
@@ -113,6 +113,9 @@ For middlewares with side effects (DB lookups, API calls), inject a mock or a fa
 When a pipeline has a dead-letter queue configured, failed records go to the DLQ sink instead of stopping the pipeline. Use `CollectSink` as the DLQ sink to assert what ended up there:
 
 ```python
+from agora import DeliveryConfig
+
+
 async def test_bad_records_go_to_dlq():
     source = IterableSource([
         {"id": 1, "value": "good"},
@@ -125,7 +128,7 @@ async def test_bad_records_go_to_dlq():
     pipeline = (
         Pipeline(source, id="test")
         .pipe(ValidateMiddleware(schema=MySchema))
-        .build(output, dlq=dlq)
+        .build(output, config=DeliveryConfig(dlq=dlq))
     )
     await pipeline.run()
 
@@ -141,6 +144,7 @@ The DLQ sink receives the original record as it was before the failure, not a wr
 To test that a pipeline resumes correctly, run it twice against the same `InMemoryCheckpointStore` and verify the second run starts from the right position.
 
 ```python
+from agora import DeliveryConfig
 from agora.core.checkpoint import InMemoryCheckpointStore
 
 
@@ -178,7 +182,7 @@ async def test_checkpoint_resume():
     # First run: process all 10, checkpoint every 5
     pipeline = (
         Pipeline(source, id="test")
-        .build(sink, checkpoint=store, checkpoint_key="test:counting", checkpoint_every=5)
+        .build(sink, config=DeliveryConfig(checkpoint=store, checkpoint_key="test:counting", checkpoint_every=5))
     )
     await pipeline.run()
     assert len(sink.records) == 10
@@ -188,7 +192,7 @@ async def test_checkpoint_resume():
     sink2 = CollectSink()
     pipeline2 = (
         Pipeline(source2, id="test")
-        .build(sink2, checkpoint=store, checkpoint_key="test:counting", checkpoint_every=5)
+        .build(sink2, config=DeliveryConfig(checkpoint=store, checkpoint_key="test:counting", checkpoint_every=5))
     )
     await pipeline2.run()
 

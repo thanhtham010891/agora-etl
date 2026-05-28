@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import logstruct
 
-from agora.core.tracing import NoopSpan, NoopTracer
+from agora.core.tracing import NoopTracer
 
 if TYPE_CHECKING:
     from agora.core.metrics import PipelineMetrics
@@ -199,27 +199,6 @@ class _PipelineSpanScope:
             self._span.record_exception(exc_val)
             self._span.set_attribute("error", True)
         self._span.end()
-
-
-class _NoopPipelineSpanScope:
-    """Cheap scope object returned when tracing is disabled."""
-
-    __slots__ = ()
-
-    def __enter__(self) -> NoopSpan:
-        return _NOOP_SPAN
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
-    ) -> None:
-        del exc_type, exc_val, exc_tb
-
-
-_NOOP_SPAN = NoopSpan(name="noop")
-_NOOP_PIPELINE_SPAN_SCOPE = _NoopPipelineSpanScope()
 
 
 def _normalize_trace_value(value: Any) -> Any:

@@ -53,7 +53,7 @@ from agora.core.component_factory import config_component_factory
 from agora.core.errors import ConfigError
 from agora.core.plugin import Lifecycle
 from agora.core.tracing import InMemoryTracer, NoopTracer, OpenTelemetryTracer
-from agora.core.types import DLQFailurePolicy
+from agora.core.types import DeliveryConfig, DLQFailurePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -353,9 +353,11 @@ class AgoraContainer:
             chain=MiddlewareChain(middlewares),
             writer=SinkFanOut(sinks),
             pipeline_id=pipeline_id,
-            dlq=dlq_sink,
-            dlq_failure_policy=dlq_failure_policy,
-            tracer=tracer,
+            config=DeliveryConfig(
+                dlq=dlq_sink,
+                dlq_failure_policy=dlq_failure_policy,
+                tracer=tracer,
+            ),
         )
 
     # ------------------------------------------------------------------ #

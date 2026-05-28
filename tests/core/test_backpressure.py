@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from agora import InMemoryCheckpointStore, IterableSource, Pipeline
+from agora import DeliveryConfig, InMemoryCheckpointStore, IterableSource, Pipeline
 from agora.core.middleware import Middleware
 from agora.core.sink import WriteResult
 from agora.core.source import BaseSource
@@ -260,7 +260,7 @@ async def test_backpressure_in_flight_never_exceeds_max_buffer_size(
         pipeline = (
             Pipeline(IterableSource(list(range(num_records))))
             .pipe(middleware)
-            .build(sink, max_buffer_size=max_buffer_size)  # type: ignore[arg-type]
+            .build(sink, config=DeliveryConfig(max_buffer_size=max_buffer_size))  # type: ignore[arg-type]
         )
 
         summary = await pipeline.run()
@@ -310,7 +310,7 @@ async def test_backpressure_all_records_processed_with_slow_sink(
     pipeline = (
         Pipeline(IterableSource(list(range(num_records))))
         .pipe(middleware)
-        .build(sink, max_buffer_size=max_buffer_size)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(max_buffer_size=max_buffer_size))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run()
@@ -352,7 +352,7 @@ async def test_backpressure_runtime_metric_respects_bound(max_buffer_size: int) 
     pipeline = (
         Pipeline(IterableSource(list(range(num_records))))
         .pipe(middleware)
-        .build(sink, max_buffer_size=max_buffer_size)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(max_buffer_size=max_buffer_size))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run()
@@ -435,7 +435,7 @@ async def test_max_records_stops_correctly_with_backpressure(
     pipeline = (
         Pipeline(IterableSource(list(range(num_records))))
         .pipe(middleware)
-        .build(sink, max_buffer_size=max_buffer_size)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(max_buffer_size=max_buffer_size))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run(max_records=max_records)
@@ -465,7 +465,7 @@ async def test_backpressure_with_max_buffer_size_one() -> None:
     pipeline = (
         Pipeline(IterableSource(list(range(num_records))))
         .pipe(middleware)
-        .build(sink, max_buffer_size=1)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(max_buffer_size=1))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run()
@@ -487,11 +487,13 @@ async def test_adaptive_backpressure_scales_up_when_writer_and_checkpoint_are_fa
         .pipe(_InFlightTrackingMiddleware(min_concurrency=2))
         .build(
             sink,  # type: ignore[arg-type]
-            batch_size=2,
-            backpressure=Backpressure.adaptive(
-                max_buffer_size=5,
-                writer_slow_ms=100.0,
-                checkpoint_slow_ms=100.0,
+            config=DeliveryConfig(
+                batch_size=2,
+                backpressure=Backpressure.adaptive(
+                    max_buffer_size=5,
+                    writer_slow_ms=100.0,
+                    checkpoint_slow_ms=100.0,
+                ),
             ),
         )
         .run()
@@ -513,12 +515,14 @@ async def test_adaptive_backpressure_scales_down_when_checkpoint_persistence_is_
         .pipe(_InFlightTrackingMiddleware(min_concurrency=4))
         .build(
             _FastBatchCollectSink(),  # type: ignore[arg-type]
-            batch_size=2,
-            checkpoint=_SlowCheckpointStore(delay=0.01),
-            backpressure=Backpressure.adaptive(
-                max_buffer_size=6,
-                writer_slow_ms=100.0,
-                checkpoint_slow_ms=1.0,
+            config=DeliveryConfig(
+                batch_size=2,
+                checkpoint=_SlowCheckpointStore(delay=0.01),
+                backpressure=Backpressure.adaptive(
+                    max_buffer_size=6,
+                    writer_slow_ms=100.0,
+                    checkpoint_slow_ms=1.0,
+                ),
             ),
         )
         .run()
@@ -538,11 +542,13 @@ async def test_adaptive_backpressure_scales_down_when_writer_flush_is_slow() -> 
         .pipe(_InFlightTrackingMiddleware(min_concurrency=4))
         .build(
             _SlowBatchCollectSink(delay=0.01),  # type: ignore[arg-type]
-            batch_size=2,
-            backpressure=Backpressure.adaptive(
-                max_buffer_size=6,
-                writer_slow_ms=1.0,
-                checkpoint_slow_ms=100.0,
+            config=DeliveryConfig(
+                batch_size=2,
+                backpressure=Backpressure.adaptive(
+                    max_buffer_size=6,
+                    writer_slow_ms=1.0,
+                    checkpoint_slow_ms=100.0,
+                ),
             ),
         )
         .run()

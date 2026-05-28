@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agora import IterableSource, Pipeline
+from agora import DeliveryConfig, IterableSource, Pipeline
 from agora.core.pipeline import BoundPipeline
 from agora.core.types import DLQFailurePolicy
 
@@ -54,11 +54,11 @@ class _CollectDLQSink:
 
 
 def test_pipeline_with_dlq_returns_bound_pipeline():
-    """Pipeline(src).build(dlq=sink) must return a BoundPipeline."""
+    """Pipeline(src).build(config=DeliveryConfig(dlq=sink)) must return a BoundPipeline."""
     src = IterableSource([1, 2, 3])
     dlq_sink = _CollectDLQSink()
 
-    result = Pipeline(src).build(dlq=dlq_sink)  # type: ignore[arg-type]
+    result = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
     assert isinstance(result, BoundPipeline)
 
@@ -68,9 +68,9 @@ def test_pipeline_with_dlq_sets_dlq_sink_correctly():
     src = IterableSource([1, 2, 3])
     dlq_sink = _CollectDLQSink()
 
-    result = Pipeline(src).build(dlq=dlq_sink)  # type: ignore[arg-type]
+    result = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
-    assert result._dlq_sink is dlq_sink
+    assert result._config.dlq is dlq_sink
 
 
 def test_pipeline_with_dlq_sets_failure_policy_default():
@@ -78,9 +78,9 @@ def test_pipeline_with_dlq_sets_failure_policy_default():
     src = IterableSource([])
     dlq_sink = _CollectDLQSink()
 
-    result = Pipeline(src).build(dlq=dlq_sink)  # type: ignore[arg-type]
+    result = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
-    assert result._dlq_failure_policy == DLQFailurePolicy.LOG_ONLY
+    assert result._config.dlq_failure_policy == DLQFailurePolicy.LOG_ONLY
 
 
 def test_pipeline_with_dlq_sets_custom_failure_policy():
@@ -89,11 +89,10 @@ def test_pipeline_with_dlq_sets_custom_failure_policy():
     dlq_sink = _CollectDLQSink()
 
     result = Pipeline(src).build(
-        dlq=dlq_sink,  # type: ignore[arg-type]
-        dlq_failure_policy=DLQFailurePolicy.RAISE,
+        config=DeliveryConfig(dlq=dlq_sink, dlq_failure_policy=DLQFailurePolicy.RAISE)  # type: ignore[arg-type]
     )
 
-    assert result._dlq_failure_policy == DLQFailurePolicy.RAISE
+    assert result._config.dlq_failure_policy == DLQFailurePolicy.RAISE
 
 
 # ======================================================================
@@ -111,7 +110,7 @@ def test_pipeline_builder_not_mutated_after_with_dlq():
     pipeline_id_before = pipeline._pipeline_id
 
     # Call build with dlq
-    pipeline.build(dlq=_CollectDLQSink())  # type: ignore[arg-type]
+    pipeline.build(config=DeliveryConfig(dlq=_CollectDLQSink()))  # type: ignore[arg-type]
 
     # Pipeline builder state must be unchanged
     assert pipeline._middlewares == middlewares_before
@@ -125,7 +124,7 @@ def test_pipeline_with_dlq_returns_new_object_not_same_as_build():
     dlq_sink = _CollectDLQSink()
 
     bound = pipeline.build()
-    with_dlq_result = pipeline.build(dlq=dlq_sink)  # type: ignore[arg-type]
+    with_dlq_result = pipeline.build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
     # Must be different objects
     assert with_dlq_result is not bound
@@ -139,15 +138,15 @@ def test_pipeline_with_dlq_does_not_mutate_intermediate_build():
 
     # Build a BoundPipeline first
     intermediate = pipeline.build()
-    assert intermediate._dlq_sink is None  # no DLQ yet
+    assert intermediate._config.dlq is None  # no DLQ yet
 
     # Now call build with dlq — should not affect the intermediate object
-    result = pipeline.build(dlq=dlq_sink)  # type: ignore[arg-type]
+    result = pipeline.build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
     # The intermediate BoundPipeline must remain unmodified
-    assert intermediate._dlq_sink is None
+    assert intermediate._config.dlq is None
     # The result must have the DLQ set
-    assert result._dlq_sink is dlq_sink
+    assert result._config.dlq is dlq_sink
 
 
 def test_multiple_with_dlq_calls_are_independent():
@@ -157,12 +156,12 @@ def test_multiple_with_dlq_calls_are_independent():
     dlq_sink_a = _CollectDLQSink()
     dlq_sink_b = _CollectDLQSink()
 
-    result_a = pipeline.build(dlq=dlq_sink_a)  # type: ignore[arg-type]
-    result_b = pipeline.build(dlq=dlq_sink_b)  # type: ignore[arg-type]
+    result_a = pipeline.build(config=DeliveryConfig(dlq=dlq_sink_a))  # type: ignore[arg-type]
+    result_b = pipeline.build(config=DeliveryConfig(dlq=dlq_sink_b))  # type: ignore[arg-type]
 
     assert result_a is not result_b
-    assert result_a._dlq_sink is dlq_sink_a
-    assert result_b._dlq_sink is dlq_sink_b
+    assert result_a._config.dlq is dlq_sink_a
+    assert result_b._config.dlq is dlq_sink_b
 
 
 # ======================================================================
@@ -179,13 +178,12 @@ def test_chaining_with_checkpoint_store_after_with_dlq():
     store = InMemoryCheckpointStore()
 
     result = Pipeline(src).build(
-        dlq=dlq_sink,  # type: ignore[arg-type]
-        checkpoint=store,
+        config=DeliveryConfig(dlq=dlq_sink, checkpoint=store)  # type: ignore[arg-type]
     )
 
     assert isinstance(result, BoundPipeline)
-    assert result._dlq_sink is dlq_sink
-    assert result._checkpoint_store is store
+    assert result._config.dlq is dlq_sink
+    assert result._config.checkpoint is store
 
 
 def test_chaining_with_sink_after_with_dlq():
@@ -198,12 +196,12 @@ def test_chaining_with_sink_after_with_dlq():
 
     result = (
         Pipeline(src)
-        .build(dlq=dlq_sink)  # type: ignore[arg-type]
+        .build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
         .with_sink(new_sink)
     )
 
     assert isinstance(result, BoundPipeline)
-    assert result._dlq_sink is dlq_sink
+    assert result._config.dlq is dlq_sink
 
 
 def test_chaining_with_dlq_after_with_dlq_replaces_sink():
@@ -212,13 +210,13 @@ def test_chaining_with_dlq_after_with_dlq_replaces_sink():
     dlq_sink_a = _CollectDLQSink()
     dlq_sink_b = _CollectDLQSink()
 
-    first = Pipeline(src).build(dlq=dlq_sink_a)  # type: ignore[arg-type]
-    second = Pipeline(src).build(dlq=dlq_sink_b)  # type: ignore[arg-type]
+    first = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink_a))  # type: ignore[arg-type]
+    second = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink_b))  # type: ignore[arg-type]
 
     # first must have sink_a
-    assert first._dlq_sink is dlq_sink_a
+    assert first._config.dlq is dlq_sink_a
     # second must have sink_b
-    assert second._dlq_sink is dlq_sink_b
+    assert second._config.dlq is dlq_sink_b
     # they must be different objects
     assert first is not second
 
@@ -244,7 +242,7 @@ async def test_pipeline_with_dlq_runs_correctly():
     summary = await (
         Pipeline(IterableSource([1, 2, 3]))
         .pipe(_BoomMiddleware())
-        .build(dlq=dlq_sink)  # type: ignore[arg-type]
+        .build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
         .run()
     )
 

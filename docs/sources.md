@@ -9,6 +9,7 @@ Sources emit records via an async generator. The pipeline consumes them one at a
 | Reading a JSONL file | `JsonLinesSource` |
 | Reading a CSV or TSV file | `CsvSource` |
 | Reading a Parquet file | `ParquetSource` |
+| CSV/JSONL with zero per-row allocation (Arrow) | `ArrowCsvSource` / `ArrowJsonLinesSource` |
 | Polling an HTTP API | `HTTPSource` (subclass) |
 | Custom data origin | Subclass `BaseSource` |
 | Need resume after restart | Use any source with `supports_checkpoint = True` |
@@ -49,6 +50,11 @@ source = JsonLinesSource(
 
 Supports checkpointing — resumes from the last processed line number after a restart.
 
+Set `emit_batches=True` to route through the batch execution lane (see
+[Batch execution lane](#batch-execution-lane) below) — the source yields
+`list` batches of `emit_batch_size` records instead of one record at a time,
+which avoids per-record runtime overhead.
+
 ### CsvSource
 
 Stream records from a CSV or TSV file using the stdlib `csv` module.
@@ -71,6 +77,10 @@ source = CsvSource(
 
 Supports checkpointing by row number.
 
+Like `JsonLinesSource`, `CsvSource` accepts `emit_batches=True` (and
+`emit_batch_size`, default `5000`) to participate in the
+[batch execution lane](#batch-execution-lane).
+
 ### ParquetSource
 
 Stream records from a Parquet file using PyArrow. Reads in batches internally to avoid loading the entire file into memory, but exposes row-oriented dicts to `row_mapper`.
@@ -88,6 +98,83 @@ source = ParquetSource(
 ```
 
 Supports checkpointing by row number.
+
+Pass `use_arrow_batches=True` to emit `pa.RecordBatch` objects directly through
+the batch lane with zero per-row Python allocation (`row_mapper` is bypassed).
+When paired with an Arrow-native sink like `ParquetSink`, the runtime takes the
+Arrow fast path. See [Batch execution lane](#batch-execution-lane).
+
+### Batch execution lane
+
+File sources can opt into the batch execution lane, which processes records in
+batches instead of one at a time — eliminating per-record runtime orchestration
+and measurably improving throughput (≈2× for CSV/JSONL on a null sink).
+
+| Source | Flag | Batch shape | row_mapper |
+|---|---|---|---|
+| `CsvSource` / `JsonLinesSource` | `emit_batches=True` | `list[T]` (mapped records) | applied per row |
+| `ParquetSource` | `use_arrow_batches=True` | `pa.RecordBatch` | bypassed |
+| `ArrowCsvSource` / `ArrowJsonLinesSource` | always on | `pa.RecordBatch` | bypassed |
+
+```python
+from agora import DeliveryConfig
+from agora.sources.file.csv import CsvSource
+
+source = CsvSource(path="data/products.csv", row_mapper=lambda r: r, emit_batches=True)
+summary = await Pipeline(source).build(sink, config=DeliveryConfig(batch_size=5000)).run()
+```
+
+Checkpointing, DLQ routing, and ordering guarantees are all preserved — the
+checkpoint advances once per batch, after the batch is durably written. To
+transform records on the batch lane without falling back to per-record
+dispatch, use `BatchMapMiddleware` / `BatchFilterMiddleware` (see
+[middlewares](middlewares.md)).
+
+### ArrowCsvSource / ArrowJsonLinesSource
+
+Arrow-native file readers that emit `pa.RecordBatch` objects directly — no `row_mapper`, no per-row Python dict allocation. Use these when throughput matters and your downstream processing is vectorisable.
+
+Requires: `pip install "agora-etl[file]"`
+
+```python
+from agora.sources.file.csv import ArrowCsvSource
+from agora.sources.file.jsonlines import ArrowJsonLinesSource
+# or simply:
+from agora import ArrowCsvSource, ArrowJsonLinesSource
+
+csv_src  = ArrowCsvSource(path="data/products.csv", batch_size=65_536)
+jsonl_src = ArrowJsonLinesSource(path="data/events.jsonl", batch_size=65_536)
+```
+
+Both sources set `emits_arrow_batches=True` and `supports_batch_emit=True`, so the runtime automatically selects the Arrow execution lane. Pair them with `ArrowMapMiddleware`/`ArrowFilterMiddleware` and an Arrow-native sink (e.g. `ParquetSink`) to keep data columnar end-to-end:
+
+```python
+import pyarrow.compute as pc
+import pyarrow as pa
+from agora import ArrowCsvSource, ArrowMapMiddleware, ArrowFilterMiddleware, Pipeline
+from agora.sinks.file.parquet import ParquetSink
+
+def scale_price(batch):
+    idx = batch.schema.get_field_index("price")
+    return batch.set_column(idx, "price",
+        pc.multiply(pc.cast(batch.column(idx), pa.float64()), 100.0))
+
+summary = await (
+    Pipeline(ArrowCsvSource(path="data/products.csv"))
+    .pipe(ArrowMapMiddleware(scale_price))
+    .pipe(ArrowFilterMiddleware(lambda b: pc.greater(b.column("price"), 0.0)))
+    .build(ParquetSink(path="out.parquet"))
+    .run()
+)
+```
+
+**Measured throughput** (100k rows, median 3 runs): ~1.2M r/s end-to-end with ParquetSink; ~4.8M r/s with a null Arrow sink. Compare to ~110k r/s for the row-path baseline.
+
+**Constraints:**
+- `row_mapper` is not called — the batch is passed as-is to the middleware/sink.
+- Checkpointing tracks row count but does not support mid-file resume (no row-skip on restart).
+- `pyarrow.csv` infers column types automatically (numbers become int/float, not strings). Use `pyarrow.csv.ConvertOptions` in a subclass if you need explicit schema control.
+- Only works with Arrow-native middleware (`ArrowBatchMiddleware` subclasses) and Arrow-native sinks. Regular `MapMiddleware`/`FilterMiddleware` force `to_pylist()` and lose the throughput advantage.
 
 ### HTTPSource
 

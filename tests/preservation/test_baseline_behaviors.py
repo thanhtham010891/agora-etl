@@ -543,6 +543,7 @@ def test_code2_bound_pipeline_with_dlq_returns_new_object() -> None:
 
     Validates: Requirements 3.13
     """
+    from agora import DeliveryConfig
     from agora.core.pipeline import BoundPipeline, Pipeline
     from agora.core.source import IterableSource
 
@@ -566,10 +567,10 @@ def test_code2_bound_pipeline_with_dlq_returns_new_object() -> None:
     dlq_sink = _FakeDLQSink()
 
     # BoundPipeline built with dlq should have it set
-    new_bound = Pipeline(src).build(dlq=dlq_sink)
+    new_bound = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))
 
     assert new_bound is not bound, (
-        "[CODE-2] PRESERVATION FAILED: BoundPipeline.build(dlq=...) should return a new object, "
+        "[CODE-2] PRESERVATION FAILED: BoundPipeline.build(config=...) should return a new object, "
         "not mutate self"
     )
     assert isinstance(new_bound, BoundPipeline), (
@@ -577,11 +578,11 @@ def test_code2_bound_pipeline_with_dlq_returns_new_object() -> None:
         f"got {type(new_bound)}"
     )
     # Original should not have DLQ set
-    assert bound._dlq_sink is None, (
+    assert bound._config.dlq is None, (
         "[CODE-2] PRESERVATION FAILED: Original BoundPipeline should not be mutated"
     )
     # New object should have DLQ set
-    assert new_bound._dlq_sink is dlq_sink, (
+    assert new_bound._config.dlq is dlq_sink, (
         "[CODE-2] PRESERVATION FAILED: New BoundPipeline should have DLQ sink set"
     )
 
@@ -591,6 +592,7 @@ def test_code2_bound_pipeline_with_checkpoint_store_is_immutable() -> None:
 
     Validates: Requirements 3.14
     """
+    from agora import DeliveryConfig
     from agora.core.pipeline import BoundPipeline, Pipeline
     from agora.core.source import IterableSource
 
@@ -605,16 +607,16 @@ def test_code2_bound_pipeline_with_checkpoint_store_is_immutable() -> None:
     bound = Pipeline(src).build()
     store = _FakeCheckpointStore()
 
-    new_bound = Pipeline(src).build(checkpoint=store)
+    new_bound = Pipeline(src).build(config=DeliveryConfig(checkpoint=store))
 
     assert new_bound is not bound, (
         "[CODE-2] PRESERVATION FAILED: build(checkpoint=...) should return new object"
     )
     assert isinstance(new_bound, BoundPipeline)
-    assert bound._checkpoint_store is None, (
+    assert bound._config.checkpoint is None, (
         "[CODE-2] PRESERVATION FAILED: Original should not be mutated by build(checkpoint=...)"
     )
-    assert new_bound._checkpoint_store is store, (
+    assert new_bound._config.checkpoint is store, (
         "[CODE-2] PRESERVATION FAILED: New object should have checkpoint store set"
     )
 
@@ -651,7 +653,7 @@ def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
     Replacing sinks must not silently drop checkpoint, DLQ, backpressure, or
     tracing configuration from the prepared pipeline.
     """
-    from agora import InMemoryCheckpointStore
+    from agora import DeliveryConfig, InMemoryCheckpointStore
     from agora.core.dlq import SQLiteDLQSink
     from agora.core.pipeline import Pipeline
     from agora.core.source import IterableSource
@@ -666,31 +668,33 @@ def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
 
     original = Pipeline(IterableSource([1, 2, 3]), id="orders").build(
         StdoutSink(),
-        dlq=dlq,
-        dlq_failure_policy=DLQFailurePolicy.RAISE,
-        checkpoint=store,
-        checkpoint_key="orders-checkpoint",
-        checkpoint_every=3,
-        batch_size=2,
-        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
-        max_buffer_size=5,
-        backpressure=backpressure,
-        tracer=tracer,
+        config=DeliveryConfig(
+            dlq=dlq,
+            dlq_failure_policy=DLQFailurePolicy.RAISE,
+            checkpoint=store,
+            checkpoint_key="orders-checkpoint",
+            checkpoint_every=3,
+            batch_size=2,
+            sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            max_buffer_size=5,
+            backpressure=backpressure,
+            tracer=tracer,
+        ),
     )
 
     replaced = original.with_sink(StdoutSink())
 
     assert replaced._pipeline_id == "orders"
-    assert replaced._dlq_sink is dlq
-    assert replaced._dlq_failure_policy == DLQFailurePolicy.RAISE
-    assert replaced._checkpoint_store is store
-    assert replaced._checkpoint_key == "orders-checkpoint"
-    assert replaced._checkpoint_every == 3
-    assert replaced._writer_batch_size == 2
-    assert replaced._sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE
-    assert replaced._max_buffer_size == 5
-    assert replaced._backpressure is backpressure
-    assert replaced._tracer is tracer
+    assert replaced._config.dlq is dlq
+    assert replaced._config.dlq_failure_policy == DLQFailurePolicy.RAISE
+    assert replaced._config.checkpoint is store
+    assert replaced._config.checkpoint_key == "orders-checkpoint"
+    assert replaced._config.checkpoint_every == 3
+    assert replaced._config.batch_size == 2
+    assert replaced._config.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE
+    assert replaced._config.max_buffer_size == 5
+    assert replaced._config.backpressure is backpressure
+    assert replaced._config.tracer is tracer
 
 
 # ======================================================================
@@ -1004,7 +1008,7 @@ async def test_rec1_checkpoint_save_failure_is_fail_closed_by_default() -> None:
     Baseline behavior: checkpoint persistence is fail-closed unless the caller
     explicitly opts into log-and-continue behavior.
     """
-    from agora import Pipeline
+    from agora import DeliveryConfig, Pipeline
     from agora.core.sink import WriteResult
     from agora.core.source import BaseSource
 
@@ -1064,7 +1068,7 @@ async def test_rec1_checkpoint_save_failure_is_fail_closed_by_default() -> None:
     with pytest.raises(RuntimeError, match="checkpoint save broke"):
         await (
             Pipeline(_CheckpointedSource([1, 2, 3]))
-            .build(sink, checkpoint=_FailingCheckpointStore())  # type: ignore[arg-type]
+            .build(sink, config=DeliveryConfig(checkpoint=_FailingCheckpointStore()))  # type: ignore[arg-type]
             .run()
         )
 

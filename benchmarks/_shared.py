@@ -146,6 +146,26 @@ class NullSink(BaseSink):
         del records
 
 
+class ArrowNullSink(BaseSink):
+    """Arrow-native null sink — discards pa.RecordBatch with zero row materialisation.
+
+    Enables the Arrow fast path in the benchmark so Arrow source + Arrow middleware
+    + this sink measures the true columnar throughput ceiling.
+    """
+
+    sink_name = "arrow_null"
+    batch_writable_native = True
+
+    async def write(self, record) -> None:
+        del record
+
+    async def write_batch(self, records) -> None:
+        del records
+
+    async def write_arrow_batch(self, batch) -> None:
+        del batch
+
+
 class CountSink(BaseSink[dict[str, Any]]):
     sink_name = "count"
 
@@ -242,6 +262,14 @@ def prepare_runtime(*, plugins: bool) -> None:
     import uvloop
 
     uvloop.install()
+
+    # Pre-warm PyArrow imports so the first benchmark run doesn't pay lazy import cost.
+    try:
+        import pyarrow
+        import pyarrow.dataset
+        import pyarrow.parquet  # noqa: F401
+    except ImportError:
+        pass
 
 
 def random_string(length: int = 8) -> str:

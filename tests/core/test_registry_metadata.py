@@ -6,7 +6,7 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agora.cli.commands.plugins import _registry_rows
-from agora.core.registry import AGORA_API_VERSION, AGORA_PLUGIN_MANIFEST_VERSION, Registry
+from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION, Registry
 
 if TYPE_CHECKING:
     import pytest
@@ -89,8 +89,8 @@ def test_registry_load_entrypoints_records_manifest_metadata(
     assert item.compatible is True
 
 
-def test_registry_keeps_api_version_alias_for_existing_plugins() -> None:
-    assert AGORA_API_VERSION == AGORA_PLUGIN_MANIFEST_VERSION
+def test_registry_manifest_version_is_current() -> None:
+    assert AGORA_PLUGIN_MANIFEST_VERSION == "0.4"
 
 
 def test_registry_skips_incompatible_manifest_entrypoints(

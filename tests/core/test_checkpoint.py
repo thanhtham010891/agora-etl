@@ -5,7 +5,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agora import InMemoryCheckpointStore, IterableSource, Pipeline, SQLiteCheckpointStore
+from agora import (
+    DeliveryConfig,
+    InMemoryCheckpointStore,
+    IterableSource,
+    Pipeline,
+    SQLiteCheckpointStore,
+)
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 from agora.core.types import CheckpointFailurePolicy
@@ -102,7 +108,7 @@ async def test_pipeline_checkpoint_store_resumes_from_last_saved_position() -> N
 
     first_summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(first_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run(max_records=2)
     )
 
@@ -115,7 +121,7 @@ async def test_pipeline_checkpoint_store_resumes_from_last_saved_position() -> N
     second_sink = _CollectSink()
     second_summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(second_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(second_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 
@@ -131,7 +137,7 @@ async def test_pipeline_batch_writer_preserves_checkpoint_resume_semantics() -> 
 
     first_summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(first_sink, checkpoint=store, batch_size=2)  # type: ignore[arg-type]
+        .build(first_sink, config=DeliveryConfig(checkpoint=store, batch_size=2))  # type: ignore[arg-type]
         .run(max_records=3)
     )
 
@@ -142,7 +148,7 @@ async def test_pipeline_batch_writer_preserves_checkpoint_resume_semantics() -> 
     second_sink = _CollectSink()
     second_summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(second_sink, checkpoint=store, batch_size=2)  # type: ignore[arg-type]
+        .build(second_sink, config=DeliveryConfig(checkpoint=store, batch_size=2))  # type: ignore[arg-type]
         .run()
     )
 
@@ -158,7 +164,7 @@ async def test_sqlite_checkpoint_store_persists_resume_state(tmp_path: Path) -> 
 
     await (
         Pipeline(_CheckpointedSequenceSource([1, 2, 3]))
-        .build(first_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run(max_records=2)
     )
     await store.close()
@@ -168,7 +174,7 @@ async def test_sqlite_checkpoint_store_persists_resume_state(tmp_path: Path) -> 
     try:
         summary = await (
             Pipeline(_CheckpointedSequenceSource([1, 2, 3]))
-            .build(second_sink, checkpoint=resumed_store)  # type: ignore[arg-type]
+            .build(second_sink, config=DeliveryConfig(checkpoint=resumed_store))  # type: ignore[arg-type]
             .run()
         )
     finally:
@@ -226,8 +232,10 @@ async def test_pipeline_can_log_and_continue_on_checkpoint_save_failure() -> Non
         Pipeline(_CheckpointedSequenceSource([1, 2]))
         .build(
             sink,  # type: ignore[arg-type]
-            checkpoint=_FailingCheckpointStore(),  # type: ignore[arg-type]
-            checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            config=DeliveryConfig(
+                checkpoint=_FailingCheckpointStore(),  # type: ignore[arg-type]
+                checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            ),
         )
         .run()
     )
@@ -246,8 +254,10 @@ async def test_pipeline_batch_writer_coalesces_checkpoint_saves_per_flush() -> N
         Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
         .build(
             _CollectSink(),  # type: ignore[arg-type]
-            checkpoint=store,
-            batch_size=2,
+            config=DeliveryConfig(
+                checkpoint=store,
+                batch_size=2,
+            ),
         )
         .run()
     )
@@ -269,7 +279,9 @@ async def test_pipeline_fails_closed_on_checkpoint_save_failure_by_default() -> 
             Pipeline(_CheckpointedSequenceSource([1]))
             .build(
                 _CollectSink(),  # type: ignore[arg-type]
-                checkpoint=_FailingCheckpointStore(),  # type: ignore[arg-type]
+                config=DeliveryConfig(
+                    checkpoint=_FailingCheckpointStore(),  # type: ignore[arg-type]
+                ),
             )
             .run()
         )
@@ -282,7 +294,7 @@ async def test_non_checkpointable_source_does_not_enable_or_load_checkpointing()
 
     summary = await (
         Pipeline(IterableSource([1, 2, 3]))
-        .build(sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 
@@ -309,7 +321,7 @@ async def test_pipeline_closes_checkpoint_store_after_run() -> None:
 
     await (
         Pipeline(_CheckpointedSequenceSource([1, 2]))
-        .build(_CollectSink(), checkpoint=store)  # type: ignore[arg-type]
+        .build(_CollectSink(), config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 
@@ -348,14 +360,14 @@ async def test_batch_sink_fail_closed_advances_checkpoint_only_through_last_succ
     with pytest.raises(RuntimeError, match="second batch broke"):
         await (
             Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-            .build(_FailOnSecondBatchSink(), checkpoint=store, batch_size=2)  # type: ignore[arg-type]
+            .build(_FailOnSecondBatchSink(), config=DeliveryConfig(checkpoint=store, batch_size=2))  # type: ignore[arg-type]
             .run()
         )
 
     resumed_sink = _CollectSink()
     summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40]))
-        .build(resumed_sink, checkpoint=store, batch_size=2)  # type: ignore[arg-type]
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store, batch_size=2))  # type: ignore[arg-type]
         .run()
     )
 
@@ -418,7 +430,7 @@ async def test_buffered_fail_closed_write_stops_pending_delivery_and_preserves_r
         await (
             Pipeline(_AckTrackingSource([10, 20, 30, 40], acknowledged))
             .pipe(_BufferedPassThroughMiddleware(batch_size=4))
-            .build(failing_sink, checkpoint=store)  # type: ignore[arg-type]
+            .build(failing_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run()
         )
 
@@ -430,7 +442,7 @@ async def test_buffered_fail_closed_write_stops_pending_delivery_and_preserves_r
     resumed_summary = await (
         Pipeline(_AckTrackingSource([10, 20, 30, 40], resumed_acknowledged))
         .pipe(_BufferedPassThroughMiddleware(batch_size=4))
-        .build(resumed_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 

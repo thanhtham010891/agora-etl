@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_check
 from agora.core.writer import WriteResult
 
 # Singleton reused for every successfully written record in the fast path.
+# Invariant: never mutate _WRITE_OK.errors — the empty list is shared across
+# every record returned via `[_WRITE_OK] * n`, so an append would corrupt all of them.
 _WRITE_OK = WriteResult(written=True, errors=[])
 
 if TYPE_CHECKING:
@@ -353,6 +355,18 @@ class SinkFanOut(Generic[T]):
                 err = WriteResult(written=False, errors=[exc])
                 return [err] * len(records)
 
+        # Fast path: single non-batch-writable sink, no concurrency.
+        # Sequential write, keeping per-record outcomes without fanout bookkeeping.
+        if len(self._sinks) == 1 and not self._concurrent_writes:
+            sink = self._sinks[0]
+            fast_results: list[WriteResult] = [_WRITE_OK] * len(records)
+            for i, record in enumerate(records):
+                try:
+                    await sink.write(record)
+                except Exception as exc:
+                    fast_results[i] = WriteResult(written=False, errors=[exc])
+            return fast_results
+
         written_flags = [False] * len(records)
         errors_by_record: list[list[Exception]] = [[] for _ in records]
         sink_calls: list[tuple[BaseSink[T], Awaitable[object]]] = []
@@ -366,13 +380,15 @@ class SinkFanOut(Generic[T]):
                 )
             )
 
+        results: list[object]
         if not self._concurrent_writes:
-            results: list[object] = []
+            seq: list[object] = []
             for _, call in sink_calls:
                 try:
-                    results.append(await call)
+                    seq.append(await call)
                 except Exception as exc:
-                    results.append(exc)
+                    seq.append(exc)
+            results = seq
         else:
             results = await self._run_sink_calls(sink_calls)
 
@@ -413,13 +429,6 @@ class SinkFanOut(Generic[T]):
 
         results = await self._run_sink_calls([(sink, sink.close()) for sink in self._sinks])
         self._raise_first_exception(results)
-
-    # Backward-compatible aliases
-    async def flush_all(self) -> None:
-        await self.flush()
-
-    async def close_all(self) -> None:
-        await self.close()
 
     def __iter__(self) -> Iterator[BaseSink[T]]:
         return iter(self._sinks)
@@ -583,10 +592,6 @@ class SinkRouter(Generic[T]):
             await route.sink.close()
         if self._default is not None:
             await self._default.close()
-
-    # Backward-compatible alias
-    async def close_all(self) -> None:
-        await self.close()
 
     def bind_context(self, ctx: Any) -> None:
         for route in self._routes:

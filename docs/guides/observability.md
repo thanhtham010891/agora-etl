@@ -162,12 +162,13 @@ Tracing gives you span-level visibility into what happens inside a pipeline run 
 `InMemoryTracer` records all spans in memory. Use it in tests and local debugging to inspect what the runtime did:
 
 ```python
+from agora import DeliveryConfig
 from agora.core.tracing import InMemoryTracer
 
 tracer = InMemoryTracer()
 pipeline = (
     Pipeline(source, id="debug_run")
-    .build(sink, tracer=tracer)
+    .build(sink, config=DeliveryConfig(tracer=tracer))
 )
 await pipeline.run()
 
@@ -180,6 +181,7 @@ for span in tracer.spans:
 `OpenTelemetryTracer` bridges into your existing OTel setup. It requires `opentelemetry-api` to be installed:
 
 ```python
+from agora import DeliveryConfig
 from agora.core.tracing import OpenTelemetryTracer
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -193,7 +195,7 @@ trace.set_tracer_provider(provider)
 tracer = OpenTelemetryTracer(name="agora")
 pipeline = (
     Pipeline(source, id="events_ingest")
-    .build(sink, tracer=tracer)
+    .build(sink, config=DeliveryConfig(tracer=tracer))
 )
 ```
 

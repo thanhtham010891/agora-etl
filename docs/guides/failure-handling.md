@@ -23,6 +23,7 @@ Sink failures are handled separately from middleware failures. When `write()` ra
 The pipeline raises immediately and stops. Use this when a write failure means the data is lost and you cannot afford to continue — for example, writing to a primary database where every record must land.
 
 ```python
+from agora import DeliveryConfig
 from agora.core.types import SinkFailurePolicy
 
 bound = (
@@ -30,7 +31,7 @@ bound = (
     .pipe(NormalizeMiddleware())
     .build(
         PostgresSink(dsn=dsn),
-        sink_failure_policy=SinkFailurePolicy.FAIL_CLOSED,
+        config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.FAIL_CLOSED),
     )
 )
 ```
@@ -42,13 +43,19 @@ bound = (
 The error is logged, the record is counted as errored, and the pipeline moves on. Use this when partial delivery is acceptable — for example, writing to a secondary analytics store where a missed record is tolerable.
 
 ```python
+from agora import DeliveryConfig
+from agora.core.dlq import SQLiteDLQSink
+from agora.core.types import SinkFailurePolicy
+
 bound = (
     Pipeline(source)
     .pipe(NormalizeMiddleware())
     .build(
         AnalyticsSink(),
-        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
-        dlq=SQLiteDLQSink(".agora_dlq.db"),
+        config=DeliveryConfig(
+            sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            dlq=SQLiteDLQSink(".agora_dlq.db"),
+        ),
     )
 )
 ```
@@ -60,6 +67,7 @@ Pair `LOG_AND_CONTINUE` with a DLQ so failed records are not silently lost. With
 A DLQ (dead-letter queue) is just another sink — one that receives `DLQRecord` objects instead of your domain records. You attach it at `.build()` time:
 
 ```python
+from agora import DeliveryConfig
 from agora.core.dlq import SQLiteDLQSink
 
 dlq = SQLiteDLQSink(".agora_dlq.db")
@@ -69,7 +77,7 @@ bound = (
     .pipe(NormalizeMiddleware())
     .build(
         PostgresSink(dsn=dsn),
-        dlq=dlq,
+        config=DeliveryConfig(dlq=dlq),
     )
 )
 ```
@@ -85,6 +93,7 @@ If the DLQ sink itself fails to write, `DLQFailurePolicy` controls what happens 
 `DLQFailurePolicy.RAISE` — treat a DLQ write failure as fatal and stop the pipeline. Use this when you need a hard guarantee that no failed record is silently discarded.
 
 ```python
+from agora import DeliveryConfig
 from agora.core.types import DLQFailurePolicy
 
 bound = (
@@ -92,8 +101,10 @@ bound = (
     .pipe(NormalizeMiddleware())
     .build(
         PostgresSink(dsn=dsn),
-        dlq=SQLiteDLQSink(".agora_dlq.db"),
-        dlq_failure_policy=DLQFailurePolicy.RAISE,
+        config=DeliveryConfig(
+            dlq=SQLiteDLQSink(".agora_dlq.db"),
+            dlq_failure_policy=DLQFailurePolicy.RAISE,
+        ),
     )
 )
 ```
@@ -105,12 +116,13 @@ bound = (
 **Use `RetryMiddleware`** when the failure is transient and you want to recover in-process without human intervention — for example, a flaky HTTP enrichment call:
 
 ```python
+from agora import DeliveryConfig
 from agora.core.middleware import RetryMiddleware
 
 pipeline = (
     Pipeline(source)
     .pipe(RetryMiddleware(EnrichMiddleware(), max_retries=3, backoff_base=2.0))
-    .build(sink, dlq=SQLiteDLQSink(".agora_dlq.db"))
+    .build(sink, config=DeliveryConfig(dlq=SQLiteDLQSink(".agora_dlq.db")))
 )
 ```
 
@@ -125,7 +137,9 @@ Do not use `LOG_AND_CONTINUE` without a DLQ as a substitute for passthrough. `LO
 `SQLiteDLQSink` writes failed records to a local SQLite file. It's the right choice for development, single-process deployments, and any situation where you don't have a message broker available.
 
 ```python
+from agora import DeliveryConfig
 from agora.core.dlq import SQLiteDLQSink
+from agora.core.types import SinkFailurePolicy
 
 dlq = SQLiteDLQSink(".agora_dlq.db")  # path is relative to cwd
 
@@ -134,8 +148,10 @@ bound = (
     .pipe(NormalizeMiddleware())
     .build(
         PostgresSink(dsn=dsn),
-        dlq=dlq,
-        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+        config=DeliveryConfig(
+            dlq=dlq,
+            sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+        ),
     )
 )
 
@@ -206,6 +222,7 @@ A production pipeline that handles failures gracefully looks like this:
 
 ```python
 import asyncio
+from agora import DeliveryConfig
 from agora.core.dlq import SQLiteDLQSink
 from agora.core.middleware import RetryMiddleware
 from agora.core.pipeline import Pipeline
@@ -221,11 +238,13 @@ async def main() -> None:
         .filter(lambda r: r.confidence > 0.5)
         .build(
             PostgresSink(dsn=dsn),
-            dlq=dlq,
-            dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
-            sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
-            batch_size=100,
-            backpressure=Backpressure.adaptive(max_buffer_size=500),
+            config=DeliveryConfig(
+                dlq=dlq,
+                dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
+                sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+                batch_size=100,
+                backpressure=Backpressure.adaptive(max_buffer_size=500),
+            ),
         )
         .run()
     )

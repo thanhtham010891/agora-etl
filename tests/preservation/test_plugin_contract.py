@@ -11,8 +11,6 @@ Coverage:
 - Each ``stable`` entry-point group has a registry that exists and exposes
   ``load_entrypoints()``.
 - The manifest compatibility matrix (compatible / incompatible / no-manifest).
-- ``AGORA_API_VERSION`` alias resolves to the same value as
-  ``AGORA_PLUGIN_MANIFEST_VERSION``.
 - Incompatible plugins are excluded from the active registry but recorded
   in diagnostics.
 """
@@ -25,27 +23,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agora.core.registry import (
-    AGORA_API_VERSION,
     AGORA_PLUGIN_MANIFEST_VERSION,
     Registry,
     RegistryItemInfo,
 )
-
-# ======================================================================
-# [CONTRACT-01] AGORA_API_VERSION alias equals AGORA_PLUGIN_MANIFEST_VERSION
-# ======================================================================
-
-
-def test_c01_agora_api_version_alias_equals_manifest_version() -> None:
-    """[CONTRACT-01] AGORA_API_VERSION must resolve to the same value as
-    AGORA_PLUGIN_MANIFEST_VERSION — the alias contract must hold until 0.2.0.
-
-    Validates: docs/plugins/manifest.md — "AGORA_API_VERSION alias"
-    """
-    assert AGORA_API_VERSION == AGORA_PLUGIN_MANIFEST_VERSION, (
-        "[CONTRACT-01] AGORA_API_VERSION alias must equal AGORA_PLUGIN_MANIFEST_VERSION"
-    )
-
 
 # ======================================================================
 # [CONTRACT-02] Stable registries exist and expose load_entrypoints

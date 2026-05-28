@@ -9,6 +9,7 @@ from pathlib import Path
 from _shared import (
     CORE_MARKDOWN_REPORT_PATH,
     DATA_DIR,
+    ArrowNullSink,
     BenchmarkResult,
     BufferedPassThroughMiddleware,
     NullSink,
@@ -31,14 +32,14 @@ from _shared import (
     write_dataset_manifest,
 )
 
-from agora import MapMiddleware
+from agora import DeliveryConfig, MapMiddleware
 from agora.core.pipeline import Pipeline
 from agora.sinks.file.csv import CsvSink
 from agora.sinks.file.jsonlines import JsonLinesSink
 from agora.sinks.file.parquet import ParquetSink
 from agora.sinks.io.stdout import StdoutSink
-from agora.sources.file.csv import CsvSource
-from agora.sources.file.jsonlines import JsonLinesSource
+from agora.sources.file.csv import ArrowCsvSource, CsvSource
+from agora.sources.file.jsonlines import ArrowJsonLinesSource, JsonLinesSource
 
 
 def build_source_profiles() -> dict[str, Profile]:
@@ -49,6 +50,15 @@ def build_source_profiles() -> dict[str, Profile]:
             return None
         return CsvSource(path=path, row_mapper=lambda row: row, batch_size=1000, queue_maxsize=10)
 
+    def _csv_batch_source(rows: int):
+        del rows
+        path = DATA_DIR / "sample.csv"
+        if not path.exists():
+            return None
+        return CsvSource(
+            path=path, row_mapper=lambda row: row, emit_batches=True, emit_batch_size=5000
+        )
+
     def _jsonl_source(rows: int):
         del rows
         path = DATA_DIR / "sample.jsonl"
@@ -56,6 +66,15 @@ def build_source_profiles() -> dict[str, Profile]:
             return None
         return JsonLinesSource(
             path=path, row_mapper=lambda row: row, batch_size=1000, queue_maxsize=10
+        )
+
+    def _jsonl_batch_source(rows: int):
+        del rows
+        path = DATA_DIR / "sample.jsonl"
+        if not path.exists():
+            return None
+        return JsonLinesSource(
+            path=path, row_mapper=lambda row: row, emit_batches=True, emit_batch_size=5000
         )
 
     def _parquet_source(rows: int):
@@ -74,13 +93,84 @@ def build_source_profiles() -> dict[str, Profile]:
         source.prefetch_limit = 10
         return source
 
+    def _parquet_arrow_source(rows: int):
+        del rows
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            return None
+
+        from agora.sources.file.parquet import ParquetSource
+
+        path = DATA_DIR / "sample.parquet"
+        if not path.exists():
+            return None
+        return ParquetSource(
+            path=path,
+            row_mapper=lambda row: row,
+            batch_size=1000,
+            use_arrow_batches=True,
+        )
+
+    def _arrow_csv_source(rows: int):
+        del rows
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            return None
+        path = DATA_DIR / "sample.csv"
+        if not path.exists():
+            return None
+        return ArrowCsvSource(path=path)
+
+    def _arrow_jsonl_source(rows: int):
+        del rows
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            return None
+        path = DATA_DIR / "sample.jsonl"
+        if not path.exists():
+            return None
+        return ArrowJsonLinesSource(path=path)
+
     return {
         "csv": Profile("csv", "CSV", "CsvSource over benchmark sample.csv.", _csv_source),
+        "csv_batch": Profile(
+            "csv_batch",
+            "CSV/Batch",
+            "CsvSource with emit_batches=True (0.2.0 batch lane).",
+            _csv_batch_source,
+        ),
         "jsonl": Profile(
             "jsonl", "JSONL", "JsonLinesSource over benchmark sample.jsonl.", _jsonl_source
         ),
+        "jsonl_batch": Profile(
+            "jsonl_batch",
+            "JSONL/Batch",
+            "JsonLinesSource with emit_batches=True (0.2.0 batch lane).",
+            _jsonl_batch_source,
+        ),
         "parquet": Profile(
             "parquet", "Parquet", "ParquetSource over benchmark sample.parquet.", _parquet_source
+        ),
+        "parquet_arrow": Profile(
+            "parquet_arrow",
+            "Parquet/Arrow",
+            "ParquetSource with use_arrow_batches=True (0.2.0 batch lane).",
+            _parquet_arrow_source,
+        ),
+        "arrow_csv": Profile(
+            "arrow_csv",
+            "CSV/Arrow",
+            "ArrowCsvSource — pyarrow.csv reader, emits pa.RecordBatch (Arrow lane).",
+            _arrow_csv_source,
+        ),
+        "arrow_jsonl": Profile(
+            "arrow_jsonl",
+            "JSONL/Arrow",
+            "ArrowJsonLinesSource — pyarrow.json reader, emits pa.RecordBatch (Arrow lane).",
+            _arrow_jsonl_source,
         ),
     }
 
@@ -88,6 +178,12 @@ def build_source_profiles() -> dict[str, Profile]:
 def build_sink_profiles() -> dict[str, Profile]:
     return {
         "null": Profile("null", "Null", "Discards all output records.", lambda rows: NullSink()),
+        "arrow_null": Profile(
+            "arrow_null",
+            "ArrowNull",
+            "Arrow-native null sink — discards pa.RecordBatch, enables Arrow fast path.",
+            lambda rows: ArrowNullSink(),
+        ),
         "jsonl": Profile(
             "jsonl",
             "JSONL",
@@ -124,6 +220,29 @@ def build_sink_profiles() -> dict[str, Profile]:
 
 
 def build_middleware_profiles() -> dict[str, Profile]:
+    def _arrow_map_filter(rows: int):
+        del rows
+        try:
+            import pyarrow as pa
+            import pyarrow.compute as pc
+        except ImportError:
+            return None
+        from agora.core.batch import ArrowBatchMiddleware
+
+        class _ArrowMapFilterMiddleware(ArrowBatchMiddleware):
+            """Scale score x 100 then filter score>0 — stays columnar."""
+
+            name = "arrow_map_filter"
+
+            async def process_arrow_batch(self, batch, ctx):
+                idx = batch.schema.get_field_index("score")
+                scaled = pc.multiply(pc.cast(batch.column(idx), pa.float64()), 100.0)
+                batch = batch.set_column(idx, "score", scaled)
+                mask = pc.greater(batch.column("score"), 0.0)
+                return batch.filter(mask)
+
+        return _ArrowMapFilterMiddleware()
+
     return {
         "direct": Profile("direct", "Direct", "No middleware.", lambda rows: None),
         "map": Profile(
@@ -137,6 +256,12 @@ def build_middleware_profiles() -> dict[str, Profile]:
             "Buffered",
             "Buffered pass-through middleware for concurrent execution.",
             lambda rows: BufferedPassThroughMiddleware(batch_size=4),
+        ),
+        "arrow_map_filter": Profile(
+            "arrow_map_filter",
+            "ArrowMap+Filter",
+            "ArrowMapMiddleware (scale score) + ArrowFilterMiddleware (score>0) on Arrow lane.",
+            _arrow_map_filter,
         ),
     }
 
@@ -171,9 +296,9 @@ async def run_core_case(
     t0 = __import__("time").monotonic()
     try:
         with run_context:
-            summary = await pipeline.build(sink, batch_size=5000, checkpoint_every=10000).run(
-                max_records=rows
-            )
+            summary = await pipeline.build(
+                sink, config=DeliveryConfig(batch_size=5000, checkpoint_every=10000)
+            ).run(max_records=rows)
     except Exception as exc:
         return BenchmarkResult(
             source=source_profile.label,
@@ -187,7 +312,12 @@ async def run_core_case(
             sink_profile.cleanup()
 
     runtime = summary.runtime
-    source_input_mb = estimate_source_input_mb(source_profile.name, int(summary.records_consumed))
+    # Batch-emit profiles read the same dataset file as their row-path sibling;
+    # map their name back to the base dataset key for size estimation.
+    # Map batch/arrow profile names back to their base dataset key for MB/s estimation.
+    _name_map = {"arrow_csv": "csv", "arrow_jsonl": "jsonl"}
+    dataset_name = _name_map.get(source_profile.name, source_profile.name.removesuffix("_batch"))
+    source_input_mb = estimate_source_input_mb(dataset_name, int(summary.records_consumed))
     return BenchmarkResult(
         source=source_profile.label,
         middleware=middleware_profile.label,
@@ -268,7 +398,16 @@ def result_lookup(results: list[BenchmarkResult]) -> dict[tuple[str, str, str], 
 def build_source_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]:
     lookup = result_lookup(results)
     rows: list[dict[str, str]] = []
-    for source in ("CSV", "JSONL", "Parquet"):
+    for source in (
+        "CSV",
+        "CSV/Batch",
+        "CSV/Arrow",
+        "JSONL",
+        "JSONL/Batch",
+        "JSONL/Arrow",
+        "Parquet",
+        "Parquet/Arrow",
+    ):
         result = lookup.get((source, "Direct", "Null"))
         if result is None:
             continue
@@ -286,17 +425,27 @@ def build_source_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]
 def build_sink_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]:
     lookup = result_lookup(results)
     rows: list[dict[str, str]] = []
-    for sink in ("Null", "JSONL", "CSV", "Parquet", "Stdout"):
+    source_order = (
+        "CSV",
+        "CSV/Batch",
+        "CSV/Arrow",
+        "JSONL",
+        "JSONL/Batch",
+        "JSONL/Arrow",
+        "Parquet",
+        "Parquet/Arrow",
+    )
+    for sink in ("Null", "ArrowNull", "JSONL", "CSV", "Parquet", "Stdout"):
         direct_results = [
             lookup[(source, "Direct", sink)]
-            for source in ("CSV", "JSONL", "Parquet")
+            for source in source_order
             if (source, "Direct", sink) in lookup
         ]
         if not direct_results:
             continue
 
         retention_samples: list[float] = []
-        for source in ("CSV", "JSONL", "Parquet"):
+        for source in source_order:
             sink_result = lookup.get((source, "Direct", sink))
             null_result = lookup.get((source, "Direct", "Null"))
             if (
@@ -326,7 +475,16 @@ def build_sink_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]:
 def build_buffered_summary(results: list[BenchmarkResult]) -> list[dict[str, str]]:
     lookup = result_lookup(results)
     rows: list[dict[str, str]] = []
-    for source in ("CSV", "JSONL", "Parquet"):
+    for source in (
+        "CSV",
+        "CSV/Batch",
+        "CSV/Arrow",
+        "JSONL",
+        "JSONL/Batch",
+        "JSONL/Arrow",
+        "Parquet",
+        "Parquet/Arrow",
+    ):
         direct = lookup.get((source, "Direct", "Null"))
         buffered = lookup.get((source, "Buffered", "Null"))
         if direct is None or buffered is None:
@@ -626,7 +784,18 @@ async def run_core_benchmarks(args) -> None:
     middleware_profiles = list(build_middleware_profiles().values())
 
     only = getattr(args, "only", None)
-    if only and only in ("csv", "jsonl", "parquet"):
+    if only and only in (
+        "csv",
+        "csv_batch",
+        "csv_arrow",
+        "jsonl",
+        "jsonl_batch",
+        "jsonl_arrow",
+        "parquet",
+        "parquet_arrow",
+        "arrow_csv",
+        "arrow_jsonl",
+    ):
         source_profiles = [p for p in source_profiles if p.name == only]
 
     console = Console()

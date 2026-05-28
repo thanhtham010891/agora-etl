@@ -26,6 +26,7 @@ Example::
 
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
@@ -205,14 +206,21 @@ class BaseSource(ABC, Generic[T]):
         work via the compatibility bridge below.
         """
         if type(self).runtime_counters is not BaseSource.runtime_counters:
+            warnings.warn(
+                f"{type(self).__name__} overrides runtime_counters(); this is deprecated. "
+                "Override runtime_metrics() returning SourceRuntimeMetrics instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             return SourceRuntimeMetrics.from_mapping(self.runtime_counters())
         return SourceRuntimeMetrics()
 
     def runtime_counters(self) -> dict[str, int]:
-        """Compatibility shim for older source implementations.
+        """Deprecated compatibility shim for older source implementations.
 
-        Newer sources should override ``runtime_metrics()`` instead of this
-        stringly-typed mapping API.
+        .. deprecated::
+            Override ``runtime_metrics()`` (returning ``SourceRuntimeMetrics``)
+            instead of this stringly-typed mapping API.
         """
         return {}
 

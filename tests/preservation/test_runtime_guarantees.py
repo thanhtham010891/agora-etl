@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from agora import (
+    DeliveryConfig,
     InMemoryCheckpointStore,
     IterableSource,
     MapMiddleware,
@@ -266,7 +267,7 @@ async def test_g04_checkpoint_advances_on_successful_write() -> None:
 
     summary = await (
         Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
-        .build(sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 
@@ -296,7 +297,7 @@ async def test_g05_checkpoint_advances_when_middleware_dlqs_record() -> None:
     summary = await (
         Pipeline(_CheckpointedSequenceSource([1, 2, 3]))
         .pipe(_RaisingMiddleware(fail_on=2))
-        .build(sink, checkpoint=store, dlq=dlq)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(checkpoint=store, dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -327,7 +328,7 @@ async def test_g06_middleware_failure_routes_to_dlq_with_correct_stage() -> None
     await (
         Pipeline(IterableSource([1, 2, 3]))
         .pipe(_RaisingMiddleware(fail_on=2))
-        .build(sink, dlq=dlq)  # type: ignore[arg-type]
+        .build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -384,7 +385,7 @@ async def test_g08_sink_failure_with_dlq_advances_checkpoint() -> None:
 
     summary = await (
         Pipeline(_CheckpointedSequenceSource([1, 2]))
-        .build(_RaisingSink(), checkpoint=store, dlq=dlq)  # type: ignore[arg-type]
+        .build(_RaisingSink(), config=DeliveryConfig(checkpoint=store, dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -449,8 +450,10 @@ async def test_g10_dlq_failure_policy_raise_propagates_error() -> None:
             .pipe(_RaisingMiddleware(fail_on=1))
             .build(
                 _CollectSink(),  # type: ignore[arg-type]
-                dlq=_BrokenDLQ(),  # type: ignore[arg-type]
-                dlq_failure_policy=DLQFailurePolicy.RAISE,
+                config=DeliveryConfig(
+                    dlq=_BrokenDLQ(),  # type: ignore[arg-type]
+                    dlq_failure_policy=DLQFailurePolicy.RAISE,
+                ),
             )
             .run()
         )
@@ -488,7 +491,7 @@ async def test_g11_dlq_failure_policy_log_only_continues_pipeline() -> None:
     summary = await (
         Pipeline(IterableSource([1, 2, 3]))
         .pipe(_RaisingMiddleware(fail_on=2))
-        .build(sink, dlq=_BrokenDLQ())  # type: ignore[arg-type]  # default DLQFailurePolicy.LOG_ONLY
+        .build(sink, config=DeliveryConfig(dlq=_BrokenDLQ()))  # type: ignore[arg-type]  # default DLQFailurePolicy.LOG_ONLY
         .run()
     )
 
@@ -514,8 +517,10 @@ async def test_g12_sink_log_and_continue_advances_checkpoint() -> None:
         Pipeline(_CheckpointedSequenceSource([1, 2]))
         .build(
             _RaisingSink(),  # type: ignore[arg-type]
-            checkpoint=store,
-            sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            config=DeliveryConfig(
+                checkpoint=store,
+                sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            ),
         )
         .run()
     )
@@ -525,3 +530,172 @@ async def test_g12_sink_log_and_continue_advances_checkpoint() -> None:
     assert summary.last_checkpoint.value == {"index": 1}, (
         "[GUARANTEE-12] LOG_AND_CONTINUE must still advance the checkpoint"
     )
+
+
+# ======================================================================
+# Batch-path preservation tests (0.2.0)
+# These verify that the 0.1.8 guarantees hold in the batch execution lane.
+# ======================================================================
+
+
+class _BatchSource(BaseSource[int]):
+    """Minimal batch-capable source for preservation tests."""
+
+    source_name = "batch_preservation_source"
+    supports_batch_emit: bool = True
+    supports_checkpoint: bool = True
+
+    def __init__(self, batches: list[list[int]]) -> None:
+        self._batches = batches
+        self._last_batch_index = -1
+
+    def current_checkpoint(self) -> dict[str, int] | None:
+        if self._last_batch_index < 0:
+            return None
+        return {"batch_index": self._last_batch_index}
+
+    async def prepare_resume(self, checkpoint: Any) -> None:
+        return None
+
+    async def stream_batches(self) -> Any:  # type: ignore[override]
+        for i, batch in enumerate(self._batches):
+            self._last_batch_index = i
+            yield batch
+
+    async def stream(self) -> Any:
+        for batch in self._batches:
+            for record in batch:
+                yield record
+
+
+# ======================================================================
+# [GUARANTEE-B01] Source order in batch mode
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gb01_batch_mode_commits_in_source_order() -> None:
+    """[GUARANTEE-B01] Batch pipeline commits records in source order.
+
+    Validates: docs/guides/runtime-guarantees.md — "Source order" (batch lane)
+    """
+    sink = _CollectSink()
+    source = _BatchSource([[10, 20], [30, 40], [50]])
+
+    await (
+        Pipeline(source)
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [10, 20, 30, 40, 50], (
+        "[GUARANTEE-B01] batch pipeline must commit in source order"
+    )
+
+
+# ======================================================================
+# [GUARANTEE-B02] Checkpoint advances after each batch is durably written
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gb02_batch_checkpoint_advances_after_write() -> None:
+    """[GUARANTEE-B02] Checkpoint advances once per batch, after the batch
+    is durably written — not before.
+
+    Validates: docs/guides/runtime-guarantees.md — "Checkpoint advancement"
+    """
+    store = InMemoryCheckpointStore()
+    sink = _CollectSink()
+    source = _BatchSource([[1, 2], [3, 4]])
+
+    summary = await (
+        Pipeline(source)
+        .build(sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [1, 2, 3, 4]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"batch_index": 1}, (
+        "[GUARANTEE-B02] checkpoint must reflect the last successfully written batch"
+    )
+
+
+# ======================================================================
+# [GUARANTEE-B03] Sink fail-closed in batch mode
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gb03_batch_sink_fail_closed_aborts_run() -> None:
+    """[GUARANTEE-B03] FAIL_CLOSED (default) in batch mode propagates the
+    sink error and stops the run.
+
+    Validates: docs/guides/runtime-guarantees.md — "Sink fail-closed by default"
+    """
+
+    class _RaisingSink:
+        sink_name = "raising"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: Any) -> None:
+            raise RuntimeError("sink boom")
+
+        async def write_batch(self, records: list[Any]) -> None:
+            raise RuntimeError("sink boom")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    source = _BatchSource([[1, 2, 3]])
+
+    with pytest.raises(RuntimeError, match="sink boom"):
+        await (
+            Pipeline(source)
+            .build(_RaisingSink())  # type: ignore[arg-type]
+            .run()
+        )
+
+
+# ======================================================================
+# [GUARANTEE-B04] DLQ routing on batch failure (Option A)
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gb04_batch_failure_routes_entire_batch_to_dlq() -> None:
+    """[GUARANTEE-B04] When BatchMiddleware raises, the entire batch is
+    routed to the DLQ with stage='batch_middleware'.
+
+    Validates: docs/guides/runtime-guarantees.md — "DLQ routing" (batch lane)
+    """
+    from agora import BatchMiddleware
+    from agora.core.context import PipelineContext  # noqa: TC001
+
+    class _AlwaysRaises(BatchMiddleware[int, int]):
+        name = "always_raises"
+
+        async def process_batch(self, records: list[int], ctx: PipelineContext) -> list[int | None]:
+            raise ValueError("batch boom")
+
+    sink = _CollectSink()
+    dlq = _DLQCollectSink()
+    source = _BatchSource([[1, 2, 3]])
+
+    summary = await (
+        Pipeline(source)
+        .pipe(_AlwaysRaises())
+        .build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == []
+    assert len(dlq.records) == 3, "[GUARANTEE-B04] all 3 records must be in DLQ"
+    assert all(r.stage == "batch_middleware" for r in dlq.records)
+    assert summary.records_errored == 3

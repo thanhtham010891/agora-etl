@@ -6,7 +6,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agora import InMemoryCheckpointStore, IterableSource, Pipeline, SourceRecordError
+from agora import (
+    DeliveryConfig,
+    InMemoryCheckpointStore,
+    IterableSource,
+    Pipeline,
+    SourceRecordError,
+)
 from agora.core.dlq import DLQRecord, SQLiteDLQSink, SQLiteDLQSource
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
@@ -87,7 +93,9 @@ async def test_pipeline_routes_middleware_errors_to_dlq() -> None:
     sink = _CollectSink()
     dlq = _CollectDLQSink()
     pipeline = (
-        Pipeline(IterableSource([{"id": 1}])).pipe(_BoomMiddleware()).build(sink, dlq=dlq)  # type: ignore[arg-type]
+        Pipeline(IterableSource([{"id": 1}]))
+        .pipe(_BoomMiddleware())
+        .build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run()
@@ -124,7 +132,7 @@ async def test_pipeline_routes_sink_write_errors_to_dlq_without_dropping_run() -
 
     summary = await (
         Pipeline(IterableSource([{"id": 1}]))
-        .build(_BoomSink(), dlq=dlq)  # type: ignore[arg-type]
+        .build(_BoomSink(), config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -163,7 +171,7 @@ async def test_dlq_routed_sink_failure_still_acknowledges_source_delivery() -> N
 
     summary = await (
         Pipeline(_AckTrackingSource([{"id": 1}], acknowledged))
-        .build(_BoomSink(), dlq=dlq)  # type: ignore[arg-type]
+        .build(_BoomSink(), config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -216,7 +224,10 @@ async def test_pipeline_can_log_and_continue_on_sink_write_error_without_dlq() -
 
     summary = await (
         Pipeline(IterableSource([{"id": 1}]))
-        .build(_BoomSink(), sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE)  # type: ignore[arg-type]
+        .build(
+            _BoomSink(),
+            config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE),
+        )  # type: ignore[arg-type]
         .run()
     )
 
@@ -278,14 +289,14 @@ async def test_fail_closed_sink_error_does_not_advance_checkpoint_without_dlq() 
     with pytest.raises(RuntimeError, match="second write broke"):
         await (
             Pipeline(_CheckpointedIterableSource([1, 2, 3]))
-            .build(_BoomOnSecondSink(), checkpoint=store)  # type: ignore[arg-type]
+            .build(_BoomOnSecondSink(), config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run()
         )
 
     resumed_sink = _CollectSink()
     summary = await (
         Pipeline(_CheckpointedIterableSource([1, 2, 3]))
-        .build(resumed_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 
@@ -318,7 +329,7 @@ async def test_pipeline_routes_batched_sink_write_errors_to_dlq_per_record() -> 
 
     summary = await (
         Pipeline(IterableSource([{"id": 1}, {"id": 2}, {"id": 3}]))
-        .build(_BoomBatchSink(), dlq=dlq, batch_size=3)  # type: ignore[arg-type]
+        .build(_BoomBatchSink(), config=DeliveryConfig(dlq=dlq, batch_size=3))  # type: ignore[arg-type]
         .run()
     )
 
@@ -364,7 +375,7 @@ async def test_pipeline_routes_sink_write_errors_with_both_original_and_processe
     summary = await (
         Pipeline(IterableSource([{"id": 1}]))
         .pipe(_AppendHistoryMiddleware())
-        .build(_BoomSink(), dlq=dlq)  # type: ignore[arg-type]
+        .build(_BoomSink(), config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
         .run()
     )
 
@@ -400,7 +411,7 @@ async def test_pipeline_routes_source_failures_to_dlq_and_reraises() -> None:
 
     sink = _CollectSink()
     pipeline = (
-        Pipeline(_FailingSource()).build(sink, checkpoint=store, dlq=dlq)  # type: ignore[arg-type]
+        Pipeline(_FailingSource()).build(sink, config=DeliveryConfig(checkpoint=store, dlq=dlq))  # type: ignore[arg-type]
     )
 
     with pytest.raises(RuntimeError, match="source broke"):
@@ -446,7 +457,7 @@ async def test_pipeline_routes_source_record_failures_to_dlq_with_raw_record() -
 
     sink = _CollectSink()
     pipeline = (
-        Pipeline(_FailingRecordSource()).build(sink, dlq=dlq)  # type: ignore[arg-type]
+        Pipeline(_FailingRecordSource()).build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
     )
 
     with pytest.raises(ValueError, match="bad row"):
@@ -595,7 +606,7 @@ async def test_pipeline_logs_and_continues_when_dlq_write_fails_by_default() -> 
     summary = await (
         Pipeline(IterableSource([{"id": 1}]))
         .pipe(_BoomMiddleware())
-        .build(_CollectSink(), dlq=_FailingDLQSink())  # type: ignore[arg-type]
+        .build(_CollectSink(), config=DeliveryConfig(dlq=_FailingDLQSink()))  # type: ignore[arg-type]
         .run()
     )
 
@@ -627,8 +638,10 @@ async def test_pipeline_can_raise_when_dlq_write_fails() -> None:
             .pipe(_BoomMiddleware())
             .build(
                 _CollectSink(),  # type: ignore[arg-type]
-                dlq=_FailingDLQSink(),
-                dlq_failure_policy=DLQFailurePolicy.RAISE,
+                config=DeliveryConfig(
+                    dlq=_FailingDLQSink(),
+                    dlq_failure_policy=DLQFailurePolicy.RAISE,
+                ),
             )
             .run()
         )
@@ -706,9 +719,11 @@ async def test_fail_closed_sink_error_with_raising_dlq_does_not_advance_checkpoi
             Pipeline(_CheckpointedIterableSource([1, 2, 3]))
             .build(
                 _BoomOnSecondSink(),  # type: ignore[arg-type]
-                checkpoint=store,
-                dlq=_FailingDLQSink(),
-                dlq_failure_policy=DLQFailurePolicy.RAISE,
+                config=DeliveryConfig(
+                    checkpoint=store,
+                    dlq=_FailingDLQSink(),
+                    dlq_failure_policy=DLQFailurePolicy.RAISE,
+                ),
             )
             .run()
         )
@@ -716,7 +731,7 @@ async def test_fail_closed_sink_error_with_raising_dlq_does_not_advance_checkpoi
     resumed_sink = _CollectSink()
     summary = await (
         Pipeline(_CheckpointedIterableSource([1, 2, 3]))
-        .build(resumed_sink, checkpoint=store)  # type: ignore[arg-type]
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
         .run()
     )
 

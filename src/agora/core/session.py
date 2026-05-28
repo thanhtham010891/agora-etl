@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, Any
 from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.context import PipelineContext
 from agora.core.metrics import PipelineMetrics
-from agora.core.runtime import RecordDeliveryCoordinator
+from agora.core.runtime import DeliveryEngine
+from agora.core.runtime._writer_transport import WriterTransport
 from agora.core.sink import bind_context_if_supported
+from agora.core.tracing import NoopTracer
 from agora.core.types import CheckpointFailurePolicy
 
 if TYPE_CHECKING:
@@ -60,6 +62,7 @@ class PipelineLifecycleController:
 
     def __init__(self, spec: PipelineRuntimeSpec) -> None:
         self._spec = spec
+        self._transport: WriterTransport | None = None
 
     def create_run_state(
         self,
@@ -72,54 +75,62 @@ class PipelineLifecycleController:
             pipeline_id=self._spec.pipeline_id,
             metrics=metrics,
             run_id=run_id or str(uuid.uuid4()),
-            tracer=self._spec.tracer,
+            tracer=self._spec.config.tracer or NoopTracer(),
         )
         ctx.log.info("pipeline_start", max_records=max_records)
         return PipelineRunState(ctx=ctx, max_records=max_records)
 
-    def make_delivery_coordinator(self) -> RecordDeliveryCoordinator:
-        return RecordDeliveryCoordinator(
-            writer=self._spec.writer,
+    def make_delivery_coordinator(self) -> DeliveryEngine:
+        self._transport = WriterTransport(writer=self._spec.writer)
+        config = self._spec.config
+        return DeliveryEngine(
+            transport=self._transport,
             source_name=self._spec.source.source_name,
             current_checkpoint=self._spec.source.current_checkpoint,
-            dlq_sink=self._spec.dlq_sink,
-            dlq_failure_policy=self._spec.dlq_failure_policy,
-            sink_failure_policy=self._spec.sink_failure_policy,
-            checkpoint_store=self._spec.checkpoint_store,
-            checkpoint_failure_policy=self._spec.checkpoint_failure_policy,
-            checkpoint_key=self._spec.checkpoint_key,
-            checkpoint_every=self._spec.checkpoint_every,
+            dlq_sink=config.dlq,
+            dlq_failure_policy=config.dlq_failure_policy,
+            sink_failure_policy=config.sink_failure_policy,
+            checkpoint_store=config.checkpoint,
+            checkpoint_failure_policy=config.checkpoint_failure_policy,
+            checkpoint_key=config.checkpoint_key or self._spec.pipeline_id,
+            checkpoint_every=config.checkpoint_every,
         )
 
     async def restore_checkpoint(self, ctx: PipelineContext) -> None:
-        if self._spec.checkpoint_store is None:
+        if self._spec.config.checkpoint is None:
             return
 
         if not is_checkpoint_capable(self._spec.source):
             ctx.log.warning(
                 "pipeline_checkpoint_unsupported_source",
                 source=self._spec.source.source_name,
-                checkpoint_key=self._spec.checkpoint_key,
+                checkpoint_key=self._spec.config.checkpoint_key,
             )
             return
 
         ctx.metrics.runtime.checkpoint_enabled = True
+        checkpoint = None
         try:
             with ctx.trace_span(
                 "checkpoint.load",
-                checkpoint_key=self._spec.checkpoint_key,
+                checkpoint_key=self._spec.config.checkpoint_key,
                 source=self._spec.source.source_name,
             ) as span:
-                checkpoint = await self._spec.checkpoint_store.load(self._spec.checkpoint_key)
+                checkpoint = await self._spec.config.checkpoint.load(
+                    self._spec.config.checkpoint_key or self._spec.pipeline_id
+                )
                 if span is not None:
                     span.set_attribute("checkpoint.loaded", checkpoint is not None)
                 await self._spec.source.prepare_resume(checkpoint)
         except Exception:
             ctx.metrics.runtime.checkpoint_failure_count += 1
-            if self._spec.checkpoint_failure_policy == CheckpointFailurePolicy.LOG_AND_CONTINUE:
+            if (
+                self._spec.config.checkpoint_failure_policy
+                == CheckpointFailurePolicy.LOG_AND_CONTINUE
+            ):
                 ctx.log.exception(
                     "pipeline_checkpoint_load_error",
-                    checkpoint_key=self._spec.checkpoint_key,
+                    checkpoint_key=self._spec.config.checkpoint_key,
                 )
                 return
             raise
@@ -128,7 +139,7 @@ class PipelineLifecycleController:
             ctx.metrics.last_checkpoint = checkpoint
             ctx.log.info(
                 "pipeline_checkpoint_loaded",
-                checkpoint_key=self._spec.checkpoint_key,
+                checkpoint_key=self._spec.config.checkpoint_key,
                 source=checkpoint.source,
             )
 
@@ -155,17 +166,17 @@ class PipelineLifecycleController:
                 lambda: self._spec.chain.stop_all(state.ctx),
             )
 
-        if state.dlq_opened and self._spec.dlq_sink is not None:
-            await _capture("pipeline_dlq_flush_error", self._spec.dlq_sink.flush)
-            await _capture("pipeline_dlq_close_error", self._spec.dlq_sink.close)
+        if state.dlq_opened and self._spec.config.dlq is not None:
+            await _capture("pipeline_dlq_flush_error", self._spec.config.dlq.flush)
+            await _capture("pipeline_dlq_close_error", self._spec.config.dlq.close)
 
-        if state.writer_opened:
-            await _capture("pipeline_writer_flush_error", self._spec.writer.flush)
-            await _capture("pipeline_writer_close_error", self._spec.writer.close)
+        if state.writer_opened and self._transport is not None:
+            await _capture("pipeline_writer_flush_error", self._transport.flush)
+            await _capture("pipeline_writer_close_error", self._transport.close)
 
-        if self._spec.checkpoint_store is not None:
+        if self._spec.config.checkpoint is not None:
             await _capture(
-                "pipeline_checkpoint_store_close_error", self._spec.checkpoint_store.close
+                "pipeline_checkpoint_store_close_error", self._spec.config.checkpoint.close
             )
 
         if state.suppress_shutdown_exceptions:
@@ -182,15 +193,15 @@ class PipelineLifecycleController:
             with ctx.trace_span("writer.open", writer=type(self._spec.writer).__name__):
                 await self._spec.writer.open()
             writer_opened = True
-            if self._spec.dlq_sink is not None:
-                bind_context_if_supported(self._spec.dlq_sink, ctx)
-                with ctx.trace_span("dlq.open", sink=self._spec.dlq_sink.sink_name):
-                    await self._spec.dlq_sink.open()
+            if self._spec.config.dlq is not None:
+                bind_context_if_supported(self._spec.config.dlq, ctx)
+                with ctx.trace_span("dlq.open", sink=self._spec.config.dlq.sink_name):
+                    await self._spec.config.dlq.open()
                 dlq_opened = True
         except Exception:
-            if dlq_opened and self._spec.dlq_sink is not None:
+            if dlq_opened and self._spec.config.dlq is not None:
                 try:
-                    await self._spec.dlq_sink.close()
+                    await self._spec.config.dlq.close()
                 except Exception as exc:
                     ctx.log.exception(
                         "pipeline_dlq_close_error_after_open_failure",

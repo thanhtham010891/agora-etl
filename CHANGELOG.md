@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.2.0](docs/change-log/0.2.0.md) — batch-native execution lane
 - [0.1.9](docs/change-log/0.1.9.md) — plugin contract stabilization
 - [0.1.8](docs/change-log/0.1.8.md) — runtime contract clarity and recovery hardening
 - [0.1.7](docs/change-log/0.1.7.md) — runtime correctness, API clarity, docs overhaul

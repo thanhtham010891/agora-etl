@@ -2,46 +2,33 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
-from contextlib import suppress
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.middleware import MiddlewareFailure
 from agora.core.runtime._delivery import (
     CheckpointState,
+    DeliveryEngine,
     ProcessedSourceRecord,
-    RecordDeliveryCoordinator,
-    RecordDeliveryError,
     RunState,
-    SourceQueueError,
     SourceRecord,
 )
-from agora.core.source import (
-    DeliveryHookSource,
-    prefetch_limit_for,
-    source_runtime_metrics,
-)
+from agora.core.runtime._lanes import BatchLaneStrategy, BufferedLaneStrategy, LinearLaneStrategy
+from agora.core.runtime._plan import RuntimeLane, RuntimePlan
+from agora.core.runtime._source_adapter import SourceRuntimeAdapter
+
+try:
+    from agora_rs import LinearBatchBuffer
+
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
     from agora.core.context import PipelineContext
     from agora.core.middleware import MiddlewareChain
     from agora.core.source import BaseSource
-
-
-SOURCE_QUEUE_DONE = object()
-
-
-@dataclass(slots=True)
-class BufferedStageSpec:
-    index: int
-    middleware: Any
-    name: str
-    concurrency: int
+    from agora.core.types import Backpressure
 
 
 @dataclass(slots=True)
@@ -114,46 +101,55 @@ class AdaptiveBackpressureController:
 
 @dataclass(slots=True)
 class ExecutionCoordinator:
-    """Owns source iteration, prefetch, and buffered-stage draining."""
+    """Thin dispatcher — routes execution to the correct lane strategy."""
 
     source: BaseSource[Any]
     chain: MiddlewareChain[Any, Any]
     writer_batch_size: int
-    delivery: RecordDeliveryCoordinator
+    delivery: DeliveryEngine
+    plan: RuntimePlan
     max_buffer_size: int | None = None
-    adaptive_backpressure: bool = False
-    adaptive_min_buffer_size: int = 1
-    adaptive_max_buffer_size: int | None = None
-    adaptive_scale_up_step: int = 1
-    adaptive_scale_down_step: int = 1
-    adaptive_writer_slow_ms: float = 25.0
-    adaptive_checkpoint_slow_ms: float = 10.0
+    backpressure: Backpressure | None = None
+    _linear_lane: LinearLaneStrategy = field(init=False, repr=False)
+    _buffered_lane: BufferedLaneStrategy = field(init=False, repr=False)
+    _batch_lane: BatchLaneStrategy = field(init=False, repr=False)
+    _source_adapter: SourceRuntimeAdapter = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._linear_lane = LinearLaneStrategy(self)
+        self._buffered_lane = BufferedLaneStrategy(self)
+        self._batch_lane = BatchLaneStrategy(self)
+        self._source_adapter = SourceRuntimeAdapter(
+            source=self.source,
+            has_buffered_stages=bool(self.plan.buffered_stages),
+        )
 
     def _build_adaptive_backpressure_controller(
         self,
         base_limit: int,
     ) -> AdaptiveBackpressureController | None:
-        if not self.adaptive_backpressure:
+        bp = self.backpressure
+        if bp is None:
             return None
 
-        adaptive_ceiling = self.adaptive_max_buffer_size
+        adaptive_ceiling = bp.max_buffer_size
         if adaptive_ceiling is None:
-            adaptive_ceiling = max(base_limit * 4, base_limit, self.adaptive_min_buffer_size)
+            adaptive_ceiling = max(base_limit * 4, base_limit, bp.min_buffer_size)
 
         if self.max_buffer_size is not None:
             adaptive_ceiling = min(adaptive_ceiling, self.max_buffer_size)
 
         adaptive_ceiling = max(1, adaptive_ceiling)
-        min_limit = min(max(1, self.adaptive_min_buffer_size), adaptive_ceiling)
+        min_limit = min(max(1, bp.min_buffer_size), adaptive_ceiling)
         current_limit = min(max(base_limit, min_limit), adaptive_ceiling)
         return AdaptiveBackpressureController(
             current_limit=current_limit,
             min_limit=min_limit,
             max_limit=adaptive_ceiling,
-            scale_up_step=max(1, self.adaptive_scale_up_step),
-            scale_down_step=max(1, self.adaptive_scale_down_step),
-            writer_slow_ms=max(0.0, self.adaptive_writer_slow_ms),
-            checkpoint_slow_ms=max(0.0, self.adaptive_checkpoint_slow_ms),
+            scale_up_step=max(1, bp.scale_up_step),
+            scale_down_step=max(1, bp.scale_down_step),
+            writer_slow_ms=max(0.0, bp.writer_slow_ms),
+            checkpoint_slow_ms=max(0.0, bp.checkpoint_slow_ms),
         )
 
     async def resolve_buffered_record(
@@ -225,411 +221,42 @@ class ExecutionCoordinator:
         ctx.log.info("pipeline_max_records_reached", max_records=max_records)
         return True
 
-    async def iter_prefetched_source_records(
-        self,
-        ctx: PipelineContext,
-        prefetch_limit: int,
-    ) -> AsyncGenerator[SourceRecord, None]:
-        source_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=prefetch_limit)
-
-        async def _pump_source() -> None:
-            # Cache the isinstance check — runtime_checkable Protocol checks are
-            # expensive and the source type never changes mid-run.
-            _has_delivery_hook = isinstance(self.source, DeliveryHookSource)
-            try:
-                async for record in self.source.stream():
-                    if source_queue.full():
-                        ctx.metrics.runtime.source_prefetch_block_count += 1
-                    await source_queue.put(
-                        SourceRecord(
-                            raw=record,
-                            checkpoint=self.source.current_checkpoint(),
-                            on_success=cast("Any", self.source).delivery_success_callback()
-                            if _has_delivery_hook
-                            else None,
-                        )
-                    )
-                    ctx.metrics.runtime.source_prefetch_max_depth = max(
-                        ctx.metrics.runtime.source_prefetch_max_depth,
-                        source_queue.qsize(),
-                    )
-            except Exception as exc:
-                await source_queue.put(SourceQueueError(exc))
-            finally:
-                await asyncio.shield(source_queue.put(SOURCE_QUEUE_DONE))
-
-        producer_task = asyncio.create_task(_pump_source())
-
-        try:
-            while True:
-                item = await source_queue.get()
-                if item is SOURCE_QUEUE_DONE:
-                    break
-                if isinstance(item, SourceQueueError):
-                    raise item.exc
-                yield cast("SourceRecord", item)
-        finally:
-            # Drain queue first so producer unblocks from await source_queue.put()
-            while not source_queue.empty():
-                source_queue.get_nowait()
-            if not producer_task.done():
-                producer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await producer_task
-            # Final drain in case producer added items after cancel
-            while not source_queue.empty():
-                source_queue.get_nowait()
-
-    async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
-        prefetch_limit = prefetch_limit_for(self.source)
-        checkpoint_capable = is_checkpoint_capable(self.source)
-        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
-
-        if prefetch_limit <= 0:
-            async for record in self.source.stream():
-                yield SourceRecord(
-                    raw=record,
-                    checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
-                    on_success=cast("Any", self.source).delivery_success_callback()
-                    if has_delivery_hook
-                    else None,
-                )
-            return
-
-        ctx.metrics.runtime.source_prefetch_enabled = True
-        ctx.metrics.runtime.source_prefetch_limit = prefetch_limit
-        ctx.log.info(
-            "pipeline_source_prefetch_enabled",
-            source=self.source.source_name,
-            prefetch_limit=prefetch_limit,
-        )
-
-        async for record in self.iter_prefetched_source_records(ctx, prefetch_limit):
-            yield record
-
     def sync_source_runtime_metrics(self, ctx: PipelineContext) -> None:
-        metrics = source_runtime_metrics(self.source)
-        ctx.metrics.runtime.source_record_error_count = metrics.record_error_count
-        ctx.metrics.runtime.source_record_drop_count = metrics.record_drop_count
-
-    async def run_linear_pipeline(
-        self,
-        ctx: PipelineContext,
-        source_records: AsyncGenerator[SourceRecord, None],
-        checkpoint_state: CheckpointState,
-        max_records: int | None,
-    ) -> None:
-        state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
-        source_error: Exception | None = None
-
-        # Cache branch decisions — never change mid-run.
-        _use_batching = self.writer_batch_size > 1
-        _batch_size = self.writer_batch_size
-        _max_records = max_records
-        _has_max = max_records is not None
-        _source_name = self.source.source_name
-        _metrics = ctx.metrics
-
-        try:
-            async for source_record in source_records:
-                _metrics.records_consumed += 1
-                _metrics.by_source[_source_name] = _metrics.by_source.get(_source_name, 0) + 1
-                state.processed_count += 1
-
-                result = await self.chain.process(source_record.raw, ctx)
-                if _use_batching:
-                    await self.delivery.queue_processed_record(
-                        state,
-                        result.value,
-                        source_record.raw,
-                        source_record.checkpoint,
-                        _batch_size,
-                        failure=result.failure,
-                        on_success=source_record.on_success,
-                    )
-                else:
-                    await self.delivery.write_processed_record(
-                        state,
-                        result.value,
-                        source_record.raw,
-                        source_record.checkpoint,
-                        failure=result.failure,
-                        on_success=source_record.on_success,
-                    )
-                if _has_max and state.processed_count >= _max_records:  # type: ignore[operator]
-                    ctx.log.info("pipeline_max_records_reached", max_records=_max_records)
-                    break
-        except Exception as exc:
-            source_error = exc
-
-        await self.delivery.flush_pending_writes(state)
-        if source_error is not None:
-            raise source_error
-
-    async def run_buffered_pipeline(
-        self,
-        ctx: PipelineContext,
-        source_records: AsyncGenerator[SourceRecord, None],
-        checkpoint_state: CheckpointState,
-        max_records: int | None,
-        buffered_stages: list[tuple[int, Any]],
-    ) -> None:
-        stage_plan = [
-            BufferedStageSpec(
-                index=index,
-                middleware=middleware,
-                name=getattr(middleware, "name", "buffered"),
-                concurrency=max(1, getattr(middleware, "min_concurrency", 1)),
-            )
-            for index, middleware in buffered_stages
-        ]
-        buffered_name = stage_plan[0].name
-        split_index = stage_plan[0].index
-        stage_limit = max(1, sum(stage.concurrency for stage in stage_plan))
-        adaptive_controller = self._build_adaptive_backpressure_controller(stage_limit)
-        if adaptive_controller is None:
-            if self.max_buffer_size is not None:
-                stage_limit = min(stage_limit, self.max_buffer_size)
-            stage_limit = max(1, stage_limit)
-        else:
-            stage_limit = adaptive_controller.current_limit
-            ctx.metrics.runtime.adaptive_backpressure_enabled = True
-            ctx.metrics.runtime.adaptive_backpressure_min_limit = adaptive_controller.min_limit
-            ctx.metrics.runtime.adaptive_backpressure_max_limit = adaptive_controller.max_limit
-        ctx.metrics.runtime.buffered_stage_limit = stage_limit
-        pending_tasks: dict[int, tuple[Any, SourceRecord]] = {}
-        next_sequence = 0
-        next_commit = 0
-        state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
-        source_error: BaseException | None = None
-
-        try:
-            async for source_record in source_records:
-                ctx.metrics.records_consumed += 1
-                ctx.metrics.inc_source(self.source.source_name)
-                state.processed_count += 1
-
-                prefix_result = await self.chain.process_range(
-                    0, split_index, source_record.raw, ctx
-                )
-                if prefix_result.value is None:
-                    await self.delivery.dispatch_processed_result(
-                        state,
-                        None,
-                        source_record.raw,
-                        source_record.checkpoint,
-                        self.writer_batch_size,
-                        failure=prefix_result.failure,
-                        on_success=source_record.on_success,
-                    )
-                    if self.reached_max_records(ctx, state.processed_count, max_records):
-                        break
-                    continue
-
-                pending_tasks[next_sequence] = (
-                    asyncio.create_task(
-                        self.process_record_through_buffered_stages(
-                            source_record,
-                            ctx,
-                            stage_plan,
-                            prefix_result.value,
-                        )
-                    ),
-                    source_record,
-                )
-                next_sequence += 1
-                ctx.metrics.runtime.buffered_stage_max_in_flight = max(
-                    ctx.metrics.runtime.buffered_stage_max_in_flight,
-                    len(pending_tasks),
-                )
-                while len(pending_tasks) >= stage_limit:
-                    next_commit = await self._drain_ready_buffered_records(
-                        state,
-                        pending_tasks,
-                        next_commit,
-                        split_index,
-                        buffered_name,
-                    )
-                    if len(pending_tasks) < stage_limit:
-                        break
-                    if adaptive_controller is not None:
-                        stage_limit = adaptive_controller.observe(
-                            ctx.metrics.runtime, pending_count=len(pending_tasks)
-                        )
-                        ctx.metrics.runtime.buffered_stage_limit = stage_limit
-                        if len(pending_tasks) < stage_limit:
-                            break
-                    ctx.metrics.runtime.buffered_stage_drain_count += 1
-                    next_commit = await self._commit_next_buffered_record(
-                        state,
-                        pending_tasks,
-                        next_commit,
-                        split_index,
-                        buffered_name,
-                    )
-                if self.reached_max_records(ctx, state.processed_count, max_records):
-                    break
-        except BaseException as exc:
-            source_error = exc
-
-        if self._must_abort_pending_work(source_error):
-            await self._abort_pending_work(state, pending_tasks)
-            assert source_error is not None
-            raise source_error
-
-        try:
-            # Yield control so just-submitted tasks reach their buffered submit point
-            # before the final drain sequence begins.
-            await asyncio.sleep(0)
-            while pending_tasks:
-                await self.chain.drain_buffered(ctx)
-                await asyncio.sleep(0)
-                next_commit = await self._drain_ready_buffered_records(
-                    state,
-                    pending_tasks,
-                    next_commit,
-                    split_index,
-                    buffered_name,
-                )
-                if not pending_tasks:
-                    break
-                next_commit = await self._commit_next_buffered_record(
-                    state,
-                    pending_tasks,
-                    next_commit,
-                    split_index,
-                    buffered_name,
-                )
-
-            await self.delivery.flush_pending_writes(state)
-        except BaseException:
-            await self._abort_pending_work(state, pending_tasks)
-            raise
-
-        if source_error is not None:
-            raise source_error
+        self._source_adapter.sync_runtime_metrics(ctx)
 
     @staticmethod
-    def _must_abort_pending_work(exc: BaseException | None) -> bool:
-        return isinstance(exc, (RecordDeliveryError, asyncio.CancelledError, KeyboardInterrupt))
+    def rust_available() -> bool:
+        return _RUST_AVAILABLE
 
-    async def _abort_pending_work(
-        self,
-        state: RunState,
-        pending_tasks: dict[int, tuple[Any, SourceRecord]],
-    ) -> None:
-        state.pending_writes.clear()
-        await self._cancel_pending_tasks(pending_tasks)
+    @staticmethod
+    def make_linear_batch_buffer(batch_size: int, flush_interval: int) -> Any:
+        if not _RUST_AVAILABLE:
+            raise RuntimeError("Rust extension unavailable — cannot create LinearBatchBuffer")
+        return LinearBatchBuffer(batch_size, flush_interval)
 
-    async def _cancel_pending_tasks(
-        self,
-        pending_tasks: dict[int, tuple[Any, SourceRecord]],
-    ) -> None:
-        tasks = [future for future, _source_record in pending_tasks.values()]
-        pending_tasks.clear()
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    @staticmethod
+    def make_metrics_accumulator(flush_interval: int) -> Any:
+        return SourceRuntimeAdapter.make_metrics_accumulator(flush_interval)
 
-    async def process_record_through_buffered_stages(
+    async def run(
         self,
-        source_record: SourceRecord,
         ctx: PipelineContext,
-        stage_plan: list[BufferedStageSpec],
-        current: Any,
-    ) -> ProcessedSourceRecord:
-        start = stage_plan[0].index
+        checkpoint_state: CheckpointState,
+        max_records: int | None,
+    ) -> None:
+        if self.plan.lane == RuntimeLane.BATCH:
+            await self._batch_lane.run(ctx, checkpoint_state, max_records)
+            return
 
-        for stage in stage_plan:
-            if start < stage.index:
-                prefix_result = await self.chain.process_range(start, stage.index, current, ctx)
-                if prefix_result.value is None:
-                    return ProcessedSourceRecord(
-                        source_record=source_record,
-                        result=None,
-                        failure=prefix_result.failure,
-                    )
-                current = prefix_result.value
-
-            t0 = time.monotonic()
-            m_metrics = ctx.metrics.middleware(stage.name)
-            m_metrics.records_in += 1
-
-            try:
-                with ctx.trace_span(
-                    "middleware.process", middleware=stage.name, execution_mode="buffered"
-                ):
-                    future = await stage.middleware.submit(current, ctx)
-                    current = await future
-            except Exception as exc:
-                m_metrics.records_errored += 1
-                m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
-                return ProcessedSourceRecord(
-                    source_record=source_record,
-                    result=None,
-                    failure=MiddlewareFailure(
-                        stage="buffered_middleware",
-                        record=source_record.raw,
-                        middleware=stage.name,
-                        exception=exc,
-                    ),
-                )
-
-            m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
-            if current is None:
-                m_metrics.records_dropped += 1
-                return ProcessedSourceRecord(source_record=source_record, result=None)
-
-            m_metrics.records_out += 1
-            start = stage.index + 1
-
-        final_result = await self.chain.process_range(
-            start, self.chain.middleware_count(), current, ctx
-        )
-        return ProcessedSourceRecord(
-            source_record=source_record,
-            result=final_result.value,
-            failure=final_result.failure,
-        )
-
-    async def _drain_ready_buffered_records(
-        self,
-        state: RunState,
-        pending_tasks: dict[int, tuple[Any, SourceRecord]],
-        next_commit: int,
-        split_index: int,
-        buffered_name: str,
-    ) -> int:
-        # Drain all consecutive completed tasks in sequence order to preserve output ordering.
-        while True:
-            entry = pending_tasks.get(next_commit)
-            if entry is None:
-                return next_commit
-            future, source_record = entry
-            if not future.done():
-                return next_commit
-            pending_tasks.pop(next_commit)
-            await self.resolve_buffered_record(
-                state, future, split_index, buffered_name, source_record
+        source_records = self._source_adapter.iter_source_records(ctx)
+        if self.plan.lane == RuntimeLane.BUFFERED:
+            await self._buffered_lane.run(
+                ctx,
+                source_records,
+                checkpoint_state,
+                max_records,
+                self.plan.buffered_stages,
             )
-            next_commit += 1
+            return
 
-    async def _commit_next_buffered_record(
-        self,
-        state: RunState,
-        pending_tasks: dict[int, tuple[Any, SourceRecord]],
-        next_commit: int,
-        split_index: int,
-        buffered_name: str,
-    ) -> int:
-        # Await the next in-order task, preserving output ordering even when tasks complete
-        # out of order.
-        entry = pending_tasks.get(next_commit)
-        if entry is None:
-            return next_commit
-        future, source_record = entry
-        pending_tasks.pop(next_commit)
-        await self.resolve_buffered_record(state, future, split_index, buffered_name, source_record)
-        return next_commit + 1
+        await self._linear_lane.run(ctx, source_records, checkpoint_state, max_records)

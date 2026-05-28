@@ -8,22 +8,19 @@ from typing import TYPE_CHECKING, Any
 
 from agora.core.runtime import (
     CheckpointState,
+    DeliveryEngine,
     ExecutionCoordinator,
-    RecordDeliveryCoordinator,
     RecordDeliveryError,
+    build_runtime_plan,
 )
 from agora.core.session import PipelineLifecycleController, PipelineRunState
 from agora.core.source import SourceRecordError
 
 if TYPE_CHECKING:
-    from agora.core.checkpoint import CheckpointStore
-    from agora.core.dlq import DLQRecord
     from agora.core.metrics import PipelineRunSummary
     from agora.core.middleware import MiddlewareChain
-    from agora.core.sink import BaseSink
     from agora.core.source import BaseSource
-    from agora.core.tracing import PipelineTracer
-    from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy, SinkFailurePolicy
+    from agora.core.types import DeliveryConfig
     from agora.core.writer import Writer
 
 
@@ -35,23 +32,7 @@ class PipelineRuntimeSpec:
     chain: MiddlewareChain[Any, Any]
     writer: Writer[Any]
     pipeline_id: str
-    dlq_sink: BaseSink[DLQRecord] | None
-    dlq_failure_policy: DLQFailurePolicy
-    checkpoint_store: CheckpointStore | None
-    checkpoint_failure_policy: CheckpointFailurePolicy
-    checkpoint_key: str
-    checkpoint_every: int
-    writer_batch_size: int
-    sink_failure_policy: SinkFailurePolicy
-    tracer: PipelineTracer
-    max_buffer_size: int | None = None
-    adaptive_backpressure: bool = False
-    adaptive_min_buffer_size: int = 1
-    adaptive_max_buffer_size: int | None = None
-    adaptive_scale_up_step: int = 1
-    adaptive_scale_down_step: int = 1
-    adaptive_writer_slow_ms: float = 25.0
-    adaptive_checkpoint_slow_ms: float = 10.0
+    config: DeliveryConfig
 
 
 class PipelineExecutor:
@@ -77,32 +58,19 @@ class PipelineExecutor:
             with state.ctx.trace_span(
                 "source.stream",
                 source=self._spec.source.source_name,
-                buffered=bool(self._spec.chain.buffered_stages()),
+                buffered=execution.plan.uses_buffered_lane,
+                lane=execution.plan.lane,
             ):
-                buffered_stages = self._spec.chain.buffered_stages()
-                source_records = execution.iter_source_records(state.ctx)
-
-                if not buffered_stages:
-                    await execution.run_linear_pipeline(
-                        state.ctx,
-                        source_records,
-                        checkpoint_state,
-                        state.max_records,
-                    )
-                    return
-
-                await execution.run_buffered_pipeline(
+                await execution.run(
                     state.ctx,
-                    source_records,
                     checkpoint_state,
                     state.max_records,
-                    buffered_stages,
                 )
 
     async def _handle_run_error(
         self,
         state: PipelineRunState,
-        coordinator: RecordDeliveryCoordinator,
+        coordinator: DeliveryEngine,
         exc: BaseException,
     ) -> None:
         if isinstance(exc, KeyboardInterrupt):
@@ -157,19 +125,20 @@ class PipelineExecutor:
         state = self._lifecycle.create_run_state(run_id=run_id, max_records=max_records)
         await self._lifecycle.restore_checkpoint(state.ctx)
         coordinator = self._lifecycle.make_delivery_coordinator()
+        plan = build_runtime_plan(
+            self._spec.source,
+            self._spec.chain,
+            self._spec.writer,
+            writer_batch_size=self._spec.config.batch_size,
+        )
         execution = ExecutionCoordinator(
             source=self._spec.source,
             chain=self._spec.chain,
-            writer_batch_size=self._spec.writer_batch_size,
+            writer_batch_size=self._spec.config.batch_size,
             delivery=coordinator,
-            max_buffer_size=self._spec.max_buffer_size,
-            adaptive_backpressure=self._spec.adaptive_backpressure,
-            adaptive_min_buffer_size=self._spec.adaptive_min_buffer_size,
-            adaptive_max_buffer_size=self._spec.adaptive_max_buffer_size,
-            adaptive_scale_up_step=self._spec.adaptive_scale_up_step,
-            adaptive_scale_down_step=self._spec.adaptive_scale_down_step,
-            adaptive_writer_slow_ms=self._spec.adaptive_writer_slow_ms,
-            adaptive_checkpoint_slow_ms=self._spec.adaptive_checkpoint_slow_ms,
+            plan=plan,
+            max_buffer_size=self._spec.config.max_buffer_size,
+            backpressure=self._spec.config.backpressure,
         )
         shutdown_error: Exception | None = None
         cancellation_error: asyncio.CancelledError | None = None

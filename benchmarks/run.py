@@ -48,8 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--only",
-        choices=("kafka", "redis", "csv", "jsonl", "parquet"),
-        help="Run only the specified scenario (kafka/redis for plugins, csv/jsonl/parquet for core).",
+        choices=(
+            "kafka",
+            "redis",
+            "csv",
+            "csv_batch",
+            "arrow_csv",
+            "jsonl",
+            "jsonl_batch",
+            "arrow_jsonl",
+            "parquet",
+            "parquet_arrow",
+        ),
+        help="Run only the specified scenario.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress spinners")
     return parser
