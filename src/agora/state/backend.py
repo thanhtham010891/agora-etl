@@ -1,4 +1,4 @@
-"""Storage backends shared by checkpoint, cache, and future stateful runtime features."""
+"""Storage backends shared by checkpoint, cache, and stateful runtime features."""
 
 from __future__ import annotations
 

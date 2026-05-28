@@ -39,6 +39,7 @@ Or alongside WorkerPool::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 from typing import TYPE_CHECKING
 
@@ -233,6 +234,8 @@ class HealthServer:
             pass
         finally:
             writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
 
     async def _route(
         self,

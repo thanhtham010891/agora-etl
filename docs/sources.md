@@ -2,13 +2,20 @@
 
 Sources emit records via an async generator. The pipeline consumes them one at a time.
 
-## Built-in sources
+## Which source to use
+
+| Situation | Source |
+|---|---|
+| Reading a JSONL file | `JsonLinesSource` |
+| Reading a CSV or TSV file | `CsvSource` |
+| Reading a Parquet file | `ParquetSource` |
+| Polling an HTTP API | `HTTPSource` (subclass) |
+| Custom data origin | Subclass `BaseSource` |
+| Need resume after restart | Use any source with `supports_checkpoint = True` |
 
 ## Checkpoint support at a glance
 
-Checkpointing is opt-in per source. A source must explicitly expose
-`supports_checkpoint = True`, implement `current_checkpoint()`, and restore
-state in `prepare_resume()`.
+Checkpointing is opt-in per source. A source must explicitly set `supports_checkpoint = True`, implement `current_checkpoint()`, and restore state in `prepare_resume()`.
 
 | Source | Checkpoint support | Resume position |
 |---|---|---|
@@ -17,14 +24,13 @@ state in `prepare_resume()`.
 | `ParquetSource` | Yes | row number |
 | `HTTPSource` | Not by default | custom, source-specific |
 
-Do not assume every source or plugin source is resumable unless its docs say so.
+Do not assume a source is resumable unless its docs say so.
+
+## Built-in sources
 
 ### JsonLinesSource
 
-Stream records from a JSONL (newline-delimited JSON) file.
-
-Uses stdlib `json` by default and automatically switches to `orjson` when that
-dependency is available through the `agora-etl[file]` extra.
+Stream records from a JSONL (newline-delimited JSON) file. Uses stdlib `json` by default and switches to `orjson` automatically when the `agora-etl[file]` extra is installed.
 
 ```python
 from agora.sources.file.jsonlines import JsonLinesSource
@@ -65,7 +71,7 @@ Supports checkpointing by row number.
 
 ### ParquetSource
 
-Stream records from a Parquet file using PyArrow. Reads in batches to avoid loading the entire file into memory.
+Stream records from a Parquet file using PyArrow. Reads in batches internally to avoid loading the entire file into memory, but exposes row-oriented dicts to `row_mapper`.
 
 Requires: `pip install "agora-etl[file]"`
 
@@ -81,12 +87,9 @@ source = ParquetSource(
 
 Supports checkpointing by row number.
 
-`ParquetSource` still exposes row-oriented dictionaries to `row_mapper`, even
-though the underlying file is read in PyArrow batches.
-
 ### HTTPSource
 
-Abstract base for HTTP polling sources. Handles rate limiting, retries, circuit breaking, and response caching. Override `fetch_batch()` only.
+Abstract base for HTTP polling sources. Handles rate limiting, retries, circuit breaking, and response caching. Override `fetch_batch()` only — the base class owns the rest.
 
 ```python
 from agora.sources.http.http import HTTPSource, StopFetching
@@ -117,9 +120,7 @@ class PostsSource(HTTPSource[Post]):
 
 Available request methods: `self.get()`, `self.post()`. Both are rate-limited, retried, and optionally cached.
 
-`HTTPSource` does not define a generic checkpoint contract by itself. If an
-HTTP-based source needs resumability, implement it explicitly in the subclass
-using a cursor, page token, watermark, or other source-specific position.
+`HTTPSource` does not define a checkpoint contract. If you need resumability, implement it explicitly in the subclass using a cursor, page token, or watermark, then set `supports_checkpoint = True` and implement `current_checkpoint()` and `prepare_resume()`.
 
 ## Custom source
 
@@ -146,15 +147,16 @@ class MySource(BaseSource[MyRecord]):
                 raise SourceRecordError(exc, record=raw)
 ```
 
-Raise `SourceRecordError` to route a single bad record to the DLQ without stopping the pipeline.
+Raise `SourceRecordError` to route a single bad record to the DLQ without stopping the pipeline. Do not raise a plain exception from `stream()` unless you want the entire run to abort.
 
 ## Checkpointable source
 
-Implement `current_checkpoint()` and `prepare_resume()` to support resumable pipelines:
+Set `supports_checkpoint = True` and implement both hooks:
 
 ```python
 class MyCheckpointableSource(BaseSource[MyRecord]):
     source_name = "my_source"
+    supports_checkpoint = True
 
     def current_checkpoint(self) -> dict | None:
         return {"cursor": self._last_cursor}
@@ -164,5 +166,10 @@ class MyCheckpointableSource(BaseSource[MyRecord]):
             self._last_cursor = checkpoint.value["cursor"]
 ```
 
-Also set `supports_checkpoint = True` so the runtime knows this source opts into
-resume behavior.
+## Common mistakes
+
+**Assuming HTTPSource is resumable.** `HTTPSource` does not implement checkpoint hooks. If your HTTP source needs to resume from a page token or cursor after a restart, you must implement `current_checkpoint()` and `prepare_resume()` in your subclass and set `supports_checkpoint = True`. Without this, a restart replays from the beginning.
+
+**Raising a plain exception instead of `SourceRecordError` for bad records.** A plain exception raised from `stream()` aborts the entire run. `SourceRecordError` routes only that record to the DLQ and lets the pipeline continue. Use `SourceRecordError` for per-record parse or validation failures; let genuine infrastructure errors propagate as plain exceptions.
+
+**Forgetting `supports_checkpoint = True`.** Implementing `current_checkpoint()` and `prepare_resume()` is not enough on its own. The runtime checks `supports_checkpoint` before touching the checkpoint store. If the flag is missing, the source runs normally but the checkpoint is never saved or restored.

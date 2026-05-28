@@ -36,7 +36,7 @@ class RunRecord:
     run_number: int
     started_at: float
     summary: PipelineRunSummary | None = None
-    error: Exception | None = None
+    error: BaseException | None = None
 
     @property
     def ok(self) -> bool:
@@ -180,6 +180,9 @@ class ScheduledPipelineRunner:
             pipeline = await self._pipeline._factory()
             summary = await pipeline.run(max_records=self._pipeline._max_records)
             self._handle_run_success(record, summary)
+        except asyncio.CancelledError as exc:
+            record.error = exc
+            raise
         except Exception as exc:
             await self._handle_run_failure(record, exc)
         finally:

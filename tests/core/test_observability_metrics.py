@@ -18,6 +18,8 @@ def _make_summary(
     by_middleware: dict[str, MiddlewareMetrics] | None = None,
 ) -> PipelineRunSummary:
     return PipelineRunSummary(
+        pipeline_id="test",
+        run_id="run-1",
         elapsed_seconds=elapsed_seconds,
         records_consumed=records_consumed,
         records_written=records_written,

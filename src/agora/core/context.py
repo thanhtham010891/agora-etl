@@ -193,7 +193,7 @@ class _PipelineSpanScope:
         exc_tb: Any,
     ) -> None:
         del exc_type, exc_tb
-        if self._ctx._trace_stack:
+        if self._ctx._trace_stack and self._ctx._trace_stack[-1] is self._span:
             self._ctx._trace_stack.pop()
         if exc_val is not None:
             self._span.record_exception(exc_val)

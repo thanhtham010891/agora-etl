@@ -63,7 +63,7 @@ package version.
 """
 
 # Backward-compatible alias kept for plugin packages that already import it.
-# Deprecated in 0.2.0: prefer ``AGORA_PLUGIN_MANIFEST_VERSION`` in new code.
+# Prefer ``AGORA_PLUGIN_MANIFEST_VERSION`` in new code.
 AGORA_API_VERSION = AGORA_PLUGIN_MANIFEST_VERSION
 
 

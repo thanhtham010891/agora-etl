@@ -1,11 +1,6 @@
 """agora/core/dlq.py
 =====================
 Dead-letter queue payloads and sink abstraction.
-
-Phase 1 scope:
-- capture record-scoped failures that occur inside the pipeline runner
-- preserve the original record, pipeline metadata, and error details
-- delegate storage/transport to a normal ``BaseSink``
 """
 
 from __future__ import annotations

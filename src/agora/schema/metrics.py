@@ -23,7 +23,7 @@ class SchemaMetrics:
     columns_added:
         Number of new columns added to schema.
     columns_removed:
-        Number of columns removed (reserved for future).
+        Number of columns removed from schema.
     types_widened:
         Number of times column types were widened (e.g., INTEGER → FLOAT).
     type_conflicts:

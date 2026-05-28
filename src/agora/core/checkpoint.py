@@ -94,6 +94,11 @@ class BackendCheckpointStore(CheckpointStore):
             raise TypeError(
                 f"Checkpoint data for key {key!r} is corrupted: expected dict, got {type(value)!r}"
             )
+        missing = [k for k in ("pipeline_id", "run_id", "source") if k not in value]
+        if missing:
+            raise TypeError(
+                f"Checkpoint data for key {key!r} is corrupted: missing required fields {missing!r}"
+            )
         recorded_at = value.get("recorded_at")
         return Checkpoint(
             pipeline_id=str(value["pipeline_id"]),

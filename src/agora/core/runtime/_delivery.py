@@ -205,6 +205,7 @@ class RecordDeliveryCoordinator:
                     checkpoint_key=self.checkpoint_key,
                     source=self.source_name,
                 )
+                checkpoint_state.mark_saved(checkpoint.value)
                 return
             raise
         checkpoint_state.mark_saved(checkpoint.value)
@@ -283,7 +284,7 @@ class RecordDeliveryCoordinator:
             state.ctx.metrics.records_errored += 1
             if routed or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
                 await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
-                if on_success is not None:
+                if routed and on_success is not None:
                     await on_success()
             elif self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
                 raise RecordDeliveryError(exc) from exc

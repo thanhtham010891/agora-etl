@@ -40,7 +40,10 @@ class PipelineRunState:
 
     def complete(self) -> PipelineRunSummary:
         """Finalize and return the immutable summary for this run."""
-        summary = self.metrics.snapshot()
+        summary = self.metrics.snapshot(
+            pipeline_id=self.ctx.pipeline_id,
+            run_id=self.ctx.run_id,
+        )
         self.ctx.log.info(
             "pipeline_complete",
             consumed=summary.records_consumed,

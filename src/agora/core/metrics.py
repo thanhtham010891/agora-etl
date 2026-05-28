@@ -211,9 +211,11 @@ class PipelineMetrics:
                 has_ai = True
         return agg if has_ai else None
 
-    def snapshot(self) -> PipelineRunSummary:
+    def snapshot(self, pipeline_id: str, run_id: str) -> PipelineRunSummary:
         elapsed = time.monotonic() - self.started_at
         return PipelineRunSummary(
+            pipeline_id=pipeline_id,
+            run_id=run_id,
             elapsed_seconds=elapsed,
             records_consumed=self.records_consumed,
             records_written=self.records_written,
@@ -302,6 +304,8 @@ class RuntimeMetrics:
 class PipelineRunSummary:
     """Immutable snapshot of metrics at the end of a pipeline run."""
 
+    pipeline_id: str
+    run_id: str
     elapsed_seconds: float
     records_consumed: int
     records_written: int

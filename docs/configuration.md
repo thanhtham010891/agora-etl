@@ -252,6 +252,6 @@ For a good pattern is:
 
 ## Related guides
 
-- [Getting Started](getting-started.md)
+- [Quickstart](guides/quickstart.md)
 - [CLI Reference](cli.md)
 - [Plugins](plugins/index.md)

@@ -292,7 +292,7 @@ class MetricsCollector:
         self,
         pipeline_id: str,
         summary: PipelineRunSummary | None = None,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         """Update stats after a pipeline run.
 

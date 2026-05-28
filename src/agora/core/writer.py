@@ -7,8 +7,8 @@ Replaces the ``isinstance(self._writer, SinkFanOut)`` check in
 ``BoundPipeline.run()`` with a polymorphic ``Writer.write()`` call
 that returns a ``WriteResult``.
 
-Both ``SinkFanOut`` and ``SinkRouter`` will implement this protocol
-(Phase 2), eliminating the OCP/LSP violation.
+Both ``SinkFanOut`` and ``SinkRouter`` implement this protocol,
+eliminating the OCP/LSP violation.
 
 Design notes
 ------------

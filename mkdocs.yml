@@ -11,19 +11,20 @@ extra_css:
 nav:
   - Home: index.md
   - Guides:
-      - Getting Started: getting-started.md
+      - Quickstart: guides/quickstart.md
+      - Pipelines: guides/pipelines.md
+      - Failure Handling: guides/failure-handling.md
+      - Checkpointing: guides/checkpointing.md
+      - Scheduling: guides/scheduling.md
+      - Testing: guides/testing.md
+      - Observability: guides/observability.md
       - Configuration: configuration.md
       - CLI Reference: cli.md
-      - Runner: runner.md
-  - Benchmark:
-      - Overview: benchmark/index.md
-      - Core: benchmark/core.md
-      - Kafka: benchmark/kafka.md
-      - Redis: benchmark/redis.md
   - Reference:
       - Sources: sources.md
       - Sinks: sinks.md
       - Middlewares: middlewares.md
+      - Architecture: architecture.md
       - Plugins:
           - Overview: plugins/index.md
           - Official Bundle: plugins/official-bundle.md
@@ -33,7 +34,11 @@ nav:
           - Scheduling: plugins/scheduling.md
           - Distributed Coordination: plugins/distributed.md
           - Developing Plugins: plugins/developing.md
-      - Architecture: architecture.md
+  - Benchmark:
+      - Overview: benchmark/index.md
+      - Core: benchmark/core.md
+      - Kafka: benchmark/kafka.md
+      - Redis: benchmark/redis.md
   - Change Log: change-log/index.md
 markdown_extensions:
   - admonition

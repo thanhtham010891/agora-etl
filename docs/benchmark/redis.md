@@ -8,11 +8,11 @@ This page records the current redis benchmark snapshot for Agora ETL.
 
 | | |
 | --- | --- |
-| **Date** | 2026-05-27 |
-| **OS** | Darwin 24.6.0 |
-| **CPU** | Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz (x86_64) |
-| **RAM** | 32 GB |
-| **Python** | 3.11.9 |
+| **Date** | 2026-05-28 |
+| **OS** | Linux 6.17.0-1012-aws |
+| **CPU** | Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz (x86_64) |
+| **RAM** | 31 GB |
+| **Python** | 3.12.3 |
 | **Redis** | redis://127.0.0.1:16379/0 |
 | **Repeat** | median of 3 isolated runs per scenario |
 | **Pipeline batch size** | 500 |
@@ -32,14 +32,14 @@ This page records the current redis benchmark snapshot for Agora ETL.
 
 ## Results
 
-Rows per scenario: `100,000`
+Rows per scenario: `1,000,000`
 
-| Scenario | Repeat | Median Time | Median Rows/s | Median MB/s | Median Peak Py Heap |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Redis / SET | 3 | 3.99s | 25,040 r/s | 3.0 MB/s | 7.2 MB |
-| Redis / XADD | 3 | 11.62s | 8,607 r/s | 1.0 MB/s | 7.8 MB |
-| Redis / XREADGROUP | 3 | 17.63s | 5,672 r/s | 0.7 MB/s | 3.0 MB |
-| Redis / Stream RT | 3 | 29.45s | 3,395 r/s | 0.4 MB/s | 7.8 MB |
+| Scenario | Repeat | Median Time | Median Rows/s | Median MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Redis / SET | 3 | 8.06s | 124,025 r/s | 15.0 MB/s |
+| Redis / XADD | 3 | 18.66s | 53,599 r/s | 6.6 MB/s |
+| Redis / XREADGROUP | 3 | 32.95s | 30,350 r/s | 3.8 MB/s |
+| Redis / Stream RT | 3 | 51.47s | 19,430 r/s | 2.5 MB/s |
 
 ## Reading the results
 
@@ -47,4 +47,4 @@ Rows per scenario: `100,000`
 - `XREADGROUP` isolates consumer-group read cost.
 - `Stream RT` captures the combined cost of stream writes and consumer-group reads.
 
-`Peak Py Heap` reflects Python heap only. It does not include broker/server memory or native allocations.
+Plugin throughput is measured without `tracemalloc` so the reported rows/s and MB/s are not distorted by heap sampling overhead.

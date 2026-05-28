@@ -83,6 +83,8 @@ class TestSchedule:
 
 def _make_fake_summary(**kwargs) -> PipelineRunSummary:
     defaults = {
+        "pipeline_id": "test",
+        "run_id": "run-1",
         "records_consumed": 5,
         "records_written": 5,
         "records_dropped": 0,

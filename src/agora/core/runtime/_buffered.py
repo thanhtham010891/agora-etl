@@ -256,7 +256,7 @@ class ExecutionCoordinator:
             except Exception as exc:
                 await source_queue.put(SourceQueueError(exc))
             finally:
-                await source_queue.put(SOURCE_QUEUE_DONE)
+                await asyncio.shield(source_queue.put(SOURCE_QUEUE_DONE))
 
         producer_task = asyncio.create_task(_pump_source())
 
@@ -630,7 +630,6 @@ class ExecutionCoordinator:
         if entry is None:
             return next_commit
         future, source_record = entry
-        await future
         pending_tasks.pop(next_commit)
         await self.resolve_buffered_record(state, future, split_index, buffered_name, source_record)
         return next_commit + 1

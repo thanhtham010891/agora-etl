@@ -13,6 +13,7 @@ retries (see ``RetryMiddleware`` for that use case).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -87,7 +88,7 @@ async def retry_async(
             delay = policy.backoff_for(attempt=attempt)
             if on_retry is not None:
                 maybe_result = on_retry(attempt, exc, delay)
-                if asyncio.iscoroutine(maybe_result):
+                if inspect.isawaitable(maybe_result):
                     await maybe_result
             if delay > 0:
                 await asyncio.sleep(delay)

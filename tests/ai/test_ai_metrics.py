@@ -130,6 +130,8 @@ def test_aggregate_ai_aggregates_multiple_middlewares():
 
 def test_run_summary_ai_field_none_by_default():
     summary = PipelineRunSummary(
+        pipeline_id="test",
+        run_id="run-1",
         elapsed_seconds=1.0,
         records_consumed=10,
         records_written=10,
@@ -156,6 +158,8 @@ def test_runtime_metrics_defaults():
 def test_run_summary_str_includes_ai_when_present():
     ai = AIMetrics(total_llm_calls=5, total_input_tokens=100, total_output_tokens=50)
     summary = PipelineRunSummary(
+        pipeline_id="test",
+        run_id="run-1",
         elapsed_seconds=1.0,
         records_consumed=10,
         records_written=10,
