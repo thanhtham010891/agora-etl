@@ -711,7 +711,10 @@ async def test_partial_sink_errors_can_log_and_continue_when_opted_in() -> None:
 
     summary = await (
         Pipeline(IterableSource([1]))
-        .fan_out([OkSink(), FailingSink()], config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE))  # type: ignore[list-item]
+        .fan_out(
+            [OkSink(), FailingSink()],
+            config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE),
+        )  # type: ignore[list-item]
         .run()
     )
 

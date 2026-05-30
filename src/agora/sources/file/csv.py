@@ -13,7 +13,8 @@ from agora.core.types import SourceRecordFailurePolicy
 from agora.sources.file.base import FileSource
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
+    from io import TextIOWrapper
 
     from agora.core.checkpoint import Checkpoint
 
@@ -107,7 +108,7 @@ class CsvSource(FileSource[T], Generic[T]):
             record_drop_count=self._record_drop_count,
         )
 
-    def stream_sync_batches(self):
+    def stream_sync_batches(self) -> Iterator[Any]:
         """Synchronous generator yielding processed records batch by batch.
 
         Called by the Rust thread in iter_source_records_rust() — runs in a
@@ -120,12 +121,13 @@ class CsvSource(FileSource[T], Generic[T]):
         self._record_error_count = 0
         self._record_drop_count = 0
 
-        if self._has_header:
-            reader_factory = lambda f: _csv.DictReader(f, delimiter=self._delimiter)
-        else:
-            reader_factory = lambda f: _csv.DictReader(
-                f, fieldnames=self._fieldnames, delimiter=self._delimiter
-            )
+        def _make_reader_with_header(f: TextIOWrapper) -> _csv.DictReader[str]:
+            return _csv.DictReader(f, delimiter=self._delimiter)
+
+        def _make_reader_no_header(f: TextIOWrapper) -> _csv.DictReader[str]:
+            return _csv.DictReader(f, fieldnames=self._fieldnames, delimiter=self._delimiter)
+
+        reader_factory = _make_reader_with_header if self._has_header else _make_reader_no_header
 
         with open(self._path, encoding=self._encoding, newline="") as file_obj:
             reader = reader_factory(file_obj)
@@ -150,6 +152,7 @@ class CsvSource(FileSource[T], Generic[T]):
                         self._record_drop_count += 1
                         continue
                     from agora.core.source import SourceRecordError
+
                     raise SourceRecordError(
                         exc,
                         record=row,
@@ -185,10 +188,8 @@ class CsvSource(FileSource[T], Generic[T]):
         Yields control to the event loop every 5000 records so other
         coroutines (health checks, DLQ writes) remain responsive.
         """
-        count = 0
-        for record in self.stream_sync_batches():
+        for count, record in enumerate(self.stream_sync_batches(), 1):
             yield record
-            count += 1
             if count % 5000 == 0:
                 await asyncio.sleep(0)
 
@@ -308,7 +309,7 @@ class ArrowCsvSource(FileSource[Any]):
 
         def _read() -> list[Any]:
             table = pacsv.read_csv(str(self._path))
-            return table.to_batches(max_chunksize=self._batch_size)
+            return table.to_batches(max_chunksize=self._batch_size)  # type: ignore[no-any-return]
 
         for batch in await asyncio.to_thread(_read):
             self._rows_read += batch.num_rows
@@ -319,6 +320,6 @@ class ArrowCsvSource(FileSource[Any]):
             for row in batch.to_pylist():
                 yield row
 
-    async def read_records(self) -> AsyncIterator[Any]:  # type: ignore[override]
+    async def read_records(self) -> AsyncIterator[Any]:
         async for row in self.stream():
             yield row

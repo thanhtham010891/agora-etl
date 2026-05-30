@@ -359,13 +359,13 @@ class SinkFanOut(Generic[T]):
         # Sequential write, keeping per-record outcomes without fanout bookkeeping.
         if len(self._sinks) == 1 and not self._concurrent_writes:
             sink = self._sinks[0]
-            results: list[WriteResult] = [_WRITE_OK] * len(records)
+            fast_results: list[WriteResult] = [_WRITE_OK] * len(records)
             for i, record in enumerate(records):
                 try:
                     await sink.write(record)
                 except Exception as exc:
-                    results[i] = WriteResult(written=False, errors=[exc])
-            return results
+                    fast_results[i] = WriteResult(written=False, errors=[exc])
+            return fast_results
 
         written_flags = [False] * len(records)
         errors_by_record: list[list[Exception]] = [[] for _ in records]
@@ -380,13 +380,15 @@ class SinkFanOut(Generic[T]):
                 )
             )
 
+        results: list[object]
         if not self._concurrent_writes:
-            results: list[object] = []
+            seq: list[object] = []
             for _, call in sink_calls:
                 try:
-                    results.append(await call)
+                    seq.append(await call)
                 except Exception as exc:
-                    results.append(exc)
+                    seq.append(exc)
+            results = seq
         else:
             results = await self._run_sink_calls(sink_calls)
 

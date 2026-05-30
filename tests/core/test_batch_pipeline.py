@@ -586,7 +586,6 @@ class _ArrowBatchSource(BaseSource[Any]):
 async def test_arrow_chain_stays_columnar() -> None:
     """Arrow chain: sink receives pa.RecordBatch, not list."""
     pa = pytest.importorskip("pyarrow")
-    import pyarrow.compute as pc
 
     from agora import ArrowMapMiddleware
 
@@ -607,7 +606,7 @@ async def test_arrow_chain_stays_columnar() -> None:
 
 async def test_arrow_filter_shrinks_batch() -> None:
     """ArrowFilterMiddleware: rows failing predicate are dropped; consumed != written."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     import pyarrow.compute as pc
 
     from agora import ArrowFilterMiddleware
@@ -631,7 +630,7 @@ async def test_arrow_filter_shrinks_batch() -> None:
 
 async def test_arrow_filter_all_rows_dropped_skips_write() -> None:
     """ArrowFilterMiddleware: zero-row result skips write, consumed still counted."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     import pyarrow.compute as pc
 
     from agora import ArrowFilterMiddleware
@@ -653,7 +652,7 @@ async def test_arrow_filter_all_rows_dropped_skips_write() -> None:
 
 async def test_arrow_map_then_filter_chained() -> None:
     """Chained ArrowMap + ArrowFilter compose correctly."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     import pyarrow.compute as pc
 
     from agora import ArrowFilterMiddleware, ArrowMapMiddleware
@@ -681,7 +680,7 @@ async def test_arrow_map_then_filter_chained() -> None:
 
 async def test_mixed_chain_falls_back_to_pylist() -> None:
     """A chain mixing ArrowBatchMiddleware + regular Middleware falls back to list path."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
 
     from agora import ArrowMapMiddleware, MapMiddleware
 
@@ -703,7 +702,7 @@ async def test_mixed_chain_falls_back_to_pylist() -> None:
 
 async def test_arrow_chain_middleware_failure_routes_to_dlq() -> None:
     """A raising ArrowBatchMiddleware routes the batch to DLQ (Option A)."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
 
     from agora import ArrowBatchMiddleware, DeliveryConfig
 

@@ -93,7 +93,9 @@ async def test_pipeline_routes_middleware_errors_to_dlq() -> None:
     sink = _CollectSink()
     dlq = _CollectDLQSink()
     pipeline = (
-        Pipeline(IterableSource([{"id": 1}])).pipe(_BoomMiddleware()).build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
+        Pipeline(IterableSource([{"id": 1}]))
+        .pipe(_BoomMiddleware())
+        .build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
     )
 
     summary = await pipeline.run()
@@ -222,7 +224,10 @@ async def test_pipeline_can_log_and_continue_on_sink_write_error_without_dlq() -
 
     summary = await (
         Pipeline(IterableSource([{"id": 1}]))
-        .build(_BoomSink(), config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE))  # type: ignore[arg-type]
+        .build(
+            _BoomSink(),
+            config=DeliveryConfig(sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE),
+        )  # type: ignore[arg-type]
         .run()
     )
 

@@ -74,15 +74,12 @@ from agora.core.middleware import (
     RetryMiddleware,
     RouteMiddleware,
 )
-from agora.middlewares.arrow import ArrowFilterMiddleware, ArrowMapMiddleware
 from agora.core.pipeline import BoundPipeline, Pipeline
 from agora.core.plugin import Configurable, Lifecycle, Plugin
 from agora.core.registry import Registry
 from agora.core.retry import RetryPolicy, retry_async
 from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
 from agora.core.source import BaseSource, IterableSource, SourceRecordError, SourceRuntimeMetrics
-from agora.sources.file.csv import ArrowCsvSource
-from agora.sources.file.jsonlines import ArrowJsonLinesSource
 from agora.core.tracing import InMemoryTracer, NoopTracer, OpenTelemetryTracer
 from agora.core.types import (
     Backpressure,
@@ -95,6 +92,9 @@ from agora.core.types import (
     SourceRecordFailurePolicy,
 )
 from agora.core.writer import Writer, WriteResult
+from agora.middlewares.arrow import ArrowFilterMiddleware, ArrowMapMiddleware
+from agora.sources.file.csv import ArrowCsvSource
+from agora.sources.file.jsonlines import ArrowJsonLinesSource
 from agora.state import (
     MembershipKeyStore,
     MemoryBackend,

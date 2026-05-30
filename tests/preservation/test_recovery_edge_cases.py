@@ -426,7 +426,9 @@ async def test_r09_sqlite_checkpoint_survives_store_close_and_reopen(tmp_path) -
     reopened = SQLiteCheckpointStore(path=str(db_path))
     sink = _CollectSink()
     summary = await (
-        Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4])).build(sink, config=DeliveryConfig(checkpoint=reopened)).run()
+        Pipeline(_CheckpointedSequenceSource([1, 2, 3, 4]))
+        .build(sink, config=DeliveryConfig(checkpoint=reopened))
+        .run()
     )
 
     assert sink.records == [3, 4], "[RECOVERY-09] SQLite checkpoint must survive store close/reopen"

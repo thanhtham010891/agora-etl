@@ -19,12 +19,12 @@ from agora.core.runtime._source_adapter import SourceRuntimeAdapter
 
 try:
     from agora_rs import LinearBatchBuffer
+
     _RUST_AVAILABLE = True
 except ImportError:
     _RUST_AVAILABLE = False
 
 if TYPE_CHECKING:
-
     from agora.core.context import PipelineContext
     from agora.core.middleware import MiddlewareChain
     from agora.core.source import BaseSource

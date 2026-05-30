@@ -13,11 +13,13 @@ belongs on a regular ``MapMiddleware`` on the per-record lane — not here.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from agora.core.batch import ArrowBatchMiddleware
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agora.core.context import PipelineContext
 
 
@@ -53,8 +55,7 @@ class ArrowMapMiddleware(ArrowBatchMiddleware):
             import pyarrow  # noqa: F401 — pre-import to surface missing dep early
         except ImportError as exc:
             raise ImportError(
-                "ArrowMapMiddleware requires pyarrow. "
-                "Install via: pip install 'agora-etl[file]'"
+                "ArrowMapMiddleware requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from exc
         del ctx
         return self._fn(batch)
@@ -88,8 +89,7 @@ class ArrowFilterMiddleware(ArrowBatchMiddleware):
             import pyarrow  # noqa: F401
         except ImportError as exc:
             raise ImportError(
-                "ArrowFilterMiddleware requires pyarrow. "
-                "Install via: pip install 'agora-etl[file]'"
+                "ArrowFilterMiddleware requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from exc
         del ctx
         mask = self._predicate(batch)

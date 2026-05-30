@@ -171,13 +171,13 @@ class ArrowBatchMiddleware(ABC):
     async def process_arrow_batch(self, batch: Any, ctx: PipelineContext) -> Any:
         """Transform *batch* (a ``pa.RecordBatch``) and return a ``pa.RecordBatch``."""
 
-    async def on_start(self, ctx: PipelineContext) -> None:
+    async def on_start(self, ctx: PipelineContext) -> None:  # noqa: B027
         """Called once before the pipeline starts streaming."""
 
-    async def on_stop(self, ctx: PipelineContext) -> None:
+    async def on_stop(self, ctx: PipelineContext) -> None:  # noqa: B027
         """Called once after the pipeline finishes (or on error)."""
 
-    async def on_error(self, record: Any, exc: Exception, ctx: PipelineContext) -> None:
+    async def on_error(self, record: Any, exc: Exception, ctx: PipelineContext) -> None:  # noqa: B027
         """No-op — prevents AttributeError when used in a mixed chain."""
 
     async def process(self, record: Any, ctx: PipelineContext) -> Any:

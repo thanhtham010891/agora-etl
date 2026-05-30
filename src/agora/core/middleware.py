@@ -497,6 +497,7 @@ class MiddlewareChain(Generic[T, U]):
                 # (to_pylist was called), so the Arrow stage cannot operate on it.
                 # Pass through unchanged — the arrow fast path is disabled for mixed chains.
                 from agora.core.batch import ArrowBatchMiddleware as _ArrowBatchMW
+
                 if isinstance(middleware, _ArrowBatchMW):
                     continue
                 # Regular Middleware — apply per-record within the batch

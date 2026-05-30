@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
@@ -14,7 +15,7 @@ from agora.core.types import SourceRecordFailurePolicy
 from agora.sources.file.base import FileSource
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from agora.core.checkpoint import Checkpoint
 
@@ -95,7 +96,7 @@ class ParquetSource(FileSource[T], Generic[T]):
             record_drop_count=self._record_drop_count,
         )
 
-    def stream_sync_batches(self):
+    def stream_sync_batches(self) -> Iterator[Any]:
         """Synchronous generator yielding processed records via row_mapper.
 
         Used by the per-record path (use_arrow_batches=False) to run file I/O
@@ -138,6 +139,7 @@ class ParquetSource(FileSource[T], Generic[T]):
                             self._record_drop_count += 1
                             continue
                         from agora.core.source import SourceRecordError
+
                         raise SourceRecordError(
                             exc,
                             record=row,
@@ -157,12 +159,11 @@ class ParquetSource(FileSource[T], Generic[T]):
         For linear pipelines (no buffered stages), sync stream is fine since
         the pipeline processes records one at a time anyway.
         """
-        count = 0
-        for record in self.stream_sync_batches():
+        for count, record in enumerate(self.stream_sync_batches(), 1):
             yield record
-            count += 1
             if count % 5000 == 0:
                 import asyncio
+
                 await asyncio.sleep(0)
 
     async def stream_batches(self) -> AsyncIterator[Any]:
@@ -218,31 +219,25 @@ class ParquetSource(FileSource[T], Generic[T]):
 
                     while not stop_event.is_set():
                         try:
-                            asyncio.run_coroutine_threadsafe(
-                                queue.put(batch), loop
-                            ).result(timeout=0.05)
+                            asyncio.run_coroutine_threadsafe(queue.put(batch), loop).result(
+                                timeout=0.05
+                            )
                             break
                         except TimeoutError:
                             continue
             except Exception as exc:
                 if not stop_event.is_set():
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            queue.put(exc), loop
-                        ).result(timeout=1.0)
-                    except Exception:
-                        pass
+                    with contextlib.suppress(Exception):
+                        asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result(timeout=1.0)
             finally:
                 # Signal consumer via threading.Event — never blocks on event loop
                 done_event.set()
                 # Also try to push sentinel in case consumer is still waiting
                 if not stop_event.is_set():
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            queue.put(_BATCH_QUEUE_DONE), loop
-                        ).result(timeout=1.0)
-                    except Exception:
-                        pass
+                    with contextlib.suppress(Exception):
+                        asyncio.run_coroutine_threadsafe(queue.put(_BATCH_QUEUE_DONE), loop).result(
+                            timeout=1.0
+                        )
 
         producer = threading.Thread(target=_producer, daemon=True)
         producer.start()

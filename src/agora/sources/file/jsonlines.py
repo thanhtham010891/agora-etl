@@ -18,7 +18,7 @@ from agora.core.types import SourceRecordFailurePolicy
 from agora.sources.file.base import FileSource
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from agora.core.checkpoint import Checkpoint
 
@@ -92,7 +92,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
             record_drop_count=self._record_drop_count,
         )
 
-    def stream_sync_batches(self):
+    def stream_sync_batches(self) -> Iterator[Any]:
         """Synchronous generator yielding processed records one by one.
 
         Called by the Rust thread in iter_source_records_rust() — runs in a
@@ -124,6 +124,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
                         self._record_drop_count += 1
                         continue
                     from agora.core.source import SourceRecordError
+
                     raise SourceRecordError(
                         exc,
                         record=stripped,
@@ -157,10 +158,8 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         Yields control to the event loop every 5000 records so other
         coroutines remain responsive.
         """
-        count = 0
-        for record in self.stream_sync_batches():
+        for count, record in enumerate(self.stream_sync_batches(), 1):
             yield record
-            count += 1
             if count % 5000 == 0:
                 await asyncio.sleep(0)
 
@@ -279,7 +278,7 @@ class ArrowJsonLinesSource(FileSource[Any]):
 
         def _read() -> list[Any]:
             table = pajson.read_json(str(self._path))
-            return table.to_batches(max_chunksize=self._batch_size)
+            return table.to_batches(max_chunksize=self._batch_size)  # type: ignore[no-any-return]
 
         for batch in await asyncio.to_thread(_read):
             self._rows_read += batch.num_rows
@@ -290,6 +289,6 @@ class ArrowJsonLinesSource(FileSource[Any]):
             for row in batch.to_pylist():
                 yield row
 
-    async def read_records(self) -> AsyncIterator[Any]:  # type: ignore[override]
+    async def read_records(self) -> AsyncIterator[Any]:
         async for row in self.stream():
             yield row

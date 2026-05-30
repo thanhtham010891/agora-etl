@@ -18,7 +18,7 @@ from agora.core.runtime._delivery import (
     SourceRecord,
 )
 from agora.core.runtime._hot_metrics import HotPathMetrics
-from agora.core.runtime._plan import BufferedStageSpec
+from agora.core.runtime._plan import BufferedStageSpec  # noqa: TC001
 from agora.core.types import SinkFailurePolicy
 
 if TYPE_CHECKING:
@@ -47,7 +47,9 @@ class LinearLaneStrategy:
         has_max = max_records is not None
         source_name = c.source.source_name
         metrics = ctx.metrics
-        use_rust_prefetch = c.rust_available() and getattr(c.source, "supports_rust_prefetch", False)
+        use_rust_prefetch = c.rust_available() and getattr(
+            c.source, "supports_rust_prefetch", False
+        )
 
         if c.rust_available() and batch_size > 1:
             buf = c.make_linear_batch_buffer(batch_size, LINEAR_FLUSH_INTERVAL)
@@ -420,7 +422,9 @@ class BufferedLaneStrategy:
             if not future.done():
                 return next_commit
             pending_tasks.pop(next_commit)
-            await c.resolve_buffered_record(state, future, split_index, buffered_name, source_record)
+            await c.resolve_buffered_record(
+                state, future, split_index, buffered_name, source_record
+            )
             next_commit += 1
 
     async def _commit_next_buffered_record(
@@ -484,7 +488,9 @@ class BatchLaneStrategy:
                     if arrow_result.failure is not None:
                         metrics.records_errored += batch_size
                         if c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-                            raise RecordDeliveryError(arrow_result.failure.exception) from arrow_result.failure.exception
+                            raise RecordDeliveryError(
+                                arrow_result.failure.exception
+                            ) from arrow_result.failure.exception
                         ctx.log.exception(
                             "arrow_batch_middleware_error",
                             batch_size=batch_size,
@@ -522,10 +528,7 @@ class BatchLaneStrategy:
                 await c.delivery.save_batch_checkpoint(state, checkpoint_value, batch_size)
                 hot.flush(metrics)
             else:
-                if hasattr(batch, "to_pylist"):
-                    raw_batch = batch.to_pylist()
-                else:
-                    raw_batch = list(batch)
+                raw_batch = batch.to_pylist() if hasattr(batch, "to_pylist") else list(batch)
                 batch_size = len(raw_batch)
                 hot.inc_consumed(batch_size)
                 records_consumed += batch_size

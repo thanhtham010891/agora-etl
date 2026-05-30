@@ -529,7 +529,9 @@ class TestBatchEmit:
         )
         batch_summary = await (
             Pipeline(
-                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+                CsvSource(
+                    path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500
+                )
             )
             .build(batch_sink)  # type: ignore[arg-type]
             .run()
@@ -573,14 +575,18 @@ class TestBatchEmit:
 
         await (
             Pipeline(
-                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+                CsvSource(
+                    path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500
+                )
             )
             .build(first, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run(max_records=1000)
         )
         await (
             Pipeline(
-                CsvSource(path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500)
+                CsvSource(
+                    path=csv_file, row_mapper=lambda r: r, emit_batches=True, emit_batch_size=500
+                )
             )
             .build(second, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
             .run()
@@ -604,6 +610,7 @@ class TestArrowCsvSource:
         path.write_text("id,name\n1,Alice\n2,Bob\n3,Charlie\n")
 
         from agora.sources.file.csv import ArrowCsvSource
+
         src = ArrowCsvSource(path=path)
         batches = [b async for b in src.stream_batches()]
 
@@ -612,8 +619,9 @@ class TestArrowCsvSource:
         assert batches[0].num_rows == 3
 
     async def test_emits_arrow_batches_flag(self, tmp_path: Path) -> None:
-        from agora.sources.file.csv import ArrowCsvSource
         from agora.core.batch import is_batch_capable_source
+        from agora.sources.file.csv import ArrowCsvSource
+
         src = ArrowCsvSource(path=tmp_path / "x.csv")
         assert src.emits_arrow_batches is True
         assert is_batch_capable_source(src) is True
@@ -624,6 +632,7 @@ class TestArrowCsvSource:
         path.write_text("id,v\n1,10\n2,20\n")
 
         from agora.sources.file.csv import ArrowCsvSource
+
         src = ArrowCsvSource(path=path)
         rows = [r async for r in src.stream()]
         assert len(rows) == 2
@@ -632,6 +641,7 @@ class TestArrowCsvSource:
     async def test_pipeline_with_arrow_middleware(self, tmp_path: Path) -> None:
         pa = pytest.importorskip("pyarrow")
         import pyarrow.compute as pc
+
         path = tmp_path / "data.csv"
         path.write_text("id,score\n1,5\n2,0\n3,10\n")
 
@@ -639,18 +649,25 @@ class TestArrowCsvSource:
 
         class _ArrowSink:
             sink_name = "arrow"
-            def __init__(self): self.batches = []
+
+            def __init__(self):
+                self.batches = []
+
             async def open(self): ...
-            async def write_arrow_batch(self, b): self.batches.append(b)
+            async def write_arrow_batch(self, b):
+                self.batches.append(b)
+
             async def flush(self): ...
             async def close(self): ...
 
         sink = _ArrowSink()
         summary = await (
             Pipeline(ArrowCsvSource(path=path))
-            .pipe(ArrowFilterMiddleware(lambda b: pc.greater(
-                pc.cast(b.column("score"), pa.float64()), 0.0
-            )))
+            .pipe(
+                ArrowFilterMiddleware(
+                    lambda b: pc.greater(pc.cast(b.column("score"), pa.float64()), 0.0)
+                )
+            )
             .build(sink)  # type: ignore[arg-type]
             .run()
         )
@@ -666,6 +683,7 @@ class TestArrowJsonLinesSource:
         path.write_text('{"id":1,"v":10}\n{"id":2,"v":20}\n')
 
         from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
         src = ArrowJsonLinesSource(path=path)
         batches = [b async for b in src.stream_batches()]
 
@@ -674,8 +692,9 @@ class TestArrowJsonLinesSource:
         assert batches[0].num_rows == 2
 
     async def test_emits_arrow_batches_flag(self, tmp_path: Path) -> None:
-        from agora.sources.file.jsonlines import ArrowJsonLinesSource
         from agora.core.batch import is_batch_capable_source
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
         src = ArrowJsonLinesSource(path="x.jsonl")
         assert src.emits_arrow_batches is True
         assert is_batch_capable_source(src) is True
@@ -686,6 +705,7 @@ class TestArrowJsonLinesSource:
         path.write_text('{"id":1}\n{"id":2}\n')
 
         from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
         src = ArrowJsonLinesSource(path=path)
         rows = [r async for r in src.stream()]
         assert len(rows) == 2

@@ -14,6 +14,7 @@ from agora.core.source import DeliveryHookSource, prefetch_limit_for, source_run
 
 try:
     from agora_rs import MetricsAccumulator, RecordBuffer
+
     _RUST_AVAILABLE = True
 except ImportError:
     _RUST_AVAILABLE = False
@@ -44,9 +45,7 @@ class SourceRuntimeAdapter:
         ctx.metrics.runtime.source_record_error_count = metrics.record_error_count
         ctx.metrics.runtime.source_record_drop_count = metrics.record_drop_count
 
-    async def iter_source_records(
-        self, ctx: PipelineContext
-    ) -> AsyncGenerator[SourceRecord, None]:
+    async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
         prefetch_limit = prefetch_limit_for(self.source)
         checkpoint_capable = is_checkpoint_capable(self.source)
         has_delivery_hook = isinstance(self.source, DeliveryHookSource)
@@ -65,7 +64,9 @@ class SourceRuntimeAdapter:
                 source=self.source.source_name,
                 prefetch_limit=prefetch_limit or DEFAULT_PREFETCH_LIMIT,
             )
-            async for record in self._iter_prefetched_rust(ctx, prefetch_limit or DEFAULT_PREFETCH_LIMIT):
+            async for record in self._iter_prefetched_rust(
+                ctx, prefetch_limit or DEFAULT_PREFETCH_LIMIT
+            ):
                 yield record
             return
 

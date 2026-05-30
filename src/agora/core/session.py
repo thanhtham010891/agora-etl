@@ -124,7 +124,10 @@ class PipelineLifecycleController:
                 await self._spec.source.prepare_resume(checkpoint)
         except Exception:
             ctx.metrics.runtime.checkpoint_failure_count += 1
-            if self._spec.config.checkpoint_failure_policy == CheckpointFailurePolicy.LOG_AND_CONTINUE:
+            if (
+                self._spec.config.checkpoint_failure_policy
+                == CheckpointFailurePolicy.LOG_AND_CONTINUE
+            ):
                 ctx.log.exception(
                     "pipeline_checkpoint_load_error",
                     checkpoint_key=self._spec.config.checkpoint_key,

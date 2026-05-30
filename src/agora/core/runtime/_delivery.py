@@ -60,14 +60,16 @@ class RecordDeliveryError(RuntimeError):
         self.original = exc
 
 
-class CommitOutcome(ABC):
+class CommitOutcome(ABC):  # noqa: B024
     """Abstract base for typed delivery outcomes."""
+
     __slots__ = ()
 
 
 @dataclass(slots=True)
 class CheckpointedOutcome(CommitOutcome):
     """Base for outcomes that carry a checkpoint and optional hook."""
+
     checkpoint: CheckpointValue
     on_success: Callable[[], Awaitable[None]] | None = None
 
@@ -90,6 +92,7 @@ class ErroredRouted(CheckpointedOutcome):
 @dataclass(slots=True)
 class ErroredUnrouted(CommitOutcome):
     """Record failed and could not be routed to the DLQ."""
+
     exc: Exception
 
 
@@ -432,7 +435,9 @@ class DeliveryEngine:
                 elif unrouted_error is None:
                     if pending_checkpoint is not None:
                         await self.persist_checkpoint(
-                            state.ctx, state.checkpoint_state, pending_checkpoint,
+                            state.ctx,
+                            state.checkpoint_state,
+                            pending_checkpoint,
                             batch_size=pending_checkpoint_batch_size,
                         )
                         pending_checkpoint = None
@@ -440,12 +445,17 @@ class DeliveryEngine:
                     unrouted_error = exc
             if pending_checkpoint is not None:
                 await self.persist_checkpoint(
-                    state.ctx, state.checkpoint_state, pending_checkpoint,
+                    state.ctx,
+                    state.checkpoint_state,
+                    pending_checkpoint,
                     batch_size=pending_checkpoint_batch_size,
                 )
             for hook in delivered_hooks:
                 await hook()
-            if unrouted_error is not None and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+            if (
+                unrouted_error is not None
+                and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED
+            ):
                 raise RecordDeliveryError(unrouted_error) from unrouted_error
             return
 
@@ -471,7 +481,9 @@ class DeliveryEngine:
                 # Flush accumulated checkpoint/hooks before raising or continuing.
                 if pending_checkpoint is not None:
                     await self.persist_checkpoint(
-                        state.ctx, state.checkpoint_state, pending_checkpoint,
+                        state.ctx,
+                        state.checkpoint_state,
+                        pending_checkpoint,
                         batch_size=pending_checkpoint_batch_size,
                     )
                     pending_checkpoint = None
@@ -495,7 +507,9 @@ class DeliveryEngine:
 
         if pending_checkpoint is not None:
             await self.persist_checkpoint(
-                state.ctx, state.checkpoint_state, pending_checkpoint,
+                state.ctx,
+                state.checkpoint_state,
+                pending_checkpoint,
                 batch_size=pending_checkpoint_batch_size,
             )
         for hook in delivered_hooks:
@@ -609,9 +623,12 @@ class DeliveryEngine:
                         checkpoint=checkpoint,
                     )
                     routed = routed and ok
-                if not routed and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-                    if first_unrouted_error is None:
-                        first_unrouted_error = wr.errors[0]
+                if (
+                    not routed
+                    and self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED
+                    and first_unrouted_error is None
+                ):
+                    first_unrouted_error = wr.errors[0]
             elif wr.written:
                 state.ctx.metrics.records_written += 1
 
@@ -705,9 +722,8 @@ class DeliveryEngine:
 
         errored_unrouted: Exception | None = None
         for outcome in outcomes:
-            if isinstance(outcome, ErroredUnrouted):
-                if errored_unrouted is None:
-                    errored_unrouted = outcome.exc
+            if isinstance(outcome, ErroredUnrouted) and errored_unrouted is None:
+                errored_unrouted = outcome.exc
             # Written/Dropped/ErroredRouted all advance the batch checkpoint below.
 
         routed_all = errored_unrouted is None
