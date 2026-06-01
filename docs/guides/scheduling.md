@@ -7,9 +7,9 @@ _When to read this: you want to run one or more pipelines on a schedule — hour
 `ScheduledPipeline` takes a factory coroutine, not a pipeline instance. This is intentional. Pipelines are stateful — they hold open file handles, database connections, and in-flight buffers. Reusing the same instance across runs leaks that state. The factory is called fresh before every run, so each run gets a clean pipeline.
 
 ```python
-from agora.runner.scheduled import ScheduledPipeline, Schedule
+from agora.runner import Schedule, ScheduledPipeline
 
-async def build_pipeline() -> BoundPipeline:
+async def build_pipeline():
     db = await connect_db(settings.DATABASE_URL)
     return (
         Pipeline(CsvSource("events.csv"), id="events_ingest")
@@ -81,7 +81,7 @@ A successful run resets the consecutive error counter to zero. If your pipeline 
 `WorkerPool` runs multiple `ScheduledPipeline`s as concurrent asyncio tasks. Register pipelines before calling `run()`.
 
 ```python
-from agora.runner.worker import WorkerPool
+from agora.runner import WorkerPool
 
 pool = WorkerPool(
     health_port=8080,
@@ -115,24 +115,40 @@ pool.register(sp1).register(sp2).register(sp3)
 
 ## The worker.py convention
 
-The `agora worker` CLI looks for a `worker.py` module in your project. The convention is to define your pool there and expose it as `pool`:
+The `agora worker` CLI looks for a `worker.py` module in your project. The
+convention is to define a `get_worker()` function that returns the configured
+pool:
 
 ```python
 # myproject/worker.py
-import asyncio
-from agora.runner.worker import WorkerPool
-from agora.runner.scheduled import ScheduledPipeline, Schedule
-from myproject.pipelines import build_ingest, build_consumer
+from agora.runner import Schedule, ScheduledPipeline, WorkerPool
+from myproject.pipelines import build_consumer, build_ingest
 
-pool = WorkerPool(health_port=8080)
-pool.register(ScheduledPipeline(factory=build_ingest, schedule=Schedule.every(hours=1), pipeline_id="ingest"))
-pool.register(ScheduledPipeline(factory=build_consumer, schedule=Schedule.continuous(), pipeline_id="consumer"))
 
-if __name__ == "__main__":
-    asyncio.run(pool.run())
+def get_worker() -> WorkerPool:
+    pool = WorkerPool(health_port=8080)
+    pool.register(
+        ScheduledPipeline(
+            factory=build_ingest,
+            schedule=Schedule.every(hours=1),
+            pipeline_id="ingest",
+        )
+    )
+    pool.register(
+        ScheduledPipeline(
+            factory=build_consumer,
+            schedule=Schedule.continuous(),
+            pipeline_id="consumer",
+        )
+    )
+    return pool
 ```
 
-Run it directly with `python -m myproject.worker` or via the CLI with `agora worker myproject.worker:pool`.
+Run it directly from Python if you want, or via the CLI with:
+
+```bash
+agora worker --module myproject.worker
+```
 
 ## SIGINT and SIGTERM behavior
 

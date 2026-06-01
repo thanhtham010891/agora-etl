@@ -35,9 +35,17 @@ def _make_summary(
 async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -> None:
     collector = MetricsCollector()
     runtime = RuntimeMetrics(
+        execution_lane="buffered",
+        direct_flush_active=False,
+        arrow_fast_path_active=False,
+        arrow_chain_active=False,
         source_prefetch_limit=64,
         source_prefetch_max_depth=16,
         source_prefetch_block_count=3,
+        rust_prefetch_active=True,
+        rust_prefetch_wait_count=4,
+        rust_prefetch_batch_drain_count=5,
+        rust_prefetch_push_batch_count=6,
         buffered_stage_limit=8,
         buffered_stage_max_in_flight=7,
         checkpoint_save_count=4,
@@ -57,11 +65,19 @@ async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -
     assert pipeline["last_run_duration_s"] == 2.0
     assert pipeline["last_run_throughput_rps"] == 10.0
     assert pipeline["runtime"]["total_source_prefetch_block_count"] == 3
+    assert pipeline["runtime"]["total_rust_prefetch_runs"] == 1
+    assert pipeline["runtime"]["total_rust_prefetch_wait_count"] == 4
+    assert pipeline["runtime"]["total_rust_prefetch_batch_drain_count"] == 5
+    assert pipeline["runtime"]["total_rust_prefetch_push_batch_count"] == 6
     assert pipeline["runtime"]["total_checkpoint_save_count"] == 4
     assert pipeline["runtime"]["total_writer_flush_count"] == 2
     assert pipeline["runtime"]["total_dlq_failure_count"] == 1
     assert pipeline["runtime"]["total_adaptive_scale_up_count"] == 2
     assert pipeline["runtime"]["total_adaptive_scale_down_count"] == 1
+    assert pipeline["runtime"]["last_run"]["execution_lane"] == "buffered"
+    assert pipeline["runtime"]["last_run"]["direct_flush_active"] is False
+    assert pipeline["runtime"]["last_run"]["rust_prefetch_active"] is True
+    assert pipeline["runtime"]["last_run"]["rust_prefetch_wait_count"] == 4
     assert pipeline["runtime"]["last_run"]["buffered_stage_max_in_flight"] == 7
     assert pipeline["runtime"]["last_run"]["checkpoint_save_time_ms"] == 12.5
     assert pipeline["runtime"]["last_run"]["writer_flush_time_ms"] == 25.0
@@ -106,9 +122,17 @@ async def test_health_dict_includes_middleware_hotspots() -> None:
 async def test_prometheus_exporter_renders_runtime_observability_metrics() -> None:
     collector = MetricsCollector()
     runtime = RuntimeMetrics(
+        execution_lane="batch",
+        direct_flush_active=False,
+        arrow_fast_path_active=True,
+        arrow_chain_active=True,
         source_prefetch_limit=32,
         source_prefetch_max_depth=12,
         source_prefetch_block_count=5,
+        rust_prefetch_active=True,
+        rust_prefetch_wait_count=6,
+        rust_prefetch_batch_drain_count=4,
+        rust_prefetch_push_batch_count=3,
         buffered_stage_limit=10,
         buffered_stage_max_in_flight=9,
         checkpoint_save_count=6,
@@ -139,7 +163,28 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
         in rendered
     )
     assert (
+        'agora_pipeline_runtime_events_total{pipeline_id="orders",event="rust_prefetch_wait"} 6'
+        in rendered
+    )
+    assert (
         'agora_pipeline_runtime_last{pipeline_id="orders",signal="writer_flush_time_ms"} 44.0'
+        in rendered
+    )
+    assert 'agora_pipeline_runtime_lane_last{pipeline_id="orders",lane="batch"} 1' in rendered
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="arrow_fast_path_active"} 1'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="arrow_chain_active"} 1'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="rust_prefetch_active"} 1'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="rust_prefetch_push_batch_count"} 3'
         in rendered
     )
     assert (

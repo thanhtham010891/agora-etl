@@ -45,7 +45,7 @@ Use this instead of pointing tests at real files or APIs. It keeps tests fast an
 Write a small sink that collects records into a list. This is the standard pattern for asserting what a pipeline produced:
 
 ```python
-from agora.core.sink import BaseSink
+from agora import BaseSink
 
 class CollectSink(BaseSink[dict]):
     sink_name = "collect"
@@ -85,7 +85,7 @@ async def test_score_filter():
 You don't always need a full pipeline to test a middleware. If your middleware is a pure transformation, test it directly:
 
 ```python
-from agora.core.middleware import Middleware
+from agora import Middleware
 
 class UppercaseMiddleware(Middleware):
     async def process(self, record: dict) -> dict | None:
@@ -144,11 +144,10 @@ The DLQ sink receives the original record as it was before the failure, not a wr
 To test that a pipeline resumes correctly, run it twice against the same `InMemoryCheckpointStore` and verify the second run starts from the right position.
 
 ```python
-from agora import DeliveryConfig
-from agora.core.checkpoint import InMemoryCheckpointStore
+from agora import BaseSource, DeliveryConfig, InMemoryCheckpointStore
 
 
-class CountingSource:
+class CountingSource(BaseSource[dict]):
     """Source that records which offsets it streamed."""
     source_name = "counting"
     supports_checkpoint = True

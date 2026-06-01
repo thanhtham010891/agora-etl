@@ -1,5 +1,7 @@
 # Developing Plugins
 
+_When to read this: you are publishing a plugin package and need the concrete entry-point, registry, and packaging conventions that Agora expects._
+
 Agora plugins are normal Python packages that register components through entry
 points.
 
@@ -73,7 +75,7 @@ pipeline = Pipeline(source).build(sink)
 ## Manifest compatibility
 
 For the full manifest contract — what `AGORA_PLUGIN_MANIFEST_VERSION` tracks,
-when it bumps, and the full compatibility matrix — see
+when it bumps, and how compatibility is evaluated — see
 [Manifest Contract](manifest.md).
 
 Quick summary: declare a `MANIFEST` object at your package root with
@@ -131,7 +133,7 @@ class RedisStore(DedupStore[str]):
 ## Discovery hook
 
 ```python
-from agora.core.discovery import discover_plugins
+from agora import discover_plugins
 
 discover_plugins()
 ```

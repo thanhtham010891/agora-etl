@@ -47,13 +47,11 @@ class LinearLaneStrategy:
         has_max = max_records is not None
         source_name = c.source.source_name
         metrics = ctx.metrics
-        use_rust_prefetch = c.rust_available() and getattr(
-            c.source, "supports_rust_prefetch", False
-        )
 
         if c.rust_available() and batch_size > 1:
             buf = c.make_linear_batch_buffer(batch_size, LINEAR_FLUSH_INTERVAL)
             use_direct_flush = c.plan.writer.direct_flush_eligible
+            metrics.runtime.direct_flush_active = use_direct_flush
 
             try:
                 async for source_record in source_records:
@@ -78,9 +76,15 @@ class LinearLaneStrategy:
                         source_record.on_success,
                     ):
                         if use_direct_flush:
-                            processed_list, raw_list, checkpoint_list = buf.take_flush_batch()
+                            processed_list, raw_list, checkpoint_list, on_success_list = (
+                                buf.take_flush_batch()
+                            )
                             await c.delivery.flush_batch_direct(
-                                state, processed_list, raw_list, checkpoint_list
+                                state,
+                                processed_list,
+                                raw_list,
+                                checkpoint_list,
+                                on_success_list=on_success_list,
                             )
                         else:
                             batch = buf.take_batch()
@@ -103,9 +107,15 @@ class LinearLaneStrategy:
 
             if buf.len() > 0:
                 if use_direct_flush:
-                    processed_list, raw_list, checkpoint_list = buf.take_flush_batch()
+                    processed_list, raw_list, checkpoint_list, on_success_list = (
+                        buf.take_flush_batch()
+                    )
                     await c.delivery.flush_batch_direct(
-                        state, processed_list, raw_list, checkpoint_list
+                        state,
+                        processed_list,
+                        raw_list,
+                        checkpoint_list,
+                        on_success_list=on_success_list,
                     )
                 else:
                     remaining = buf.take_batch()
@@ -125,20 +135,15 @@ class LinearLaneStrategy:
                 raise source_error
             return
 
-        # Non-Rust path: use Rust MetricsAccumulator when source supports it,
-        # otherwise use HotPathMetrics to batch Python metric mutations.
-        acc = c.make_metrics_accumulator(100) if use_rust_prefetch else None
-        hot = HotPathMetrics.for_source(source_name) if acc is None else None
+        # The standalone Rust MetricsAccumulator does not currently outperform
+        # the Python hot path on the linear lane. Keep this path on
+        # HotPathMetrics even when Rust prefetch support is available.
+        hot = HotPathMetrics.for_source(source_name)
 
         try:
             async for source_record in source_records:
-                if acc is not None:
-                    if acc.inc_consumed(source_name):
-                        acc.flush(metrics)
-                else:
-                    assert hot is not None
-                    if hot.inc_consumed():
-                        hot.flush(metrics)
+                if hot.inc_consumed():
+                    hot.flush(metrics)
                 state.processed_count += 1
 
                 result = await c.chain.process(source_record.raw, ctx)
@@ -167,11 +172,7 @@ class LinearLaneStrategy:
         except Exception as exc:
             source_error = exc
 
-        if acc is not None:
-            acc.flush_final(metrics)
-        else:
-            assert hot is not None
-            hot.flush_final(metrics)
+        hot.flush_final(metrics)
 
         await c.delivery.flush_pending_writes(state)
         if source_error is not None:
@@ -472,6 +473,8 @@ class BatchLaneStrategy:
                 inner_sinks = getattr(writer, "_sinks", None)
                 if inner_sinks and len(inner_sinks) == 1 and is_arrow_native_sink(inner_sinks[0]):
                     arrow_sink = inner_sinks[0]
+        metrics.runtime.arrow_fast_path_active = arrow_sink is not None
+        metrics.runtime.arrow_chain_active = arrow_sink is not None and c.plan.writer.arrow_chain
 
         async for batch in cast("Any", c.source).stream_batches():
             checkpoint_value = c.source.current_checkpoint()

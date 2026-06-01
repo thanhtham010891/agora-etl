@@ -106,6 +106,10 @@ class PrometheusTextExporter:
             epid = _escape_label_value(pid)
             runtime_totals = [
                 ("source_prefetch_block", stats.runtime.total_source_prefetch_block_count),
+                ("rust_prefetch_run", stats.runtime.total_rust_prefetch_runs),
+                ("rust_prefetch_wait", stats.runtime.total_rust_prefetch_wait_count),
+                ("rust_prefetch_batch_drain", stats.runtime.total_rust_prefetch_batch_drain_count),
+                ("rust_prefetch_push_batch", stats.runtime.total_rust_prefetch_push_batch_count),
                 ("checkpoint_save", stats.runtime.total_checkpoint_save_count),
                 ("checkpoint_failure", stats.runtime.total_checkpoint_failure_count),
                 ("dlq_failure", stats.runtime.total_dlq_failure_count),
@@ -123,8 +127,15 @@ class PrometheusTextExporter:
             f"# TYPE {ns}_pipeline_runtime_last gauge",
         ]
         runtime_gauges = [
+            ("direct_flush_active", "direct_flush_active"),
+            ("arrow_fast_path_active", "arrow_fast_path_active"),
+            ("arrow_chain_active", "arrow_chain_active"),
             ("source_prefetch_limit", "source_prefetch_limit"),
             ("source_prefetch_max_depth", "source_prefetch_max_depth"),
+            ("rust_prefetch_active", "rust_prefetch_active"),
+            ("rust_prefetch_wait_count", "rust_prefetch_wait_count"),
+            ("rust_prefetch_batch_drain_count", "rust_prefetch_batch_drain_count"),
+            ("rust_prefetch_push_batch_count", "rust_prefetch_push_batch_count"),
             ("buffered_stage_limit", "buffered_stage_limit"),
             ("buffered_stage_max_in_flight", "buffered_stage_max_in_flight"),
             ("checkpoint_save_time_ms", "checkpoint_save_time_ms"),
@@ -140,10 +151,24 @@ class PrometheusTextExporter:
             if runtime is None:
                 continue
             for signal, attr_name in runtime_gauges:
+                value = getattr(runtime, attr_name)
+                if isinstance(value, bool):
+                    value = int(value)
                 lines.append(
-                    f'{ns}_pipeline_runtime_last{{pipeline_id="{epid}",signal="{signal}"}} '
-                    f"{getattr(runtime, attr_name)}"
+                    f'{ns}_pipeline_runtime_last{{pipeline_id="{epid}",signal="{signal}"}} {value}'
                 )
+
+        lines += [
+            f"# HELP {ns}_pipeline_runtime_lane_last Last-run execution lane marker",
+            f"# TYPE {ns}_pipeline_runtime_lane_last gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            runtime = stats.runtime.last_runtime
+            if runtime is None or not runtime.execution_lane:
+                continue
+            lane = _escape_label_value(runtime.execution_lane)
+            lines.append(f'{ns}_pipeline_runtime_lane_last{{pipeline_id="{epid}",lane="{lane}"}} 1')
 
         lines += [
             f"# HELP {ns}_pipeline_middleware_records_total Cumulative middleware record counters",

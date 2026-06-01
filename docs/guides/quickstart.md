@@ -1,6 +1,6 @@
 # Quickstart
 
-**When to read this:** you're new to agora and want a pipeline running in under 5 minutes.
+_When to read this: you're new to agora and want a pipeline running in under 5 minutes._
 
 ## Install
 
@@ -14,8 +14,7 @@ A pipeline has three parts: a source that emits records, zero or more middleware
 
 ```python
 import asyncio
-from agora.core.pipeline import Pipeline
-from agora.core.source import IterableSource
+from agora import IterableSource, Pipeline
 
 records = [
     {"id": 1, "name": "Ho Chi Minh City", "country": "VN"},
@@ -44,10 +43,7 @@ Real pipelines transform records before writing them. Subclass `Middleware` to d
 import asyncio
 from dataclasses import dataclass
 
-from agora.core.middleware import Middleware
-from agora.core.pipeline import Pipeline
-from agora.core.sink import BaseSink
-from agora.core.source import IterableSource
+from agora import BaseSink, IterableSource, Middleware, Pipeline
 
 # --- domain types ---
 
@@ -138,4 +134,4 @@ No CLI, no config files, no daemon. It's just Python.
 
 - [Composing pipelines](pipelines.md) — fan-out, routing, batching, backpressure
 - [Handling failures](failure-handling.md) — DLQ, retry, sink failure policies
-- [Sources](../sources.md) — Kafka, file, HTTP polling, and custom sources
+- [Sources](../sources.md) — file, HTTP polling, DLQ replay, and custom sources

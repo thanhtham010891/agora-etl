@@ -517,6 +517,54 @@ async def test_batch_filter_middleware_drops_records() -> None:
     assert batch_sink.records == row_sink.records
 
 
+async def test_regular_map_middleware_on_batch_source_matches_row_path() -> None:
+    """Regular MapMiddleware on a batch source keeps semantics while using the batch lane."""
+    from agora import MapMiddleware
+
+    batch_sink = _CollectSink()
+    row_sink = _CollectSink()
+
+    await (
+        Pipeline(_BatchSource([[1, 2, 3], [4, 5]]))
+        .pipe(MapMiddleware(lambda r: r * 10))
+        .build(batch_sink)  # type: ignore[arg-type]
+        .run()
+    )
+    await (
+        Pipeline(IterableSource([1, 2, 3, 4, 5]))
+        .pipe(MapMiddleware(lambda r: r * 10))
+        .build(row_sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert batch_sink.records == [10, 20, 30, 40, 50]
+    assert batch_sink.records == row_sink.records
+
+
+async def test_regular_filter_middleware_on_batch_source_matches_row_path() -> None:
+    """Regular FilterMiddleware on a batch source keeps drop semantics."""
+    from agora import FilterMiddleware
+
+    batch_sink = _CollectSink()
+    row_sink = _CollectSink()
+
+    await (
+        Pipeline(_BatchSource([[1, 2, 3, 4], [5, 6]]))
+        .pipe(FilterMiddleware(lambda r: r % 2 == 0))
+        .build(batch_sink)  # type: ignore[arg-type]
+        .run()
+    )
+    await (
+        Pipeline(IterableSource([1, 2, 3, 4, 5, 6]))
+        .pipe(FilterMiddleware(lambda r: r % 2 == 0))
+        .build(row_sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert batch_sink.records == [2, 4, 6]
+    assert batch_sink.records == row_sink.records
+
+
 async def test_batch_map_then_filter_chained() -> None:
     """Chained batch middleware compose correctly in the batch lane."""
     from agora import BatchFilterMiddleware, BatchMapMiddleware
@@ -592,7 +640,7 @@ async def test_arrow_chain_stays_columnar() -> None:
     src = _ArrowBatchSource([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
     sink = _ArrowNativeSink()
 
-    await (
+    summary = await (
         Pipeline(src)
         .pipe(ArrowMapMiddleware(lambda b: b))  # identity — stays columnar
         .build(sink)  # type: ignore[arg-type]
@@ -602,6 +650,9 @@ async def test_arrow_chain_stays_columnar() -> None:
     assert len(sink.batches) == 1
     assert isinstance(sink.batches[0], pa.RecordBatch)
     assert sink.batches[0].num_rows == 2
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
 
 
 async def test_arrow_filter_shrinks_batch() -> None:
@@ -626,6 +677,9 @@ async def test_arrow_filter_shrinks_batch() -> None:
     assert sink.batches[0].num_rows == 5  # v in [5,6,7,8,9]
     assert summary.records_consumed == 10
     assert summary.records_written == 5
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
 
 
 async def test_arrow_filter_all_rows_dropped_skips_write() -> None:
@@ -648,6 +702,9 @@ async def test_arrow_filter_all_rows_dropped_skips_write() -> None:
     assert len(sink.batches) == 0
     assert summary.records_consumed == 2
     assert summary.records_written == 0
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
 
 
 async def test_arrow_map_then_filter_chained() -> None:
@@ -698,6 +755,9 @@ async def test_mixed_chain_falls_back_to_pylist() -> None:
 
     assert summary.records_consumed == 2
     assert len(sink.records) == 2
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is False
+    assert summary.runtime.arrow_chain_active is False
 
 
 async def test_arrow_chain_middleware_failure_routes_to_dlq() -> None:

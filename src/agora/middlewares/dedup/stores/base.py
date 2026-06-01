@@ -40,9 +40,13 @@ class DedupStore(ABC, Generic[K]):
             False if the key already existed.
 
         Notes:
-            The default implementation is a compatibility bridge built on top of
-            ``exists()`` and ``add()``. It is not race-safe under concurrent
-            execution. Stores with stronger semantics should override it.
+            The default implementation calls ``exists()`` then ``add()`` and is
+            NOT atomic. Under concurrent execution (buffered lane) two coroutines
+            can both see ``exists() == False`` and both call ``add()``, producing
+            a duplicate. Stores that need atomicity MUST override this method
+            (see ``BackendDedupStore`` which delegates to ``MembershipKeyStore.mark_if_new``).
+            Do NOT use the default implementation in buffered pipelines without
+            an external lock.
         """
         if await self.exists(key):
             return False

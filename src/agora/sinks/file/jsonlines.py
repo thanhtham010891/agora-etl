@@ -145,6 +145,47 @@ class JsonLinesSink(BaseSink[T], Generic[T]):
             self._file.write(chunk_str)
         self._file.flush()
 
+    async def write_arrow_batch(self, batch: Any) -> None:
+        """Write a ``pa.RecordBatch`` directly — Arrow-native fast path.
+
+        Converts the batch to JSONL via ``to_pylist()`` (required for JSON
+        serialization) but skips the per-record ``serializer`` call and
+        batches all rows into a single write syscall.
+        """
+        rows = await asyncio.to_thread(batch.to_pylist)
+        if not rows:
+            return
+        if self._file is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = await asyncio.to_thread(
+                open, self._path, self._initial_mode, -1, self._encoding
+            )
+        await asyncio.to_thread(self._write_arrow_rows, rows)
+        logger.debug("jsonl_sink_arrow_flush", path=str(self._path), count=len(rows))
+
+    def _write_arrow_rows(self, rows: list[dict[str, Any]]) -> None:
+        if _ORJSON:
+            chunk = (
+                b"\n".join(
+                    _json_lib.dumps(
+                        r, option=_json_lib.OPT_NON_STR_KEYS, default=_stringify_unknown
+                    )
+                    for r in rows
+                )
+                + b"\n"
+            )
+            self._file.write(chunk.decode("utf-8"))
+        else:
+            chunk_str = (
+                "\n".join(
+                    _json_lib.dumps(r, ensure_ascii=False, default=str)  # type: ignore[call-arg, misc]
+                    for r in rows
+                )
+                + "\n"
+            )
+            self._file.write(chunk_str)
+        self._file.flush()
+
     async def close(self) -> None:
         await self.flush()
         if self._file is not None:

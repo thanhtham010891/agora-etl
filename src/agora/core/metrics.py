@@ -238,10 +238,18 @@ class PipelineMetrics:
 class RuntimeMetrics:
     """Runtime pressure signals captured during a pipeline run."""
 
+    execution_lane: str = ""
+    direct_flush_active: bool = False
+    arrow_fast_path_active: bool = False
+    arrow_chain_active: bool = False
     source_prefetch_enabled: bool = False
     source_prefetch_limit: int = 0
     source_prefetch_block_count: int = 0
     source_prefetch_max_depth: int = 0
+    rust_prefetch_active: bool = False
+    rust_prefetch_wait_count: int = 0
+    rust_prefetch_batch_drain_count: int = 0
+    rust_prefetch_push_batch_count: int = 0
     source_record_error_count: int = 0
     source_record_drop_count: int = 0
     buffered_stage_limit: int = 0
@@ -267,12 +275,20 @@ class RuntimeMetrics:
 
         return replace(self)
 
-    def to_dict(self) -> dict[str, int | bool | float]:
+    def to_dict(self) -> dict[str, int | bool | float | str]:
         return {
+            "execution_lane": self.execution_lane,
+            "direct_flush_active": self.direct_flush_active,
+            "arrow_fast_path_active": self.arrow_fast_path_active,
+            "arrow_chain_active": self.arrow_chain_active,
             "source_prefetch_enabled": self.source_prefetch_enabled,
             "source_prefetch_limit": self.source_prefetch_limit,
             "source_prefetch_block_count": self.source_prefetch_block_count,
             "source_prefetch_max_depth": self.source_prefetch_max_depth,
+            "rust_prefetch_active": self.rust_prefetch_active,
+            "rust_prefetch_wait_count": self.rust_prefetch_wait_count,
+            "rust_prefetch_batch_drain_count": self.rust_prefetch_batch_drain_count,
+            "rust_prefetch_push_batch_count": self.rust_prefetch_push_batch_count,
             "source_record_error_count": self.source_record_error_count,
             "source_record_drop_count": self.source_record_drop_count,
             "buffered_stage_limit": self.buffered_stage_limit,

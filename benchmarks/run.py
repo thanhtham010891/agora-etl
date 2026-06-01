@@ -1,101 +1,271 @@
-# ruff: noqa: E402
-"""Unified benchmark CLI for Agora ETL core and first-party plugins."""
+"""Agora pipeline benchmark runner.
+
+Usage
+-----
+    # Run all lanes (generates fixture data automatically)
+    python benchmarks/run.py --rows 100000
+
+    # Run specific lanes only
+    python benchmarks/run.py --rows 100000 --only csv jsonl
+
+    # Run each case 5 times and take the median
+    python benchmarks/run.py --rows 100000 --median 5
+
+    # Save results to JSON
+    python benchmarks/run.py --rows 100000 --save
+
+Each case runs in an isolated subprocess to prevent GC noise and
+event-loop state from leaking between measurements.
+Fixture data is always regenerated before each run.
+Each case is run --median times; elapsed and throughput show the median run.
+"""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
+import json
 import sys
+import time
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parents[0]
-SRC_DIR = PROJECT_ROOT / "src"
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+_REPO_ROOT = Path(__file__).parent.parent
+_DATA_DIR = _REPO_ROOT / "benchmarks" / "_data"
+_RESULTS_DIR = _REPO_ROOT / "benchmarks" / "_results"
 
-from _core import run_core_benchmarks, run_single_core
-from _plugins import run_plugin_benchmarks, run_single_plugin
-from _shared import prepare_runtime
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+_LANE_COLORS = {
+    "csv": "\033[36m",  # cyan
+    "jsonl": "\033[33m",  # yellow
+    "parquet": "\033[35m",  # magenta
+}
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_DIM = "\033[2m"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Agora benchmark matrix")
-    parser.add_argument("--rows", type=int, default=1_000, help="Rows to generate or run")
-    parser.add_argument(
-        "--generate",
-        action="store_true",
-        help="Generate core benchmark input data before running the matrix.",
+def _color(text: str, code: str) -> str:
+    if not sys.stdout.isatty():
+        return text
+    return f"{code}{text}{_RESET}"
+
+
+def _fmt_rps(rps: int) -> str:
+    if rps >= 1_000_000:
+        return f"{rps / 1_000_000:.2f}M rec/s"
+    if rps >= 1_000:
+        return f"{rps / 1_000:.1f}K rec/s"
+    return f"{rps} rec/s"
+
+
+def _print_header(rows: int, lanes: list[str], median: int) -> None:
+    print()
+    print(_color("  Agora Pipeline Benchmark", _BOLD))
+    print(_color(f"  rows={rows:,}  lanes={', '.join(lanes)}  median={median}", _DIM))
+    print()
+    print(f"  {'lane':<8} {'case':<16} {'elapsed':>10} {'throughput':>14}  status")
+    print("  " + "-" * 58)
+
+
+def _print_result(result: dict) -> None:
+    lane = result.get("lane", "?")
+    case = result.get("case", "?")
+    color = _LANE_COLORS.get(lane, "")
+
+    if "error" in result:
+        status = _color("FAIL", _RED)
+        row = (
+            f"  {_color(lane, color):<8} {case:<16} {'':>10} {'':>14}  "
+            f"{status} {_color(result['error'][:60], _DIM)}"
+        )
+    else:
+        elapsed = result.get("elapsed_s", 0)
+        rps = result.get("throughput_rps", 0)
+        status = _color("ok", _GREEN)
+        row = (
+            f"  {_color(lane, color):<8} {case:<16} {elapsed:>9.3f}s {_fmt_rps(rps):>14}  {status}"
+        )
+    print(row)
+
+
+def _print_summary(results: list[dict], total_elapsed: float) -> None:
+    print("  " + "-" * 58)
+    ok = sum(1 for r in results if "error" not in r)
+    fail = len(results) - ok
+    print(
+        f"\n  {_color(str(ok), _GREEN)} passed  "
+        f"{_color(str(fail), _RED) if fail else str(fail)} failed  "
+        f"total {total_elapsed:.1f}s\n"
+    )
+
+
+def _print_lane_summary(results: list[dict]) -> None:
+    """Print per-lane throughput comparison table."""
+    from collections import defaultdict
+
+    by_lane: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        if "error" not in r:
+            by_lane[r["lane"]].append(r)
+
+    if not by_lane:
+        return
+
+    print(_color("  Throughput by lane (median rec/s)", _BOLD))
+    print()
+
+    all_cases = sorted({r["case"] for r in results if "error" not in r})
+    col_w = 16
+
+    header = f"  {'case':<16}" + "".join(
+        f"{_color(lane, _LANE_COLORS.get(lane, '')):<{col_w}}" for lane in sorted(by_lane)
+    )
+    print(header)
+    print("  " + "-" * (16 + col_w * len(by_lane)))
+
+    for case in all_cases:
+        row = f"  {case:<16}"
+        for lane in sorted(by_lane):
+            match = next((r for r in by_lane[lane] if r["case"] == case), None)
+            if match:
+                row += f"{_fmt_rps(match['throughput_rps']):<{col_w}}"
+            else:
+                row += f"{'—':<{col_w}}"
+        print(row)
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Median aggregation
+# ---------------------------------------------------------------------------
+
+
+def _median_result(runs: list[dict]) -> dict:
+    """Pick the run whose elapsed_s is closest to the median elapsed_s."""
+    ok_runs = [r for r in runs if "error" not in r]
+    if not ok_runs:
+        # All failed — return the last error
+        return runs[-1]
+
+    sorted_by_elapsed = sorted(ok_runs, key=lambda r: r["elapsed_s"])
+    mid = len(sorted_by_elapsed) // 2
+    return sorted_by_elapsed[mid]
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Agora pipeline benchmark",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
     parser.add_argument(
-        "--plugins",
-        action="store_true",
-        help="Run Kafka and Redis plugin benchmarks instead of the core matrix.",
+        "--rows",
+        type=int,
+        default=100_000,
+        help="Number of rows to generate / benchmark (default: 100000)",
     )
     parser.add_argument(
-        "--markdown",
-        action="store_true",
-        help="Export markdown reports into docs/benchmark/.",
-    )
-    parser.add_argument(
-        "--repeat",
+        "--median",
         type=int,
         default=3,
-        help="Repeat each scenario N times and report the median.",
+        help="Number of runs per case; report median elapsed/throughput (default: 3)",
     )
     parser.add_argument(
         "--only",
-        choices=(
-            "kafka",
-            "redis",
-            "csv",
-            "csv_batch",
-            "arrow_csv",
-            "jsonl",
-            "jsonl_batch",
-            "arrow_jsonl",
-            "parquet",
-            "parquet_arrow",
-        ),
-        help="Run only the specified scenario.",
+        nargs="*",
+        choices=["csv", "jsonl", "parquet"],
+        metavar="LANE",
+        help="Run only these lanes (csv, jsonl, parquet). Omit to run all.",
     )
-    parser.add_argument("--no-progress", action="store_true", help="Disable progress spinners")
-    return parser
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Per-case timeout in seconds (default: 120)",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save results as JSON to benchmarks/_results/",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=_DATA_DIR,
+        help=f"Directory for fixture data (default: {_DATA_DIR})",
+    )
+    return parser.parse_args()
 
 
-def build_hidden_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--_run-single", action="store_true")
-    parser.add_argument("--lane", choices=("core", "plugins"), required=True)
-    parser.add_argument("--rows", type=int, default=1_000)
-    parser.add_argument("--source", type=str)
-    parser.add_argument("--middleware", type=str)
-    parser.add_argument("--sink", type=str)
-    parser.add_argument("--scenario", type=str)
-    return parser
+def main() -> int:
+    args = _parse_args()
+    data_dir: Path = args.data_dir
+    rows: int = args.rows
+    median: int = max(1, args.median)
+    lanes: list[str] = args.only or ["csv", "jsonl", "parquet"]
+    timeout: int = args.timeout
 
+    # ---- always generate fresh fixture data ----
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+    sys.path.insert(0, str(_REPO_ROOT))
+    print(_color(f"\n  Generating {rows:,} rows → {data_dir}", _BOLD))
+    from benchmarks._generate import generate
 
-async def main(args: argparse.Namespace) -> None:
-    only = getattr(args, "only", None)
-    if args.plugins or only in ("kafka", "redis"):
-        await run_plugin_benchmarks(args)
-        return
-    await run_core_benchmarks(args)
+    generate(data_dir, rows)
+    print()
+
+    # ---- select cases ----
+    from benchmarks._cases import ALL_CASES
+    from benchmarks._runner import run_case_isolated
+
+    cases = [(lane, case) for lane, case in ALL_CASES if lane in lanes]
+
+    # ---- run with median ----
+    _print_header(rows, lanes, median)
+    t_start = time.perf_counter()
+    final_results: list[dict] = []
+
+    for lane, case in cases:
+        runs: list[dict] = []
+        for _ in range(median):
+            r = run_case_isolated(data_dir, lane, case, timeout=timeout)
+            runs.append(r)
+        result = _median_result(runs)
+        _print_result(result)
+        final_results.append(result)
+
+    total_elapsed = time.perf_counter() - t_start
+    _print_summary(final_results, total_elapsed)
+    _print_lane_summary(final_results)
+
+    # ---- save ----
+    if args.save:
+        _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out = _RESULTS_DIR / f"benchmark_{ts}_rows{rows}.json"
+        out.write_text(
+            json.dumps(
+                {"rows": rows, "lanes": lanes, "median": median, "results": final_results},
+                indent=2,
+            )
+        )
+        print(_color(f"  Results saved → {out}\n", _DIM))
+
+    return 1 if any("error" in r for r in final_results) else 0
 
 
 if __name__ == "__main__":
-    if "--_run-single" in sys.argv:
-        hidden_args = build_hidden_parser().parse_args()
-        prepare_runtime(plugins=hidden_args.lane == "plugins")
-        if hidden_args.lane == "core":
-            run_single_core(hidden_args)
-        else:
-            run_single_plugin(hidden_args)
-        sys.exit(0)
-
-    cli_args = build_parser().parse_args()
-    prepare_runtime(plugins=cli_args.plugins)
-    asyncio.run(main(cli_args))
+    sys.exit(main())

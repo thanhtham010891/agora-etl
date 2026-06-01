@@ -120,6 +120,42 @@ class CsvSink(BaseSink[T], Generic[T]):
         self._writer.writerows(rows)
         self._file.flush()
 
+    async def write_arrow_batch(self, batch: Any) -> None:
+        """Write a ``pa.RecordBatch`` directly — Arrow-native fast path.
+
+        Uses ``pyarrow.csv.write_csv()`` (C extension) to serialize the batch
+        columnar → CSV bytes, bypassing Python ``csv.DictWriter`` per-row overhead.
+        Header is written only on the first batch.
+        """
+        await asyncio.to_thread(self._write_arrow_batch, batch)
+        logger.debug("csv_sink_arrow_flush", path=str(self._path), count=len(batch))
+
+    def _write_arrow_batch(self, batch: Any) -> None:
+        try:
+            import io
+
+            import pyarrow.csv as pa_csv
+        except ImportError:
+            raise ImportError(
+                "CsvSink.write_arrow_batch() requires pyarrow. "
+                "Install via: pip install 'agora-etl[file]'"
+            ) from None
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+        write_options = pa_csv.WriteOptions(
+            include_header=not self._header_written,
+            delimiter=self._delimiter,
+        )
+        buf = io.BytesIO()
+        pa_csv.write_csv(batch, buf, write_options=write_options)
+
+        mode = "a" if self._header_written or self._append else "w"
+        with open(self._path, mode, encoding=self._encoding, newline="") as f:
+            f.write(buf.getvalue().decode(self._encoding))
+
+        self._header_written = True
+
     async def close(self) -> None:
         await self.flush()
         if self._file is not None:

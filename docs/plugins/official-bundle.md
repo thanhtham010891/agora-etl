@@ -1,5 +1,7 @@
 # Official Bundle
 
+_When to read this: you want the supported first-party integration story and need to know which extras to install._
+
 The official first-party plugin package is `agora-etl-plugins`.
 
 It exists to keep the core runtime focused while still giving the ecosystem a

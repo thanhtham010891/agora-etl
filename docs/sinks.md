@@ -1,5 +1,7 @@
 # Sinks
 
+_When to read this: you know what records you want to emit and need to choose or implement the destination side correctly._
+
 Sinks receive processed records and persist them. With `.build()` and `.fan_out()`, every sink sees every record. With `.route()`, each record goes to exactly one sink based on the routing predicate.
 
 ## Which sink to use
@@ -111,7 +113,7 @@ sink = WebhookSink(
 Subclass `BaseSink[T]` and implement `write()`:
 
 ```python
-from agora.core.sink import BaseSink
+from agora import BaseSink
 
 class MyDatabaseSink(BaseSink[MyRecord]):
     sink_name = "my_database"
@@ -143,7 +145,10 @@ class MyDatabaseSink(BaseSink[MyRecord]):
         )
 ```
 
-`batch_writable_native = True` tells the runtime to call `write_batch()` instead of individual `write()` calls. When there is only one sink in the pipeline, the runtime also takes a direct fast path that skips fan-out bookkeeping — so setting this flag on a single-destination sink is worth doing for any sink that benefits from bulk operations.
+`batch_writable_native = True` tells the runtime to call `write_batch()`
+instead of individual `write()` calls. When there is only one sink in the
+pipeline, the runtime can also skip some fan-out bookkeeping on this path, so
+it is worth setting for sinks that truly support native batch writes.
 
 ## Fan-out
 
@@ -164,7 +169,7 @@ summary = await (
 Route records to different sinks based on a predicate:
 
 ```python
-from agora.core.sink import SinkRouter
+from agora import SinkRouter
 
 router = (
     SinkRouter()

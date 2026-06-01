@@ -34,7 +34,7 @@ There are two stores out of the box.
 `SQLiteCheckpointStore` writes to a local SQLite file. It survives process restarts, crashes, and deploys. Use this in production for any pipeline that reads files or long streams.
 
 ```python
-from agora.core.checkpoint import SQLiteCheckpointStore, InMemoryCheckpointStore
+from agora import InMemoryCheckpointStore, SQLiteCheckpointStore
 
 # Production: persists across restarts
 store = SQLiteCheckpointStore(path=".agora_checkpoint.db")
@@ -55,7 +55,7 @@ Pass the store and a checkpoint key when building the pipeline. The key is the l
 
 ```python
 from agora import DeliveryConfig
-from agora.core.checkpoint import SQLiteCheckpointStore
+from agora import SQLiteCheckpointStore
 
 pipeline = (
     Pipeline(CsvSource("events.csv"), id="nightly_events")
@@ -78,8 +78,7 @@ By default, a checkpoint store failure (disk full, corrupted DB) raises and stop
 
 ```python
 from agora import DeliveryConfig
-from agora.core.checkpoint import SQLiteCheckpointStore
-from agora.core.types import CheckpointFailurePolicy
+from agora import CheckpointFailurePolicy, SQLiteCheckpointStore
 
 pipeline = (
     Pipeline(CsvSource("events.csv"), id="nightly_events")
@@ -113,10 +112,11 @@ Implement the `CheckpointableSource` protocol. The four things you must provide 
 
 ```python
 from collections.abc import AsyncGenerator
+from agora import BaseSource
 from agora.core.checkpoint import CheckpointValue, Checkpoint
 
 
-class PaginatedAPISource:
+class PaginatedAPISource(BaseSource[dict]):
     source_name = "paginated_api"
     supports_checkpoint = True
 

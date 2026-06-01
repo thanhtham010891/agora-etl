@@ -65,14 +65,14 @@ class ScheduledPipelineRunner:
         self._pipeline = pipeline
 
     async def run(self) -> None:
-        state = self._pipeline._state
+        state = self._pipeline.state
         state.running = True
         state.stop_event.clear()
 
         logger.info(
             "scheduler_start",
-            pipeline=self._pipeline._pipeline_id,
-            schedule=str(self._pipeline._schedule),
+            pipeline=self._pipeline.pipeline_id,
+            schedule=str(self._pipeline.schedule),
         )
 
         try:
@@ -83,75 +83,74 @@ class ScheduledPipelineRunner:
                     break
 
                 if ran:
-                    await self._pipeline._schedule.wait_until_next(state.stop_event)
+                    await self._pipeline.schedule.wait_until_next(state.stop_event)
                 else:
-                    # pre_run_hook skipped this run (e.g. lease not acquired).
-                    # Retry quickly instead of waiting the full schedule interval.
                     await interruptible_sleep(10, state.stop_event)
 
         except asyncio.CancelledError:
-            logger.info("scheduler_cancelled", pipeline=self._pipeline._pipeline_id)
+            logger.info("scheduler_cancelled", pipeline=self._pipeline.pipeline_id)
         finally:
             state.running = False
             logger.info(
                 "scheduler_stopped",
-                pipeline=self._pipeline._pipeline_id,
+                pipeline=self._pipeline.pipeline_id,
                 total_runs=state.run_number,
             )
 
     def _should_continue(self) -> bool:
-        state = self._pipeline._state
-        if not self._pipeline._schedule.should_repeat:
+        state = self._pipeline.state
+        if not self._pipeline.schedule.should_repeat:
             return False
 
-        if state.consecutive_errors < self._pipeline._max_errors:
+        if state.consecutive_errors < self._pipeline.max_consecutive_errors:
             return True
 
         logger.error(
             "scheduler_max_errors_reached",
-            pipeline=self._pipeline._pipeline_id,
+            pipeline=self._pipeline.pipeline_id,
             consecutive=state.consecutive_errors,
         )
         return False
 
     async def _notify_run_complete(self, record: RunRecord) -> None:
-        if self._pipeline._on_run_complete is not None:
+        on_run_complete = self._pipeline.on_run_complete
+        if on_run_complete is not None:
             try:
-                await self._pipeline._on_run_complete(record)
+                await on_run_complete(record)
             except Exception as cb_exc:
                 logger.warning("scheduler_callback_error", error=str(cb_exc))
 
-        for observer in self._pipeline._observers:
+        for observer in self._pipeline.observers:
             try:
                 await observer(record)
             except Exception as obs_exc:
                 logger.warning("scheduler_observer_error", error=str(obs_exc))
 
     async def _handle_run_failure(self, record: RunRecord, exc: Exception) -> None:
-        state = self._pipeline._state
+        state = self._pipeline.state
         record.error = exc
         state.consecutive_errors += 1
 
         logger.exception(
             "scheduler_run_error",
-            pipeline=self._pipeline._pipeline_id,
+            pipeline=self._pipeline.pipeline_id,
             run=state.run_number,
             consecutive_errors=state.consecutive_errors,
             error=str(exc),
         )
 
-        wait = self._pipeline._backoff_policy.next_delay(state.consecutive_errors)
+        wait = self._pipeline.backoff_policy.next_delay(state.consecutive_errors)
         logger.info("scheduler_error_backoff", wait_s=round(wait, 1))
         await interruptible_sleep(wait, state.stop_event)
 
     def _handle_run_success(self, record: RunRecord, summary: PipelineRunSummary) -> None:
-        state = self._pipeline._state
+        state = self._pipeline.state
         record.summary = summary
         state.consecutive_errors = 0
 
         logger.info(
             "scheduler_run_done",
-            pipeline=self._pipeline._pipeline_id,
+            pipeline=self._pipeline.pipeline_id,
             run=state.run_number,
             consumed=summary.records_consumed,
             written=summary.records_written,
@@ -159,11 +158,9 @@ class ScheduledPipelineRunner:
         )
 
     async def _run_once(self) -> bool:
-        state = self._pipeline._state
+        state = self._pipeline.state
 
-        # pre_run_hook returns False → skip this run (e.g. lease not acquired).
-        # Does not increment run_number or count as an error.
-        hook = getattr(self._pipeline, "_pre_run_hook", None)
+        hook = self._pipeline.pre_run_hook
         if hook is not None and not await hook():
             return False
 
@@ -172,13 +169,13 @@ class ScheduledPipelineRunner:
 
         logger.info(
             "scheduler_run_start",
-            pipeline=self._pipeline._pipeline_id,
+            pipeline=self._pipeline.pipeline_id,
             run=state.run_number,
         )
 
         try:
-            pipeline = await self._pipeline._factory()
-            summary = await pipeline.run(max_records=self._pipeline._max_records)
+            pipeline = await self._pipeline.build()
+            summary = await pipeline.run(max_records=self._pipeline.max_records)
             self._handle_run_success(record, summary)
         except asyncio.CancelledError as exc:
             record.error = exc

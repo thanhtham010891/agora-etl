@@ -1,5 +1,7 @@
 # Configuration
 
+_When to read this: you want to control settings, environments, or declarative pipeline definitions without hard-coding everything in Python._
+
 Agora has two complementary configuration layers:
 
 - runtime settings via `AgoraSettings` and environment variables
@@ -234,7 +236,7 @@ Examples:
 
 ## Recommended workflow
 
-For a good pattern is:
+A good working pattern is:
 
 1. start in Python while shaping the pipeline
 2. extract stable callables and schemas into importable modules
@@ -248,7 +250,7 @@ For a good pattern is:
 - `agora run --plan` is read-only with respect to pipeline execution, but it still resolves trusted import references from the config.
 - Health endpoints are intentionally lightweight. Keep them bound to private
   network interfaces or protect them with `AGORA_HEALTH_AUTH_TOKEN`.
-- Treat the built-in health server as an internal probe surface, not as a public API edge.
+- Treat the built-in health server as a private operations endpoint, not as a public API edge.
 
 ## Related guides
 

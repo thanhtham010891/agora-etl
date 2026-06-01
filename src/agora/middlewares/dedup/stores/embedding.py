@@ -31,6 +31,7 @@ simple and dependency-light for the common case.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import logstruct
@@ -72,9 +73,8 @@ class EmbeddingStore(DedupStore[str]):
     ) -> None:
         self._provider = provider
         self._threshold = similarity_threshold
-
-        # In-memory store: list of (original_key, embedding)
         self._memory: list[tuple[str, list[float]]] = []
+        self._lock = asyncio.Lock()  # guards _memory for concurrent mark_if_new calls
 
     # ------------------------------------------------------------------ #
     # DedupStore implementation                                            #
@@ -83,15 +83,28 @@ class EmbeddingStore(DedupStore[str]):
     async def exists(self, key: str) -> bool:
         """Return True if *key* is semantically similar to a seen key."""
         embedding = (await self._provider.embed(key)).embedding
-
         return self._memory_exists(embedding)
 
     async def add(self, key: str) -> None:
         """Mark *key* as seen (stores its embedding)."""
         embedding = (await self._provider.embed(key)).embedding
-
         self._memory.append((key, embedding))
         logger.debug("embedding_store_add", backend="memory", total=len(self._memory))
+
+    async def mark_if_new(self, key: str, *, ttl_seconds: int | None = None) -> bool:
+        """Atomic check-and-add using an asyncio lock.
+
+        Embeds *key* once, then under the lock checks similarity and appends
+        only if no match is found — preventing the check-then-act race that
+        the base class default would have in buffered (concurrent) lanes.
+        """
+        embedding = (await self._provider.embed(key)).embedding
+        async with self._lock:
+            if self._memory_exists(embedding):
+                return False
+            self._memory.append((key, embedding))
+            logger.debug("embedding_store_add", backend="memory", total=len(self._memory))
+            return True
 
     async def close(self) -> None:
         return None

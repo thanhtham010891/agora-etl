@@ -40,12 +40,11 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
-from agora.core.batch import BatchMiddleware
+from agora.core.batch import BatchMiddleware, BatchProcessResult
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agora.core.batch import BatchProcessResult
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -121,6 +120,31 @@ class Middleware(ABC, Generic[T, U]):
             error=str(exc),
         )
 
+    async def apply_in_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+        chain: Any,
+        idx: int,
+    ) -> Any:
+        """Double-dispatch hook: apply self per-record within a batch context.
+
+        Returns the updated list, or a BatchProcessResult on batch-level failure.
+        Default: process each non-None record individually via process_range().
+        """
+
+        next_batch: list[Any] = []
+        for record in current:
+            if record is None:
+                next_batch.append(None)
+                continue
+            result = await chain.process_range(idx, idx + 1, record, ctx)
+            if result.failure is not None:
+                next_batch.append(None)
+            else:
+                next_batch.append(result.value)
+        return next_batch
+
 
 # ======================================================================
 # Built-in middlewares
@@ -152,6 +176,63 @@ class MapMiddleware(Middleware[T, U]):
         sync_fn = cast("Callable[[T], U | None]", self._fn)
         return sync_fn(record)
 
+    async def apply_in_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+        chain: Any,
+        idx: int,
+    ) -> Any:
+        if not self._fn_is_async:
+            return await self._apply_sync_map_batch(current, ctx)
+        return await super().apply_in_batch(current, ctx, chain, idx)
+
+    async def _apply_sync_map_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+    ) -> list[Any]:
+        active_count = sum(1 for r in current if r is not None)
+        if active_count == 0:
+            return current
+
+        t0 = time.monotonic()
+        m_metrics = ctx.metrics.middleware(self.name)
+        m_metrics.records_in += active_count
+        sync_fn = cast("Callable[[Any], Any | None]", self._fn)
+        next_batch: list[Any] = []
+        dropped = errors = written = 0
+
+        with ctx.trace_span(
+            "middleware.process_batch_fast",
+            middleware=self.name,
+            execution_mode="batch_fast_map",
+            batch_size=active_count,
+        ):
+            for record in current:
+                if record is None:
+                    next_batch.append(None)
+                    continue
+                try:
+                    result = sync_fn(record)
+                except Exception as exc:
+                    errors += 1
+                    await self.on_error(record, exc, ctx)
+                    ctx.log.exception("middleware_chain_error", middleware=self.name)
+                    next_batch.append(None)
+                    continue
+                if result is None:
+                    dropped += 1
+                else:
+                    written += 1
+                next_batch.append(result)
+
+        m_metrics.records_errored += errors
+        m_metrics.records_dropped += dropped
+        m_metrics.records_out += written
+        m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
+        return next_batch
+
 
 class FilterMiddleware(Middleware[T, T]):
     """Drop records that don't satisfy *predicate* (T → T | None).
@@ -171,6 +252,64 @@ class FilterMiddleware(Middleware[T, T]):
         else:
             keep = self._predicate(record)
         return record if keep else None
+
+    async def apply_in_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+        chain: Any,
+        idx: int,
+    ) -> Any:
+        if not inspect.iscoroutinefunction(self._predicate):
+            return await self._apply_sync_filter_batch(current, ctx)
+        return await super().apply_in_batch(current, ctx, chain, idx)
+
+    async def _apply_sync_filter_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+    ) -> list[Any]:
+        active_count = sum(1 for r in current if r is not None)
+        if active_count == 0:
+            return current
+
+        t0 = time.monotonic()
+        m_metrics = ctx.metrics.middleware(self.name)
+        m_metrics.records_in += active_count
+        predicate = self._predicate
+        next_batch: list[Any] = []
+        dropped = errors = written = 0
+
+        with ctx.trace_span(
+            "middleware.process_batch_fast",
+            middleware=self.name,
+            execution_mode="batch_fast_filter",
+            batch_size=active_count,
+        ):
+            for record in current:
+                if record is None:
+                    next_batch.append(None)
+                    continue
+                try:
+                    keep = predicate(record)
+                except Exception as exc:
+                    errors += 1
+                    await self.on_error(record, exc, ctx)
+                    ctx.log.exception("middleware_chain_error", middleware=self.name)
+                    next_batch.append(None)
+                    continue
+                if keep:
+                    written += 1
+                    next_batch.append(record)
+                else:
+                    dropped += 1
+                    next_batch.append(None)
+
+        m_metrics.records_errored += errors
+        m_metrics.records_dropped += dropped
+        m_metrics.records_out += written
+        m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
+        return next_batch
 
 
 class BatchMapMiddleware(BatchMiddleware[T, U]):
@@ -433,92 +572,26 @@ class MiddlewareChain(Generic[T, U]):
     ) -> BatchProcessResult:
         """Run *records* through the chain in batch mode.
 
-        For ``BatchMiddleware`` stages: calls ``process_batch(records, ctx)``.
-        For regular ``Middleware`` stages: applies per-record within the batch.
+        Each middleware handles itself via ``apply_in_batch()`` — no isinstance
+        dispatch here. BatchMiddleware stages process the whole batch at once;
+        MapMiddleware/FilterMiddleware use sync fast-paths; ArrowBatchMiddleware
+        is skipped (data is already list[dict]); all others fall back to per-record.
 
-        If a ``BatchMiddleware`` raises, returns a ``BatchProcessResult`` with
-        ``failure`` set — the entire batch is considered failed (Option A).
+        If a BatchMiddleware raises, returns a BatchProcessResult with ``failure``
+        set — the entire batch is considered failed (Option A).
         """
-        from agora.core.batch import BatchFailure, BatchMiddleware, BatchProcessResult
+        from agora.core.batch import BatchProcessResult
 
         if not self._middlewares:
-            return BatchProcessResult(results=list(records))
+            return BatchProcessResult(results=records)
 
-        current: list[Any | None] = list(records)
+        current: list[Any] = list(records)
 
         for idx, middleware in enumerate(self._middlewares):
-            if isinstance(middleware, BatchMiddleware):
-                t0 = time.monotonic()
-                m_metrics = ctx.metrics.middleware(middleware.name)
-                m_metrics.records_in += len(current)
-                non_none = [r for r in current if r is not None]
-                try:
-                    with ctx.trace_span(
-                        "middleware.process_batch",
-                        middleware=middleware.name,
-                        batch_size=len(non_none),
-                    ):
-                        batch_results = await middleware.process_batch(non_none, ctx)
-                except Exception as exc:
-                    m_metrics.records_errored += len(non_none)
-                    m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
-                    ctx.log.exception(
-                        "batch_middleware_error",
-                        middleware=middleware.name,
-                        batch_size=len(non_none),
-                    )
-                    return BatchProcessResult(
-                        results=[],
-                        failure=BatchFailure(
-                            batch=non_none,
-                            exception=exc,
-                            middleware=middleware.name,
-                        ),
-                    )
-                finally:
-                    m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
-
-                if len(batch_results) != len(non_none):
-                    raise RuntimeError(
-                        f"BatchMiddleware '{middleware.name}' returned {len(batch_results)} "
-                        f"results for {len(non_none)} inputs — lengths must match."
-                    )
-
-                # Re-map results back to original positions (preserving None slots)
-                result_iter = iter(batch_results)
-                current = [next(result_iter) if r is not None else None for r in current]
-                dropped = sum(1 for r in current if r is None) - sum(
-                    1 for r in records if r is None
-                )
-                m_metrics.records_dropped += max(0, dropped)
-                m_metrics.records_out += sum(1 for r in current if r is not None)
-            else:
-                # ArrowBatchMiddleware in a mixed chain: data is already list[dict]
-                # (to_pylist was called), so the Arrow stage cannot operate on it.
-                # Pass through unchanged — the arrow fast path is disabled for mixed chains.
-                from agora.core.batch import ArrowBatchMiddleware as _ArrowBatchMW
-
-                if isinstance(middleware, _ArrowBatchMW):
-                    continue
-                # Regular Middleware — apply per-record within the batch
-                next_batch: list[Any | None] = []
-                for record in current:
-                    if record is None:
-                        next_batch.append(None)
-                        continue
-                    result = await self.process_range(
-                        idx,
-                        idx + 1,
-                        record,
-                        ctx,
-                    )
-                    if result.failure is not None:
-                        # Per-record failure in batch context: drop the record,
-                        # do not abort the batch (batch failure = BatchMiddleware only)
-                        next_batch.append(None)
-                    else:
-                        next_batch.append(result.value)
-                current = next_batch
+            result = await middleware.apply_in_batch(current, ctx, self, idx)
+            if isinstance(result, BatchProcessResult):
+                return result
+            current = result
 
         return BatchProcessResult(results=current)
 

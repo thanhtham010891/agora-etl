@@ -1,6 +1,6 @@
 # Failure Handling
 
-**When to read this:** something in your pipeline is failing and you need to decide whether to crash, skip, or queue for later.
+_When to read this: something in your pipeline is failing and you need to decide whether to crash, skip, or queue for later._
 
 For the full list of runtime promises this page builds on (sink fail-closed semantics, checkpoint advancement under failure, DLQ replay acknowledgement), see [Runtime Guarantees](runtime-guarantees.md).
 
@@ -23,8 +23,7 @@ Sink failures are handled separately from middleware failures. When `write()` ra
 The pipeline raises immediately and stops. Use this when a write failure means the data is lost and you cannot afford to continue — for example, writing to a primary database where every record must land.
 
 ```python
-from agora import DeliveryConfig
-from agora.core.types import SinkFailurePolicy
+from agora import DeliveryConfig, SinkFailurePolicy
 
 bound = (
     Pipeline(source)
@@ -45,7 +44,7 @@ The error is logged, the record is counted as errored, and the pipeline moves on
 ```python
 from agora import DeliveryConfig
 from agora.core.dlq import SQLiteDLQSink
-from agora.core.types import SinkFailurePolicy
+from agora import SinkFailurePolicy
 
 bound = (
     Pipeline(source)
@@ -93,8 +92,7 @@ If the DLQ sink itself fails to write, `DLQFailurePolicy` controls what happens 
 `DLQFailurePolicy.RAISE` — treat a DLQ write failure as fatal and stop the pipeline. Use this when you need a hard guarantee that no failed record is silently discarded.
 
 ```python
-from agora import DeliveryConfig
-from agora.core.types import DLQFailurePolicy
+from agora import DeliveryConfig, DLQFailurePolicy
 
 bound = (
     Pipeline(source)
@@ -117,7 +115,7 @@ bound = (
 
 ```python
 from agora import DeliveryConfig
-from agora.core.middleware import RetryMiddleware
+from agora import RetryMiddleware
 
 pipeline = (
     Pipeline(source)
@@ -139,7 +137,7 @@ Do not use `LOG_AND_CONTINUE` without a DLQ as a substitute for passthrough. `LO
 ```python
 from agora import DeliveryConfig
 from agora.core.dlq import SQLiteDLQSink
-from agora.core.types import SinkFailurePolicy
+from agora import SinkFailurePolicy
 
 dlq = SQLiteDLQSink(".agora_dlq.db")  # path is relative to cwd
 
@@ -169,21 +167,19 @@ Once you've fixed the underlying issue, replay failed records using `SQLiteDLQSo
 
 ```python
 import asyncio
+from agora import MapMiddleware, Pipeline
 from agora.core.dlq import SQLiteDLQSink, SQLiteDLQSource
-from agora.core.pipeline import Pipeline
 
 async def replay() -> None:
     dlq_sink = SQLiteDLQSink(".agora_dlq.db")
     source = SQLiteDLQSource(
         ".agora_dlq.db",
         pipeline_id="my_pipeline",  # replay only this pipeline's failures
-        stage="sink",               # optional: filter by failure stage
+        stage="sink_write",         # optional: filter by failure stage
     )
 
     # The DLQ source yields DLQRecord objects.
     # Use replay_payload() to extract the original record for re-processing.
-    from agora.core.middleware import MapMiddleware
-
     async def unwrap_and_ack(dlq_record):
         payload = dlq_record.replay_payload("pipeline")
         # acknowledge removes the record from the DLQ after successful replay
@@ -211,10 +207,14 @@ asyncio.run(replay())
 If you're running pipelines via the agora runner, the CLI provides a shortcut:
 
 ```bash
-agora dlq replay --db .agora_dlq.db --pipeline my_pipeline
+agora dlq replay --config pipelines.toml my_pipeline
+agora dlq replay --config pipelines.toml my_pipeline --stage sink_write
+agora dlq replay --config pipelines.toml my_pipeline --mode sink
 ```
 
-This is equivalent to the Python replay above but reads runner configuration from your project's config file. See `agora dlq --help` for filtering options.
+This reads the DLQ backend from your pipeline config, builds the matching DLQ
+source automatically, and replays only records for the selected pipeline. See
+`agora dlq --help` for filtering options.
 
 ## Putting it together
 
@@ -222,11 +222,9 @@ A production pipeline that handles failures gracefully looks like this:
 
 ```python
 import asyncio
-from agora import DeliveryConfig
+from agora import Backpressure, DLQFailurePolicy, DeliveryConfig, RetryMiddleware, SinkFailurePolicy
 from agora.core.dlq import SQLiteDLQSink
-from agora.core.middleware import RetryMiddleware
-from agora.core.pipeline import Pipeline
-from agora.core.types import Backpressure, DLQFailurePolicy, SinkFailurePolicy
+from agora import Pipeline
 
 async def main() -> None:
     dlq = SQLiteDLQSink(".agora_dlq.db")

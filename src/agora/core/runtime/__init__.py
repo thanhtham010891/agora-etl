@@ -29,6 +29,7 @@ from agora.core.runtime._delivery import (
     SourceQueueError,
     SourceRecord,
     Written,
+    make_checkpoint_state,
 )
 from agora.core.runtime._hot_metrics import HotPathMetrics
 from agora.core.runtime._plan import BufferedStageSpec, RuntimeLane, RuntimePlan, build_runtime_plan
@@ -60,6 +61,7 @@ __all__ = [
     "WriterTransport",
     "Written",
     "build_runtime_plan",
+    "make_checkpoint_state",
 ]
 
 

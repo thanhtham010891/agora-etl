@@ -1,5 +1,7 @@
 # Redis Plugins
 
+_When to read this: you need shared fast state, stream ingestion, replay storage, or dedup behavior backed by Redis._
+
 Use the Redis family when your pipeline needs a fast shared backend for stream
 ingestion, state, replay, or deduplication.
 

@@ -2,116 +2,336 @@
 
 _When to read this: you need to know what the Agora runtime promises so you can build reliable pipelines without reading the source._
 
-This page is the single source of truth for what the core runtime guarantees and what it intentionally does not. Other docs link here when they discuss execution behavior.
+This page is the contract for the core `agora-etl` runtime. Other docs link
+here when they talk about execution behavior, failure handling, checkpointing,
+or replay.
 
-If a behavior is not on this page, treat it as implementation detail. It may change between minor releases without a deprecation cycle. Behaviors on this page are part of the public contract — we will not change them without writing it down here first.
+If a behavior is not on this page, treat it as implementation detail. It may
+change between minor releases without a deprecation cycle. Behaviors on this
+page are part of the public contract and should be safe to build operational
+assumptions around.
 
-## What is guaranteed
+For the hook-by-hook order of startup, streaming, shutdown, scheduled runs, and
+workers, see [Lifecycle](lifecycle.md). This page focuses on the promises that
+remain true across those phases.
 
-### Source order
+## Scope of this contract
 
-Records are committed to sinks in source order. This holds in both linear and buffered execution modes.
+This page covers the core runtime:
 
-In buffered mode, the runtime may run a slow stage (e.g. `AIBatchMiddleware`) concurrently across multiple records, but it drains results back into source order before they reach the sink. A fast record produced from a later source position will not commit ahead of a slower record produced from an earlier source position.
+- `Pipeline`
+- `BoundPipeline`
+- core execution lanes
+- checkpoint restore and persistence
+- DLQ behavior
+- cancellation and shutdown
 
-### Sink fail-closed by default
+Plugin-specific behaviors may extend this contract, but they do not weaken the
+core guarantees described here unless their docs say so explicitly.
 
-`SinkFailurePolicy.FAIL_CLOSED` is the default. When the sink raises during `write()` or `write_batch()` and the failed record is not routed to a DLQ, the run stops and the original sink exception propagates from `pipeline.run()`.
+## Terms used on this page
 
-The runtime never silently skips a failed record under `FAIL_CLOSED`.
+These terms are used precisely:
+
+- **consumed**: the source emitted the record
+- **written**: the sink reported a successful write for that record
+- **dropped**: the record was intentionally removed from the flow, usually by middleware returning `None`
+- **errored**: the record hit an exception in source, middleware, or sink handling
+- **handled**: the runtime reached a defined terminal outcome for that record under the active policy, such as written, dropped, or routed to the DLQ
+
+The distinction between **emitted** and **handled** matters because checkpoint
+persistence follows handled outcomes, not merely source output.
+
+## Guaranteed startup behavior
+
+### Checkpoint restore happens before source open
+
+If a checkpoint store is configured and the source supports checkpointing,
+Agora loads the saved checkpoint and calls `source.prepare_resume(checkpoint)`
+before the source context is entered.
+
+This means custom sources should treat `prepare_resume()` as the place where the
+resume cursor is restored.
+
+### Middleware startup is ordered and rollback-safe
+
+Middleware `on_start()` hooks run in registration order.
+
+If startup fails partway through:
+
+- the failing middleware is asked to stop
+- already-started middlewares are stopped in reverse order
+- no records are streamed
+- sink open does not begin
+
+### Writer/DLQ open is all-or-nothing at the run boundary
+
+Before streaming begins, Agora opens:
+
+1. the writer
+2. the DLQ sink, if configured
+
+If open fails:
+
+- already-opened sinks are closed
+- source streaming never begins
+- the run fails before any record is consumed
+
+## Guaranteed processing behavior
+
+### Middleware execution order is left to right
+
+Within one record flow, middleware executes in the exact order it was
+registered.
+
+If a middleware returns `None`:
+
+- downstream middlewares do not see that record
+- the sink does not see that record
+- the record counts as dropped
+- checkpoint advancement still follows the active checkpoint policy for handled records
+
+If a middleware raises:
+
+- `on_error()` is called on that middleware
+- the rest of the chain is skipped for that record
+- the runtime applies DLQ routing if configured
+- the pipeline continues with the next record unless a later failure policy stops the run
+
+### Source order is preserved at the sink boundary
+
+Records are committed to sinks in source order.
+
+This remains true in:
+
+- linear execution
+- buffered execution
+- batch execution
+
+Buffered execution may process work concurrently internally, but later source
+positions do not commit ahead of earlier ones.
+
+### Lane changes do not weaken correctness guarantees
+
+Batch and Arrow paths may change how data is grouped or represented in memory,
+but they do not change the core guarantees around ordering, checkpoint gating,
+or fail-closed delivery defaults.
+
+## Guaranteed sink and delivery behavior
+
+### Sink failure is fail-closed by default
+
+`SinkFailurePolicy.FAIL_CLOSED` is the default.
+
+Under `FAIL_CLOSED`:
+
+- if sink delivery fails
+- and the failure is not successfully routed to the DLQ
+- the run stops
+- the original sink exception propagates from `pipeline.run()`
+
+The runtime never silently skips an unhandled sink failure under
+`FAIL_CLOSED`.
+
+### Sink failure policy controls whether a failed record is terminal
+
+| Situation | `FAIL_CLOSED` | `LOG_AND_CONTINUE` |
+|---|---|---|
+| Sink write succeeds | record is written | record is written |
+| Sink write fails and DLQ routing succeeds | record is counted errored, run continues | record is counted errored, run continues |
+| Sink write fails and DLQ routing does not happen | run stops | record is counted errored, run continues |
+
+### Batch writes preserve per-record outcome handling
+
+When the runtime writes a batch:
+
+- it still expects one delivery outcome per input record
+- partial failures are resolved record by record
+- checkpoint persistence and DLQ routing remain aligned to those per-record outcomes
+
+That means a successful record in the same write batch as a failed record can
+still be committed and checkpointed under the active policy.
+
+## Guaranteed checkpoint behavior
 
 ### Checkpoint advancement is conservative
 
-The source checkpoint advances only through records that were durably handled under the active failure policy.
+The source checkpoint advances only through records that were handled under the
+active failure policy.
 
 | Outcome | Checkpoint advances? |
 |---|---|
 | Sink wrote successfully | Yes |
-| Middleware dropped record (returned None) | Yes |
+| Middleware dropped record (returned `None`) | Yes |
 | Middleware raised, record routed to DLQ | Yes |
 | Sink raised, record routed to DLQ | Yes |
-| Sink raised, no DLQ, `FAIL_CLOSED` | No (run aborts before advancing) |
-| Sink raised, no DLQ, `LOG_AND_CONTINUE` | Yes (matches "record was handled") |
+| Sink raised, no DLQ, `FAIL_CLOSED` | No |
+| Sink raised, no DLQ, `LOG_AND_CONTINUE` | Yes |
 
-The checkpoint never advances past a record whose write failed and was not handled.
+The checkpoint never advances past a record whose sink failure was both:
 
-### DLQ routing on middleware failure
+- unhandled
+- run-terminal
 
-When a middleware raises during `process()`, the chain stops for that record and the runtime calls the middleware's `on_error()` hook. If a DLQ sink is configured, the failed record is written to the DLQ as a `DLQRecord` with `stage="middleware"` and the middleware name attached.
+### Checkpoint save cadence is explicit
 
-If no DLQ is configured, the error is counted in `PipelineRunSummary.records_errored` and the record is discarded. The pipeline continues with the next record either way.
+Checkpoint persistence happens only when all of these are true:
 
-### DLQ failure policy is honored
+1. checkpointing is enabled
+2. the source supports checkpointing
+3. the source reports a checkpoint value
+4. the `checkpoint_every` threshold is reached
 
-`DLQFailurePolicy.LOG_ONLY` (the default) logs DLQ write failures and continues. The original error is already counted; a failed DLQ write is a secondary failure.
+`checkpoint_every` is therefore a durability tuning knob, not just a
+performance knob.
 
-`DLQFailurePolicy.RAISE` propagates DLQ write failures and stops the run. Use this when you need a hard guarantee that no failed record is silently lost.
+### Checkpoint load failure policy is honored
 
-### DLQ replay acknowledges only after success
+On startup, checkpoint load and `prepare_resume()` failures follow
+`CheckpointFailurePolicy`:
 
-When replaying a DLQ via `SQLiteDLQSource`, a record is acknowledged (removed from the DLQ) only after replay produces one successful sink write. Records that fail replay remain in the DLQ.
+| Policy | Behavior |
+|---|---|
+| `FAIL_CLOSED` | abort the run |
+| `LOG_AND_CONTINUE` | log the failure and continue from scratch |
 
-`SQLiteDLQSource` skips records whose `attempt` count has reached `max_attempts`. Records below the ceiling are yielded for replay.
+### Checkpoint save failure policy is honored
 
-### Cancellation is cooperative and ordered
+During a run, checkpoint save failures follow the same policy:
 
-When the run task receives `asyncio.CancelledError` or `KeyboardInterrupt`, the runtime:
+| Policy | Behavior |
+|---|---|
+| `FAIL_CLOSED` | abort the run |
+| `LOG_AND_CONTINUE` | log the failure and continue processing |
 
-1. Marks the run as interrupted.
-2. Stops middlewares via `chain.stop_all()`.
-3. Flushes and closes the writer.
-4. Flushes and closes the DLQ sink if open.
-5. Closes the checkpoint store.
+Under `LOG_AND_CONTINUE`, the runtime marks the failed save slot as handled so
+it does not retry-storm the same checkpoint write on every following record.
 
-Shutdown errors during an interrupted run are logged but suppressed — the original cancellation propagates instead of being masked by a cleanup failure.
+### Non-checkpointable sources degrade explicitly
 
-A buffered pipeline aborts pending buffered work on cancellation. It does not commit later records out of order to "catch up."
+If you pass a checkpoint store to a source that does not explicitly opt into
+checkpointing:
 
-### Lifecycle ordering
+- Agora logs `pipeline_checkpoint_unsupported_source`
+- the pipeline continues
+- no checkpoint load/save occurs for that run
 
-Within a single run, the runtime invokes lifecycle hooks in this order:
+## Guaranteed DLQ behavior
 
-1. Source `open()`.
-2. Checkpoint store `load()` (if configured and the source supports checkpointing).
-3. Source `prepare_resume()` (if the source supports checkpointing).
-4. Middleware chain `start_all()`.
-5. Writer `open()` and DLQ sink `open()` (DLQ closes if writer fails after DLQ opens).
-6. Records stream and dispatch.
-7. On termination: middleware `stop_all()`, DLQ flush + close, writer flush + close, checkpoint store `close()`.
+### Middleware and sink failures produce structured DLQ records
 
-A failure during `_open_sinks` rolls back any sinks that already opened.
+When DLQ routing is enabled, Agora writes a `DLQRecord` containing:
+
+- pipeline ID
+- run ID
+- stage
+- error type and message
+- source name
+- current checkpoint
+- original record
+- processed record when relevant
+- middleware or sink metadata when available
+
+### DLQ failure policy is independent and explicit
+
+`DLQFailurePolicy.LOG_ONLY` is the default.
+
+| Policy | Behavior when DLQ write fails |
+|---|---|
+| `LOG_ONLY` | log the DLQ failure and continue |
+| `RAISE` | propagate the DLQ failure and stop the run |
+
+This policy applies to the DLQ write itself. It does not retroactively make the
+original record successful.
+
+### DLQ replay acknowledges only after replay succeeds
+
+When replaying from a DLQ-backed source such as `SQLiteDLQSource`, a record is
+acknowledged only after replay produces one successful sink write.
+
+If replay fails again:
+
+- the record stays in the DLQ
+- it can be replayed again later
+
+## Guaranteed shutdown behavior
+
+### Shutdown preserves the original terminal reason
+
+If a run is cancelled or already failed, cleanup errors are logged and
+suppressed so they do not replace the original cancellation or run failure.
+
+This is important operationally: if the real reason was "sink write failed" or
+"task was cancelled", Agora preserves that reason instead of masking it behind a
+secondary close/flush error.
+
+### Shutdown order is stable
+
+On termination of an active run:
+
+1. source context exits, so `source.close()` runs
+2. middleware `on_stop()` hooks run in reverse order
+3. DLQ flushes and closes
+4. writer flushes and closes
+5. checkpoint store closes
+
+### Buffered work does not break ordering during shutdown
+
+A buffered pipeline may abandon pending concurrent work during cancellation, but
+it does not commit later results out of order in an attempt to finish faster.
 
 ## What is intentionally not guaranteed
 
 ### Exactly-once delivery across sinks
 
-Agora delivers at-least-once. If your sink is not idempotent and the process crashes between the sink write and the next checkpoint save, the next run can re-process records since the last checkpoint. Use a dedup middleware or an idempotent sink if duplicates matter.
+Agora delivers at-least-once. If your sink is not idempotent and the process
+crashes between a successful sink write and the next persisted checkpoint, the
+next run can re-process records since the last saved checkpoint.
+
+Use idempotent sinks, dedup middleware, or application-level keys when
+duplicates matter.
 
 ### Transactional coupling between sink and checkpoint store
 
-The runtime saves the checkpoint after the sink reports success. There is no two-phase commit between the two stores. A crash in the gap re-processes the affected records on the next run.
-
-### Safe execution of untrusted config
-
-Config import references execute trusted project code. Do not load configs from sources you do not trust.
-
-### Public-edge hardening for the built-in health server
-
-The built-in health server is suitable for private network boundaries and internal monitoring. It is not hardened against public-edge traffic. Use a reverse proxy or place it on an internal network.
+The runtime saves the checkpoint after the sink reports success. There is no
+two-phase commit between the sink and the checkpoint store.
 
 ### Cross-source ordering
 
-Order is guaranteed within a single source. The runtime makes no claims about the relative order of records from different sources.
+Order is guaranteed within one source stream. The runtime makes no claims about
+the relative order of records coming from different sources or different worker
+processes.
 
-### Specific resume granularity
+### A specific resume granularity for every source
 
-Each source defines its own resume granularity (line number, row number, cursor, etc.). See the [Recovery Support Matrix](recovery-matrix.md) for the per-source contract. The runtime guarantees that whatever the source declares is what gets restored — not that a particular source uses any particular granularity.
+Each source defines its own resume value and granularity. The runtime guarantees
+that the source's declared checkpoint value is restored as-is. It does not
+guarantee that every source resumes by line number, offset, page token, or any
+other particular shape.
 
-## Backpressure and adaptive buffering
+See the [Recovery Support Matrix](recovery-matrix.md) for per-source behavior.
 
-`Backpressure.adaptive(...)` monitors writer flush latency and checkpoint save latency to scale the in-flight record limit up or down. It is a throughput tuning mechanism — it does not relax any of the guarantees above.
+### Safe execution of untrusted project code or config
 
-Without `Backpressure`, the buffer is unbounded by default. Use `max_buffer_size` to put a hard cap on it.
+Config import references execute trusted project code. Do not load configs,
+plugins, or worker modules from sources you do not trust.
+
+### Public-edge hardening for the built-in health server
+
+The built-in health server is intended for private network boundaries and
+internal monitoring. It is not a hardened public-edge gateway.
+
+## Backpressure and buffering
+
+`Backpressure.adaptive(...)` monitors writer flush latency and checkpoint save
+latency to tune in-flight limits. This is a throughput control mechanism only.
+
+It does not relax:
+
+- source-order guarantees
+- checkpoint gating
+- sink failure policy
+- DLQ semantics
 
 ## When this page changes
 

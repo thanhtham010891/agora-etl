@@ -135,21 +135,55 @@ class JsonLinesSource(FileSource[T], Generic[T]):
     async def stream_batches(self) -> AsyncIterator[list[T]]:
         """Yield ``list[T]`` batches for the batch execution lane.
 
-        Reuses the per-record parse path (``stream_sync_batches``) and groups
-        records into lists of ``emit_batch_size``. Enabled via ``emit_batches=True``.
+        Parses directly into ``emit_batch_size`` lists so the batch lane does
+        not pay per-record generator yield/resume overhead before regrouping.
+        Enabled via ``emit_batches=True``.
         """
-        batch: list[T] = []
-        batches_emitted = 0
-        for record in self.stream_sync_batches():
-            batch.append(record)
-            if len(batch) >= self._emit_batch_size:
+        self._record_error_count = 0
+        self._record_drop_count = 0
+
+        with open(self._path, encoding=self._encoding) as file_obj:
+            line_number = 0
+            batches_emitted = 0
+            batch: list[T] = []
+
+            for line in file_obj:
+                line_number += 1
+                if line_number <= self._resume_line_number:
+                    continue
+                self._last_line_number = line_number
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed = _json_lib.loads(stripped)
+                    record = self._row_mapper(parsed)
+                except Exception as exc:
+                    self._record_error_count += 1
+                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                        self._record_drop_count += 1
+                        continue
+                    raise SourceRecordError(
+                        exc,
+                        record=stripped,
+                        checkpoint=self.current_checkpoint(),
+                        source=self.source_name,
+                    ) from exc
+
+                if record is None:
+                    self._record_drop_count += 1
+                    continue
+
+                batch.append(record)
+                if len(batch) >= self._emit_batch_size:
+                    yield batch
+                    batch = []
+                    batches_emitted += 1
+                    if batches_emitted % 4 == 0:
+                        await asyncio.sleep(0)
+
+            if batch:
                 yield batch
-                batch = []
-                batches_emitted += 1
-                if batches_emitted % 4 == 0:
-                    await asyncio.sleep(0)
-        if batch:
-            yield batch
 
     async def stream(self) -> AsyncIterator[T]:  # type: ignore[override]
         """Stream records synchronously in the event loop thread.

@@ -1,5 +1,7 @@
 # Kafka Plugins
 
+_When to read this: your pipeline boundary is Kafka topics and partitions rather than files or direct database reads._
+
 Use the Kafka family when your pipeline lives on topics, partitions, and
 consumer groups rather than on files or direct database reads.
 

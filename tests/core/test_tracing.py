@@ -30,6 +30,23 @@ class _CheckpointedSource(BaseSource[dict[str, int]]):
             yield record
 
 
+class _ArrowBatchSource(BaseSource[dict[str, int]]):
+    source_name = "arrow_batch"
+    supports_batch_emit = True
+    emits_arrow_batches = True
+
+    def __init__(self, rows: list[dict[str, int]]) -> None:
+        self._rows = rows
+
+    async def stream_batches(self):
+        pa = pytest.importorskip("pyarrow")
+        yield pa.RecordBatch.from_pylist(self._rows)
+
+    async def stream(self):
+        for row in self._rows:
+            yield row
+
+
 class _TagMiddleware(Middleware[dict[str, int], dict[str, int]]):
     name = "tag"
 
@@ -76,6 +93,25 @@ class _CollectDLQSink:
         return None
 
 
+class _ArrowCollectSink:
+    sink_name = "arrow_collect"
+
+    def __init__(self) -> None:
+        self.batches = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write_arrow_batch(self, batch) -> None:
+        self.batches.append(batch)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
 def _span_by_name(tracer: InMemoryTracer, name: str):
     return [span for span in tracer.spans if span.name == name]
 
@@ -105,11 +141,21 @@ async def test_pipeline_tracing_captures_core_runtime_spans() -> None:
     pipeline_span = _span_by_name(tracer, "pipeline.run")[0]
     assert pipeline_span.attributes["pipeline_id"] == "checkpointed"
     assert pipeline_span.attributes["run_id"] == "trace-run"
+    assert pipeline_span.attributes["planned_lane"] == "linear"
+    assert pipeline_span.attributes["direct_flush_eligible"] is False
+    assert pipeline_span.attributes["arrow_fast_path_eligible"] is False
+    assert pipeline_span.attributes["execution_lane"] == "linear"
+    assert pipeline_span.attributes["direct_flush_active"] is False
     assert pipeline_span.ended is True
 
     source_span = _span_by_name(tracer, "source.stream")[0]
     assert source_span.parent_name == "pipeline.run"
     assert source_span.attributes["source"] == "checkpointed"
+    assert source_span.attributes["lane"] == "linear"
+    assert source_span.attributes["batch_source"] is False
+    assert source_span.attributes["buffered_stage_count"] == 0
+    assert source_span.attributes["direct_flush_eligible"] is False
+    assert source_span.attributes["arrow_fast_path_eligible"] is False
 
     middleware_span = _span_by_name(tracer, "middleware.process")[0]
     assert middleware_span.parent_name == "source.stream"
@@ -169,6 +215,47 @@ async def test_pipeline_tracing_records_writer_failures_and_dlq_writes() -> None
     assert dlq_span.attributes["stage"] == "sink_write"
     assert dlq_span.attributes["sink"] == "collect_dlq"
     assert dlq_span.parent_name == "source.stream"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_tracing_captures_arrow_fast_path_metadata() -> None:
+    tracer = InMemoryTracer()
+    sink = _ArrowCollectSink()
+
+    pa = pytest.importorskip("pyarrow")
+
+    from agora import ArrowMapMiddleware
+
+    summary = await (
+        Pipeline(_ArrowBatchSource([{"id": 1}, {"id": 2}]))
+        .pipe(ArrowMapMiddleware(lambda batch: batch))
+        .build(
+            sink,  # type: ignore[arg-type]
+            config=DeliveryConfig(
+                tracer=tracer,
+            ),
+        )
+        .run(run_id="trace-arrow")
+    )
+
+    assert summary.records_written == 2
+    assert len(sink.batches) == 1
+    assert isinstance(sink.batches[0], pa.RecordBatch)
+
+    pipeline_span = _span_by_name(tracer, "pipeline.run")[0]
+    assert pipeline_span.attributes["planned_lane"] == "batch"
+    assert pipeline_span.attributes["batch_source"] is True
+    assert pipeline_span.attributes["arrow_fast_path_eligible"] is True
+    assert pipeline_span.attributes["arrow_chain_eligible"] is True
+    assert pipeline_span.attributes["execution_lane"] == "batch"
+    assert pipeline_span.attributes["arrow_fast_path_active"] is True
+    assert pipeline_span.attributes["arrow_chain_active"] is True
+
+    source_span = _span_by_name(tracer, "source.stream")[0]
+    assert source_span.attributes["lane"] == "batch"
+    assert source_span.attributes["batch_source"] is True
+    assert source_span.attributes["arrow_fast_path_eligible"] is True
+    assert source_span.attributes["arrow_chain_eligible"] is True
 
 
 @pytest.mark.asyncio

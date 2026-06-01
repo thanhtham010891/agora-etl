@@ -44,6 +44,10 @@ class RuntimeRunStats:
     """Observability snapshot derived from pipeline runtime metrics."""
 
     total_source_prefetch_block_count: int = 0
+    total_rust_prefetch_runs: int = 0
+    total_rust_prefetch_wait_count: int = 0
+    total_rust_prefetch_batch_drain_count: int = 0
+    total_rust_prefetch_push_batch_count: int = 0
     total_checkpoint_save_count: int = 0
     total_checkpoint_failure_count: int = 0
     total_dlq_failure_count: int = 0
@@ -55,6 +59,10 @@ class RuntimeRunStats:
     def absorb(self, runtime: RuntimeMetrics) -> None:
         """Merge one completed run's runtime metrics into cumulative stats."""
         self.total_source_prefetch_block_count += runtime.source_prefetch_block_count
+        self.total_rust_prefetch_runs += int(runtime.rust_prefetch_active)
+        self.total_rust_prefetch_wait_count += runtime.rust_prefetch_wait_count
+        self.total_rust_prefetch_batch_drain_count += runtime.rust_prefetch_batch_drain_count
+        self.total_rust_prefetch_push_batch_count += runtime.rust_prefetch_push_batch_count
         self.total_checkpoint_save_count += runtime.checkpoint_save_count
         self.total_checkpoint_failure_count += runtime.checkpoint_failure_count
         self.total_dlq_failure_count += runtime.dlq_failure_count
@@ -66,6 +74,10 @@ class RuntimeRunStats:
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "total_source_prefetch_block_count": self.total_source_prefetch_block_count,
+            "total_rust_prefetch_runs": self.total_rust_prefetch_runs,
+            "total_rust_prefetch_wait_count": self.total_rust_prefetch_wait_count,
+            "total_rust_prefetch_batch_drain_count": self.total_rust_prefetch_batch_drain_count,
+            "total_rust_prefetch_push_batch_count": self.total_rust_prefetch_push_batch_count,
             "total_checkpoint_save_count": self.total_checkpoint_save_count,
             "total_checkpoint_failure_count": self.total_checkpoint_failure_count,
             "total_dlq_failure_count": self.total_dlq_failure_count,

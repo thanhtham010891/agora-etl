@@ -5,6 +5,7 @@ Tests for the core pipeline builder and BoundPipeline runner.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -17,6 +18,7 @@ from agora import (
     SinkFailurePolicy,
 )
 from agora.core.middleware import Middleware
+from agora.core.runtime import _buffered, _source_adapter
 from agora.core.source import BaseSource
 from agora.sinks.io.stdout import StdoutSink
 
@@ -355,6 +357,173 @@ async def test_safe_prefetch_keeps_runner_bounded_while_preserving_order():
 
 
 @pytest.mark.asyncio
+async def test_buffered_prefetch_source_without_rust_capability_uses_python_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
+
+    source = PrefetchSafeSource(count=6)
+    sink = CollectSink()
+
+    summary = await (
+        Pipeline(source).pipe(BufferedPassThroughMiddleware(batch_size=2)).build(sink).run()
+    )
+
+    assert summary.records_consumed == 6
+    assert summary.records_written == 6
+    assert sink.records == [0, 1, 2, 3, 4, 5]
+    assert summary.runtime.source_prefetch_enabled is True
+    assert summary.runtime.source_prefetch_limit == 2
+    assert summary.runtime.execution_lane == "buffered"
+    assert summary.runtime.rust_prefetch_active is False
+
+
+@pytest.mark.asyncio
+async def test_buffered_rust_prefetch_uses_blocking_wait_and_batch_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    class _FakeRecordBuffer:
+        instances: ClassVar[list[_FakeRecordBuffer]] = []
+
+        def __init__(self, capacity: int) -> None:
+            self.capacity = capacity
+            self._items: list[object] = []
+            self._closed = False
+            self._cancelled = False
+            self._cond = threading.Condition()
+            self.push_batch_calls: list[int] = []
+            self.wait_calls: list[int] = []
+            self.pop_batch_calls: list[int] = []
+            self.try_pop_calls = 0
+            type(self).instances.append(self)
+
+        def push(self, item: object) -> bool:
+            with self._cond:
+                while (
+                    len(self._items) >= self.capacity and not self._closed and not self._cancelled
+                ):
+                    self._cond.wait(timeout=0.05)
+                if self._cancelled:
+                    raise RuntimeError("cancelled")
+                if self._closed:
+                    return False
+                self._items.append(item)
+                self._cond.notify_all()
+                return True
+
+        def push_batch(self, items: list[object]) -> int:
+            self.push_batch_calls.append(len(items))
+            pushed = 0
+            for item in items:
+                if not self.push(item):
+                    return pushed
+                pushed += 1
+            return pushed
+
+        def wait_for_item(self, timeout_ms: int) -> bool:
+            with self._cond:
+                self.wait_calls.append(timeout_ms)
+                if not self._items and not self._closed and not self._cancelled:
+                    self._cond.wait(timeout=timeout_ms / 1000)
+                if self._cancelled:
+                    raise RuntimeError("cancelled")
+                return bool(self._items)
+
+        def pop_batch(self, max_items: int) -> list[object]:
+            with self._cond:
+                self.pop_batch_calls.append(max_items)
+                n = min(max_items, len(self._items))
+                if n == 0:
+                    return []
+                batch = list(self._items[:n])
+                del self._items[:n]
+                self._cond.notify_all()
+                return batch
+
+        def try_pop(self) -> object | None:
+            self.try_pop_calls += 1
+            raise AssertionError("Prefetch v2 should drain via pop_batch(), not try_pop().")
+
+        def close(self) -> None:
+            with self._cond:
+                self._closed = True
+                self._cond.notify_all()
+
+        def cancel(self) -> None:
+            with self._cond:
+                self._cancelled = True
+                self._cond.notify_all()
+
+        def size(self) -> int:
+            with self._cond:
+                return len(self._items)
+
+        def is_done(self) -> bool:
+            with self._cond:
+                return self._closed and not self._items
+
+    class _RustPrefetchSource(BaseSource[int]):
+        source_name = "rust_prefetch_test"
+        supports_prefetch = True
+        supports_rust_prefetch = True
+        prefetch_limit = 2
+
+        async def stream(self):
+            for value in range(6):
+                yield value
+
+        def stream_sync_batches(self):
+            yield from range(6)
+
+    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
+    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+    _FakeRecordBuffer.instances.clear()
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    adapter = _source_adapter.SourceRuntimeAdapter(
+        source=_RustPrefetchSource(),
+        has_buffered_stages=True,
+    )
+    records = [record.raw async for record in adapter.iter_source_records(ctx)]
+
+    assert records == [0, 1, 2, 3, 4, 5]
+    assert ctx.metrics.runtime.source_prefetch_enabled is True
+    assert ctx.metrics.runtime.source_prefetch_limit == 2
+    assert ctx.metrics.runtime.source_prefetch_max_depth <= 2
+    assert ctx.metrics.runtime.rust_prefetch_active is True
+    assert ctx.metrics.runtime.rust_prefetch_wait_count >= 1
+    assert ctx.metrics.runtime.rust_prefetch_batch_drain_count >= 1
+    assert ctx.metrics.runtime.rust_prefetch_push_batch_count >= 1
+
+    assert len(_FakeRecordBuffer.instances) == 1
+    fake_buffer = _FakeRecordBuffer.instances[0]
+    assert fake_buffer.push_batch_calls, "Rust prefetch producer should batch pushes."
+    assert fake_buffer.wait_calls, "Rust prefetch should block via wait_for_item() when empty."
+    assert fake_buffer.pop_batch_calls, "Rust prefetch should drain via pop_batch()."
+    assert fake_buffer.try_pop_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_source_delivery_success_hook_runs_after_successful_write() -> None:
     acknowledged: list[int] = []
     sink = CollectSink()
@@ -515,6 +684,78 @@ async def test_writer_batch_size_preserves_delivery_success_hooks_with_batch_sin
     assert summary.records_written == 4
     assert sink.records == [1, 2, 3, 4]
     assert acknowledged == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_writer_batch_size_direct_flush_preserves_delivery_success_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeLinearBatchBuffer:
+        instances: ClassVar[list[_FakeLinearBatchBuffer]] = []
+
+        def __init__(self, batch_size: int, metrics_flush_interval: int) -> None:
+            self.batch_size = batch_size
+            self.metrics_flush_interval = metrics_flush_interval
+            self.pending: list[tuple[object, object, object, object]] = []
+            self.take_flush_batch_calls = 0
+            self.take_batch_calls = 0
+            type(self).instances.append(self)
+
+        def push(self, processed, raw, checkpoint, on_success):
+            self.pending.append((processed, raw, checkpoint, on_success))
+            return len(self.pending) >= self.batch_size
+
+        def take_flush_batch(self):
+            self.take_flush_batch_calls += 1
+            batch = list(self.pending)
+            self.pending.clear()
+            processed = [item[0] for item in batch]
+            raw = [item[1] for item in batch]
+            checkpoints = [item[2] for item in batch]
+            on_successes = [item[3] for item in batch]
+            return processed, raw, checkpoints, on_successes
+
+        def take_batch(self):
+            self.take_batch_calls += 1
+            batch = list(self.pending)
+            self.pending.clear()
+            return batch
+
+        def len(self):
+            return len(self.pending)
+
+        def inc_consumed(self, source_name: str) -> bool:
+            del source_name
+            return False
+
+        def flush_metrics(self, metrics) -> None:
+            del metrics
+
+        def flush_metrics_final(self, metrics) -> None:
+            del metrics
+
+    monkeypatch.setattr(_buffered, "_RUST_AVAILABLE", True)
+    monkeypatch.setattr(_buffered, "LinearBatchBuffer", _FakeLinearBatchBuffer)
+    _FakeLinearBatchBuffer.instances.clear()
+
+    acknowledged: list[int] = []
+    sink = BatchCollectSink()
+
+    summary = await (
+        Pipeline(HookTrackingSource([1, 2, 3, 4], acknowledged))
+        .build(sink, config=DeliveryConfig(batch_size=2))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 4
+    assert sink.records == [1, 2, 3, 4]
+    assert acknowledged == [1, 2, 3, 4]
+    assert len(_FakeLinearBatchBuffer.instances) == 1
+    fake_buf = _FakeLinearBatchBuffer.instances[0]
+    assert summary.runtime.execution_lane == "linear"
+    assert summary.runtime.direct_flush_active is True
+    assert fake_buf.take_flush_batch_calls == 2
+    assert fake_buf.take_batch_calls == 0
 
 
 @pytest.mark.asyncio

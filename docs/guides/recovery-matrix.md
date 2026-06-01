@@ -133,4 +133,6 @@ class MySource(BaseSource[MyRecord]):
             self._cursor = checkpoint.value.get("cursor")
 ```
 
-Then add a row to this matrix in your fork or PR. The matrix is the public source of truth; if a source resumes but is not listed here, builders cannot be expected to know about it.
+If you add resume support to a custom source in your own project, document the
+resume key and granularity alongside the source. Builders need that contract in
+writing to operate the pipeline safely.

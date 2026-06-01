@@ -1,5 +1,7 @@
 # Architecture
 
+_When to read this: you want the mental model behind Agora's runtime pieces, lane selection, and how records move through the system._
+
 ## The five components
 
 Every pipeline is composed of five parts. Understanding what each one owns makes the rest of the runtime predictable.
@@ -13,6 +15,9 @@ Every pipeline is composed of five parts. Understanding what each one owns makes
 **DLQSink** captures failed records. A DLQ record preserves the original payload, the processed payload (if the failure happened at the sink), the pipeline and run IDs, the error type and message, and the source checkpoint at the time of failure. Failed records can be replayed with `agora dlq replay`.
 
 **CheckpointStore** persists the source's position so a pipeline can resume after a restart. The runtime calls `checkpoint_store.save()` every `checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)` is called before streaming begins. Not all sources support checkpointing — see [Sources](sources.md) for which ones do.
+
+For the exact hook order of startup, streaming, and shutdown, see
+[Lifecycle](guides/lifecycle.md).
 
 ## Execution lanes
 
@@ -38,7 +43,10 @@ source.stream()
 
 A submit-capable middleware with `min_concurrency == 1` runs on the linear lane — there is no concurrency benefit to pay the per-record task overhead for.
 
-The key point: buffered mode increases throughput for slow async stages (LLM calls, external APIs) without changing the ordering or failure semantics. Output order is still source order. A sink failure or cancellation still aborts pending buffered work rather than committing later records out of order.
+The key point: buffered mode helps when one middleware stage is slow and
+concurrent, but it does not change the ordering or failure semantics. Output
+order is still source order. A sink failure or cancellation still aborts
+pending buffered work rather than committing later records out of order.
 
 **Batch lane** activates when the source sets `supports_batch_emit = True` (e.g. `CsvSource(emit_batches=True)`, `ArrowCsvSource`, `ParquetSource(use_arrow_batches=True)`). The runtime calls `source.stream_batches()` instead of `stream()` and processes whole batches at once:
 
@@ -56,7 +64,35 @@ source.stream_batches()          # yields pa.RecordBatch
   → sink.write_arrow_batch()     # zero Python object allocation per row
 ```
 
-Measured throughput: ~1.2M r/s (CSV→Parquet with ArrowMap+Filter) vs ~110k r/s for the row-path baseline. If any stage is a regular `Middleware` or `BatchMiddleware`, the runtime falls back to `to_pylist()` and the Arrow advantage is lost.
+If any stage is a regular `Middleware` or `BatchMiddleware`, the runtime falls
+back to `to_pylist()` before that stage. In practice, that means an Arrow
+source alone is not enough to keep the whole pipeline columnar.
+
+## How To Predict The Selected Lane
+
+Use this as the quick mental model:
+
+| Source shape | Middleware chain | Sink shape | Selected lane | Fast path notes |
+| --- | --- | --- | --- | --- |
+| `stream()` only | regular middleware or no middleware | any sink | `linear` | default path |
+| `stream()` only | any stage with `submit()` and `min_concurrency > 1` | any sink | `buffered` | preserves source order while running the buffered stage concurrently |
+| `stream_batches()` via `supports_batch_emit=True` | regular `BatchMiddleware` or no middleware | batch-writable sink | `batch` | avoids per-record runtime orchestration |
+| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | Arrow-native sink | `batch` + Arrow fast path | `arrow_fast_path_active=true`, `arrow_chain_active=true` |
+| Arrow batch source (`emits_arrow_batches=True`) | mixed Arrow + regular middleware | any sink | `batch` | falls back to `to_pylist()` before the regular stage |
+| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | non-Arrow sink | `batch` | Arrow source still helps read-side throughput, but write path materialises rows |
+
+To confirm the decision at runtime, inspect:
+
+- `summary.runtime.execution_lane`
+- `summary.runtime.direct_flush_active`
+- `summary.runtime.arrow_fast_path_active`
+- `summary.runtime.arrow_chain_active`
+
+If tracing is enabled, the same decision appears in span attributes:
+
+- `pipeline.run`: `planned_lane`, `direct_flush_eligible`,
+  `arrow_fast_path_eligible`, `arrow_chain_eligible`
+- `source.stream`: `lane`, `batch_source`, `buffered_stage_count`
 
 ## Runtime guarantees
 
@@ -91,6 +127,9 @@ Checkpoints, DLQ records, and the HTTP response cache all use the same `StateBac
 | `SQLiteBackend` | Default for local and single-process deployments |
 
 Third-party backends (Redis, Postgres) are available as separate packages under `agora-etl-plugins`.
+
+For direct use of `StateBackend`, `TTLKeyValueStore`, and `MembershipKeyStore`,
+see [State](state.md).
 
 ## Tracing
 

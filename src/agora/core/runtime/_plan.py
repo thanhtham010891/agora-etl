@@ -84,7 +84,7 @@ def _direct_flush_eligible(
     writer: Writer[Any],
     writer_batch_size: int,
 ) -> bool:
-    if writer_batch_size <= 1 or isinstance(source, DeliveryHookSource):
+    if writer_batch_size <= 1:
         return False
     writer_caps = getattr(writer, "_sink_batch_writable", None)
     return bool(writer_caps is not None and len(writer_caps) == 1 and writer_caps[0])

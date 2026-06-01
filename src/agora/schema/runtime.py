@@ -40,6 +40,7 @@ class SchemaProcessor(Generic[T]):
         self._current_schema: Schema | None = None
         self._pending_error: SchemaEvolutionError | None = None
         self._metrics = SchemaMetrics()
+        self._inferrer = SchemaInferrer(table=table)  # reused across records
 
     @property
     def current_schema(self) -> Schema | None:
@@ -119,9 +120,9 @@ class SchemaProcessor(Generic[T]):
         )
 
     def _infer_record_schema(self, record: T) -> Schema:
-        inferrer = SchemaInferrer(table=self._table)
-        inferrer.observe(record)
-        return inferrer.finalize()
+        self._inferrer.reset()
+        self._inferrer.observe(record)
+        return self._inferrer.finalize()
 
 
 def _initial_schema_changes(schema: Schema) -> list[SchemaChange]:

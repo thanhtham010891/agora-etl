@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -11,6 +12,31 @@ from agora.core.errors import ConfigError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+# Allowlist: only dotted Python identifiers optionally followed by :attr.
+# Blocks absolute paths (/etc/...), shell metacharacters, and traversal (../).
+_IMPORT_PATH_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*"
+    r"(:[A-Za-z_][A-Za-z0-9_]*)?$"
+)
+
+
+def validate_import_path(value: str, *, field_label: str = "import") -> str:
+    """Validate format of a declarative import path from a TOML config.
+
+    Only checks that the path is a valid dotted Python identifier with an
+    optional ':attribute' suffix. Namespace allowlist enforcement happens at
+    the actual import execution layer (component_factory), not here.
+
+    Raises ConfigError if the path does not match the expected format.
+    """
+    value = value.strip()
+    if not _IMPORT_PATH_RE.match(value):
+        raise ConfigError(
+            f"Invalid {field_label} path {value!r}: must be a dotted Python identifier "
+            "with an optional ':attribute' suffix (e.g. 'agora.sinks.file:FileSink')."
+        )
+    return value
 
 
 class ImportRefConfig(BaseModel):
@@ -26,6 +52,10 @@ class ImportRefConfig(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("Import reference cannot be empty.")
+        try:
+            validate_import_path(value, field_label="import")
+        except ConfigError as exc:
+            raise ValueError(str(exc)) from exc
         return value
 
 
@@ -429,9 +459,11 @@ __all__ = [
     "PipelineConfig",
     "ResolvedPipelineConfig",
     "TracingConfig",
+    "collect_import_references",
     "deep_merge",
     "describe_pipeline_config",
     "resolve_config_document",
     "validate_config_document",
+    "validate_import_path",
     "validate_pipeline_config",
 ]

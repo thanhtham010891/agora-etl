@@ -1,5 +1,7 @@
 # Plugins
 
+_When to read this: you want to understand which capabilities live in the official plugin ecosystem and when a plugin is the right boundary instead of core Agora._
+
 Agora plugins extend the core runtime with integrations that are better kept
 outside `agora-etl` itself.
 

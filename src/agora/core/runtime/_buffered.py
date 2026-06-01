@@ -20,9 +20,21 @@ from agora.core.runtime._source_adapter import SourceRuntimeAdapter
 try:
     from agora_rs import LinearBatchBuffer
 
-    _RUST_AVAILABLE = True
+    try:
+        _test = LinearBatchBuffer(1, 1)
+        del _test
+        _RUST_AVAILABLE = True
+    except Exception:
+        _RUST_AVAILABLE = False
 except ImportError:
     _RUST_AVAILABLE = False
+
+    class LinearBatchBuffer:  # type: ignore[no-redef]
+        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
+
+        def __init__(self, batch_size: int, metrics_flush_interval: int) -> None:
+            raise ImportError("agora-etl-rs is not installed.")
+
 
 if TYPE_CHECKING:
     from agora.core.context import PipelineContext
@@ -244,6 +256,7 @@ class ExecutionCoordinator:
         checkpoint_state: CheckpointState,
         max_records: int | None,
     ) -> None:
+        ctx.metrics.runtime.execution_lane = self.plan.lane.value
         if self.plan.lane == RuntimeLane.BATCH:
             await self._batch_lane.run(ctx, checkpoint_state, max_records)
             return

@@ -1,5 +1,7 @@
 # CLI Reference
 
+_When to read this: you want the exact command-line entry points for creating projects, running pipelines, operating workers, and replaying DLQ records._
+
 ## agora new
 
 Scaffold a new project:

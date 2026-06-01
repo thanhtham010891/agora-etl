@@ -1,6 +1,6 @@
 # Composing Pipelines
 
-**When to read this:** you understand the basics and want to know how to wire up fan-out, routing, batching, and backpressure correctly.
+_When to read this: you understand the basics and want to know how to wire up fan-out, routing, batching, and backpressure correctly._
 
 ## The builder is immutable
 
@@ -25,7 +25,7 @@ The chain is: `source → middlewares → writer (sink/fan-out/router)`. Nothing
 `.pipe(middleware)` appends any `Middleware` subclass to the chain. `.filter(predicate)` is shorthand for `.pipe(FilterMiddleware(predicate))` — use it when you only need a boolean gate and don't want to write a class.
 
 ```python
-from agora.core.middleware import MapMiddleware
+from agora import MapMiddleware
 
 pipeline = (
     Pipeline(source)
@@ -95,7 +95,7 @@ Without backpressure, the source can produce records faster than the sink can co
 
 ```python
 from agora import DeliveryConfig
-from agora.core.types import Backpressure
+from agora import Backpressure
 
 bound = (
     Pipeline(source)
@@ -157,7 +157,7 @@ A failure in one sink does not prevent writes to the others — each sink's resu
 Use `.route()` when different records belong in different destinations. The router evaluates predicates in order and sends each record to the first match:
 
 ```python
-from agora.core.sink import SinkRouter
+from agora import SinkRouter
 
 router = (
     SinkRouter()

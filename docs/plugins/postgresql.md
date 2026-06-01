@@ -1,5 +1,7 @@
 # PostgreSQL Plugins
 
+_When to read this: you need PostgreSQL as a source, sink, DLQ backend, or schema-aware operational store in the pipeline._
+
 Use the PostgreSQL family when the pipeline needs to read from relational SQL,
 write into operational tables, or keep replay state in a database operators
 already manage.

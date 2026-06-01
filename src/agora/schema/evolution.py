@@ -53,24 +53,14 @@ class SchemaEvolution:
     def merge(self, old: Schema, new: Schema) -> Schema:
         """Merge old and new schemas according to contract.
 
-        Parameters
-        ----------
-        old:
-            Existing schema.
-        new:
-            Newly inferred schema.
-
-        Returns
-        -------
-        Schema
-            Evolved schema.
-
-        Raises
-        ------
-        SchemaEvolutionError
-            If evolution violates contract (FREEZE mode).
+        Short-circuits when hashes match — no column work needed for the
+        common case where the record shape hasn't changed.
         """
         self.changes.clear()
+
+        # Fast path: identical schemas — nothing to do.
+        if old.hash == new.hash:
+            return old
 
         # Start with old schema columns
         merged_columns: dict[str, Column] = {}

@@ -1,5 +1,7 @@
 # Sources
 
+_When to read this: you need to choose or build the upstream side of a pipeline, especially around batching, Arrow, and resume support._
+
 Sources emit records via an async generator. The pipeline consumes them one at a time.
 
 ## Which source to use
@@ -37,7 +39,7 @@ Stream records from a JSONL (newline-delimited JSON) file. Uses stdlib `json` by
 
 ```python
 from agora.sources.file.jsonlines import JsonLinesSource
-from agora.core.types import SourceRecordFailurePolicy
+from agora import SourceRecordFailurePolicy
 
 source = JsonLinesSource(
     path="data/events.jsonl",
@@ -108,7 +110,7 @@ Arrow fast path. See [Batch execution lane](#batch-execution-lane).
 
 File sources can opt into the batch execution lane, which processes records in
 batches instead of one at a time — eliminating per-record runtime orchestration
-and measurably improving throughput (≈2× for CSV/JSONL on a null sink).
+when the source and middleware chain are naturally batch-oriented.
 
 | Source | Flag | Batch shape | row_mapper |
 |---|---|---|---|
@@ -132,7 +134,9 @@ dispatch, use `BatchMapMiddleware` / `BatchFilterMiddleware` (see
 
 ### ArrowCsvSource / ArrowJsonLinesSource
 
-Arrow-native file readers that emit `pa.RecordBatch` objects directly — no `row_mapper`, no per-row Python dict allocation. Use these when throughput matters and your downstream processing is vectorisable.
+Arrow-native file readers that emit `pa.RecordBatch` objects directly — no
+`row_mapper`, no per-row Python dict allocation. Use these when you want
+columnar processing and your downstream logic can stay Arrow-native.
 
 Requires: `pip install "agora-etl[file]"`
 
@@ -168,7 +172,10 @@ summary = await (
 )
 ```
 
-**Measured throughput** (100k rows, median 3 runs): ~1.2M r/s end-to-end with ParquetSink; ~4.8M r/s with a null Arrow sink. Compare to ~110k r/s for the row-path baseline.
+The important constraint is not just the source. To stay on the Arrow fast
+path, you also need Arrow-native middleware and an Arrow-native sink. If you
+insert a regular `MapMiddleware` or `FilterMiddleware`, the runtime materialises
+rows and continues on the batch lane without the fully columnar write path.
 
 **Constraints:**
 - `row_mapper` is not called — the batch is passed as-is to the middleware/sink.
@@ -181,8 +188,7 @@ summary = await (
 Abstract base for HTTP polling sources. Handles rate limiting, retries, circuit breaking, and response caching. Override `fetch_batch()` only — the base class owns the rest.
 
 ```python
-from agora.sources.http.http import HTTPSource, StopFetching
-from agora.sources._internal.circuit_breaker import CircuitBreakerConfig
+from agora.sources.http.http import HTTPSource, StopFetching, CircuitBreakerConfig
 
 class PostsSource(HTTPSource[Post]):
     source_name = "posts_api"
@@ -216,7 +222,7 @@ Available request methods: `self.get()`, `self.post()`. Both are rate-limited, r
 Subclass `BaseSource[T]` and implement `stream()`:
 
 ```python
-from agora.core.source import BaseSource, SourceRecordError
+from agora import BaseSource, SourceRecordError
 from collections.abc import AsyncGenerator
 
 class MySource(BaseSource[MyRecord]):

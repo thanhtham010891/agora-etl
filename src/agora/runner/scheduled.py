@@ -271,9 +271,41 @@ class ScheduledPipeline:
         return self._schedule
 
     @property
+    def max_records(self) -> int | None:
+        return self._max_records
+
+    @property
+    def max_consecutive_errors(self) -> int:
+        return self._max_errors
+
+    @property
+    def backoff_policy(self) -> BackoffPolicy:
+        return self._backoff_policy
+
+    @property
+    def pre_run_hook(self) -> Callable[[], Awaitable[bool]] | None:
+        return self._pre_run_hook
+
+    @property
+    def on_run_complete(self) -> Callable[[RunRecord], Awaitable[None]] | None:
+        return self._on_run_complete
+
+    @property
+    def observers(self) -> list[Callable[[RunRecord], Awaitable[None]]]:
+        return self._observers
+
+    @property
+    def state(self) -> ScheduledPipelineState:
+        return self._state
+
+    @property
     def run_count(self) -> int:
         return self._state.run_number
 
     @property
     def last_run(self) -> RunRecord | None:
         return self._state.last_run
+
+    async def build(self) -> BoundPipeline[Any]:
+        """Invoke the factory to build a fresh pipeline for this run."""
+        return await self._factory()

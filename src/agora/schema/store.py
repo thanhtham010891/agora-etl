@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agora.schema.types import Schema
+from agora.schema.types import Schema, SchemaContract
 
 if TYPE_CHECKING:
     from agora.state.backend import StateBackend
@@ -69,53 +69,30 @@ class BackendSchemaStore:
     ----------
     backend:
         State backend for storage.
-
-    Example
-    -------
-    >>> from agora.state import SQLiteBackend
-    >>> store = BackendSchemaStore(SQLiteBackend(".agora_schemas.db"))
-    >>> store.save("pipeline1", "users", schema)
-    >>> loaded = store.load("pipeline1", "users")
+    contract:
+        Schema contract — when FREEZE, hash mismatches on load raise ValueError
+        instead of logging a warning.
     """
 
-    def __init__(self, backend: StateBackend) -> None:
-        """Initialize store with backend.
-
-        Parameters
-        ----------
-        backend:
-            State backend for storage.
-        """
+    def __init__(
+        self,
+        backend: StateBackend,
+        contract: SchemaContract = SchemaContract.EVOLVE,
+    ) -> None:
         self._backend = backend
+        self._strict_hash = contract == SchemaContract.FREEZE
 
     def load(self, pipeline_id: str, table: str) -> Schema | None:
-        """Load schema from backend.
-
-        Parameters
-        ----------
-        pipeline_id:
-            Pipeline identifier.
-        table:
-            Table name.
-
-        Returns
-        -------
-        Schema | None
-            Stored schema, or None if not found.
-        """
         key = self._make_key(pipeline_id, table)
         stored = self._backend.get(key)
         if stored is None:
             return None
 
-        # Unwrap StoredValue
         value = stored.value
-
-        # Deserialize from dict
         if not isinstance(value, dict):
             return None
 
-        return Schema.from_dict(value)
+        return Schema.from_dict(value, strict_hash=self._strict_hash)
 
     def save(self, pipeline_id: str, table: str, schema: Schema) -> None:
         """Save schema to backend.

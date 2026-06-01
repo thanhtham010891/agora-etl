@@ -20,6 +20,12 @@ The fields that matter most:
 
 `by_middleware` — per-middleware breakdown. Each entry has `records_in`, `records_out`, `records_dropped`, `records_errored`, and `total_time_ms`. Use this to find which stage is dropping records or taking the most time.
 
+`runtime` — runtime-side pressure and execution signals. For Rust-prefetch
+pipelines, this now tells you whether the run actually used the Rust path
+(`rust_prefetch_active`) and how often that path had to wait, batch-drain, and
+batch-push records. It also tells you which execution lane actually ran
+(`execution_lane`) and whether direct flush or Arrow fast paths were active.
+
 ```python
 async def on_run_complete(record: RunRecord) -> None:
     if record.summary is None:
@@ -110,6 +116,53 @@ The three endpoints:
 }
 ```
 
+When a pipeline uses Rust-backed prefetch, the `runtime.last_run` block will
+include:
+
+- `rust_prefetch_active` — `true` when the run used the Rust prefetch path
+- `rust_prefetch_wait_count` — how many times the consumer had to block waiting
+  for the producer
+- `rust_prefetch_batch_drain_count` — how many non-empty batch drains the
+  consumer performed
+- `rust_prefetch_push_batch_count` — how many batches the producer pushed into
+  the Rust buffer
+
+If `source_prefetch_enabled` is `true` but `rust_prefetch_active` is `false`,
+the pipeline used the Python fallback prefetch path instead of the Rust one.
+
+The same `runtime.last_run` block also exposes execution-shape signals:
+
+- `execution_lane` — `"linear"`, `"buffered"`, or `"batch"` for the lane that
+  actually ran
+- `direct_flush_active` — `true` when the linear lane used the direct batched
+  flush path
+- `arrow_fast_path_active` — `true` when a batch source wrote Arrow batches
+  straight into an Arrow-native sink
+- `arrow_chain_active` — `true` when both the source/sink fast path and the
+  middleware chain stayed Arrow-native end to end
+
+This makes it easier to tell the difference between a planner capability and a
+runtime path that was truly exercised.
+
+If you also enable tracing, the `pipeline.run` span records the planned shape
+before execution starts:
+
+- `planned_lane`
+- `direct_flush_eligible`
+- `arrow_fast_path_eligible`
+- `arrow_chain_eligible`
+
+After the run completes, that same span is updated with the runtime outcome:
+
+- `execution_lane`
+- `direct_flush_active`
+- `arrow_fast_path_active`
+- `arrow_chain_active`
+- `rust_prefetch_active`
+
+That combination is useful when a pipeline was *eligible* for a fast path but
+did not actually take it during the run.
+
 `GET /metrics` — Prometheus text format. Wire this into your scrape config:
 
 ```yaml
@@ -162,8 +215,7 @@ Tracing gives you span-level visibility into what happens inside a pipeline run 
 `InMemoryTracer` records all spans in memory. Use it in tests and local debugging to inspect what the runtime did:
 
 ```python
-from agora import DeliveryConfig
-from agora.core.tracing import InMemoryTracer
+from agora import DeliveryConfig, InMemoryTracer
 
 tracer = InMemoryTracer()
 pipeline = (
@@ -181,8 +233,7 @@ for span in tracer.spans:
 `OpenTelemetryTracer` bridges into your existing OTel setup. It requires `opentelemetry-api` to be installed:
 
 ```python
-from agora import DeliveryConfig
-from agora.core.tracing import OpenTelemetryTracer
+from agora import DeliveryConfig, OpenTelemetryTracer
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor

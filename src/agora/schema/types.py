@@ -158,17 +158,31 @@ class Schema:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Schema:
-        """Deserialize from dict."""
+    def from_dict(cls, data: dict[str, Any], *, strict_hash: bool = False) -> Schema:
+        """Deserialize from dict.
+
+        Parameters
+        ----------
+        strict_hash:
+            When True, raise ``ValueError`` on hash mismatch instead of
+            logging a warning. Use for FREEZE-contract schemas where silent
+            drift is unacceptable.
+        """
         columns = {name: Column.from_dict(col_data) for name, col_data in data["columns"].items()}
         schema = cls(
             table=data["table"],
             columns=columns,
             version=data.get("version", 1),
         )
-        # Verify hash matches (detect corruption)
         stored_hash = data.get("hash", "")
         if stored_hash and stored_hash != schema.hash:
+            msg = (
+                f"Schema hash mismatch for table '{data['table']}': "
+                f"stored={stored_hash!r}, computed={schema.hash!r}. "
+                "The schema may be corrupted or tampered."
+            )
+            if strict_hash:
+                raise ValueError(msg)
             logger.warning(
                 "schema_hash_mismatch",
                 table=data["table"],

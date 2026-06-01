@@ -18,6 +18,7 @@ Public surface:
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
@@ -76,6 +77,38 @@ def is_batch_capable_source(source: object) -> TypeGuard[BatchableSource[Any]]:
 
 
 # ======================================================================
+# BatchProcessResult and BatchFailure
+# ======================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class BatchFailure:
+    """Carries a failed batch and the exception that caused the failure."""
+
+    batch: list[Any]
+    exception: Exception
+    middleware: str = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchProcessResult:
+    """Result of ``MiddlewareChain.process_batch()``.
+
+    ``results`` is a list of the same length as the input batch.
+    ``None`` entries are records that were dropped by a middleware.
+    ``failure`` is set when a ``BatchMiddleware`` raised — in that case
+    ``results`` is empty and the entire batch should be DLQ-routed.
+    """
+
+    results: list[Any | None] = field(default_factory=list)
+    failure: BatchFailure | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.failure is None
+
+
+# ======================================================================
 # BatchMiddleware ABC
 # ======================================================================
 
@@ -113,37 +146,75 @@ class BatchMiddleware(ABC, Generic[T, U]):
     async def on_stop(self, ctx: PipelineContext) -> None:
         """Called once after the pipeline finishes (or on error)."""
 
+    async def process(self, record: T, ctx: PipelineContext) -> U | None:
+        """Per-record fallback for linear lane (non-batch source).
 
-# ======================================================================
-# BatchProcessResult and BatchFailure
-# ======================================================================
+        Wraps the single record in a list, calls process_batch, and returns
+        the first result. This allows BatchMiddleware to work with any source,
+        not just batch-emit sources.
+        """
+        results = await self.process_batch([record], ctx)
+        return results[0] if results else None
 
+    async def on_error(self, record: T, exc: Exception, ctx: PipelineContext) -> None:
+        """Called when process() raises on the linear lane. Default: log and continue."""
+        import logstruct
 
-@dataclass(frozen=True, slots=True)
-class BatchFailure:
-    """Carries a failed batch and the exception that caused the failure."""
+        logstruct.getLogger(__name__).exception(
+            "batch_middleware_error",
+            middleware=self.name,
+            error=str(exc),
+        )
 
-    batch: list[Any]
-    exception: Exception
-    middleware: str = "unknown"
+    async def apply_in_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+        chain: Any,
+        idx: int,
+    ) -> BatchProcessResult | list[Any]:
+        """Double-dispatch hook: handle self in MiddlewareChain.process_batch().
 
+        Returns a BatchProcessResult on failure, or the updated current list on success.
+        """
+        non_none = [r for r in current if r is not None]
+        t0 = time.monotonic()
+        m_metrics = ctx.metrics.middleware(self.name)
+        m_metrics.records_in += len(current)
+        try:
+            with ctx.trace_span(
+                "middleware.process_batch",
+                middleware=self.name,
+                batch_size=len(non_none),
+            ):
+                batch_results = await self.process_batch(non_none, ctx)
+        except Exception as exc:
+            m_metrics.records_errored += len(non_none)
+            m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
+            ctx.log.exception(
+                "batch_middleware_error",
+                middleware=self.name,
+                batch_size=len(non_none),
+            )
+            return BatchProcessResult(
+                results=[],
+                failure=BatchFailure(batch=non_none, exception=exc, middleware=self.name),
+            )
+        finally:
+            m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
 
-@dataclass(frozen=True, slots=True)
-class BatchProcessResult:
-    """Result of ``MiddlewareChain.process_batch()``.
+        if len(batch_results) != len(non_none):
+            raise RuntimeError(
+                f"BatchMiddleware '{self.name}' returned {len(batch_results)} "
+                f"results for {len(non_none)} inputs — lengths must match."
+            )
 
-    ``results`` is a list of the same length as the input batch.
-    ``None`` entries are records that were dropped by a middleware.
-    ``failure`` is set when a ``BatchMiddleware`` raised — in that case
-    ``results`` is empty and the entire batch should be DLQ-routed.
-    """
-
-    results: list[Any | None] = field(default_factory=list)
-    failure: BatchFailure | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.failure is None
+        result_iter = iter(batch_results)
+        updated = [next(result_iter) if r is not None else None for r in current]
+        dropped = sum(1 for r in updated if r is None) - sum(1 for r in current if r is None)
+        m_metrics.records_dropped += max(0, dropped)
+        m_metrics.records_out += sum(1 for r in updated if r is not None)
+        return updated
 
 
 # ======================================================================
@@ -188,6 +259,16 @@ class ArrowBatchMiddleware(ABC):
         but process_range() may still call process(). Return the record unchanged.
         """
         return record
+
+    async def apply_in_batch(
+        self,
+        current: list[Any],
+        ctx: PipelineContext,
+        chain: Any,
+        idx: int,
+    ) -> BatchProcessResult | list[Any]:
+        """Double-dispatch hook: Arrow stages are skipped in mixed-list batch chains."""
+        return current
 
 
 def is_arrow_batch_middleware(obj: object) -> TypeGuard[ArrowBatchMiddleware]:

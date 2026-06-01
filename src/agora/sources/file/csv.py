@@ -137,7 +137,6 @@ class CsvSource(FileSource[T], Generic[T]):
                 if row_number <= self._resume_row_number:
                     continue
                 self._last_row_number = row_number
-                row = dict(row)
                 if self._skip_blank_lines and all(v == "" for v in row.values()):
                     continue
                 try:
@@ -163,23 +162,65 @@ class CsvSource(FileSource[T], Generic[T]):
     async def stream_batches(self) -> AsyncIterator[list[T]]:
         """Yield ``list[T]`` batches for the batch execution lane.
 
-        Reuses the per-record parse path (``stream_sync_batches``) and groups
-        records into lists of ``emit_batch_size``. Enabled via ``emit_batches=True``.
-        Yields control to the event loop periodically so other coroutines stay
-        responsive.
+        Parses directly into ``emit_batch_size`` lists so the batch lane does
+        not pay per-record generator yield/resume overhead before regrouping.
+        Enabled via ``emit_batches=True``. Yields control to the event loop
+        periodically so other coroutines stay responsive.
         """
-        batch: list[T] = []
-        batches_emitted = 0
-        for record in self.stream_sync_batches():
-            batch.append(record)
-            if len(batch) >= self._emit_batch_size:
+        import csv as _csv
+
+        self._record_error_count = 0
+        self._record_drop_count = 0
+
+        def _make_reader_with_header(f: TextIOWrapper) -> _csv.DictReader[str]:
+            return _csv.DictReader(f, delimiter=self._delimiter)
+
+        def _make_reader_no_header(f: TextIOWrapper) -> _csv.DictReader[str]:
+            return _csv.DictReader(f, fieldnames=self._fieldnames, delimiter=self._delimiter)
+
+        reader_factory = _make_reader_with_header if self._has_header else _make_reader_no_header
+
+        with open(self._path, encoding=self._encoding, newline="") as file_obj:
+            reader = reader_factory(file_obj)
+            row_number = 0
+            batches_emitted = 0
+            batch: list[T] = []
+
+            for row in reader:
+                row_number += 1
+                if row_number <= self._resume_row_number:
+                    continue
+                self._last_row_number = row_number
+                if self._skip_blank_lines and all(v == "" for v in row.values()):
+                    continue
+                try:
+                    record = self._row_mapper(row)
+                except Exception as exc:
+                    self._record_error_count += 1
+                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                        self._record_drop_count += 1
+                        continue
+                    raise SourceRecordError(
+                        exc,
+                        record=row,
+                        checkpoint=self.current_checkpoint(),
+                        source=self.source_name,
+                    ) from exc
+
+                if record is None:
+                    self._record_drop_count += 1
+                    continue
+
+                batch.append(record)
+                if len(batch) >= self._emit_batch_size:
+                    yield batch
+                    batch = []
+                    batches_emitted += 1
+                    if batches_emitted % 4 == 0:
+                        await asyncio.sleep(0)
+
+            if batch:
                 yield batch
-                batch = []
-                batches_emitted += 1
-                if batches_emitted % 4 == 0:
-                    await asyncio.sleep(0)
-        if batch:
-            yield batch
 
     async def stream(self) -> AsyncIterator[T]:  # type: ignore[override]
         """Stream records synchronously in the event loop thread.
@@ -219,7 +260,7 @@ class CsvSource(FileSource[T], Generic[T]):
                 row_number += 1
                 if row_number <= self._resume_row_number:
                     continue
-                batch.append((row_number, dict(row)))
+                batch.append((row_number, row))
                 if len(batch) >= self._batch_size:
                     break
             return batch, row_number

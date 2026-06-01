@@ -1,5 +1,7 @@
 # Distributed Coordination
 
+_When to read this: more than one worker instance may contend for the same scheduled pipeline and you need shared lease ownership._
+
 Use distributed coordination when more than one worker instance may try to run
 the same scheduled pipeline and you need shared lease ownership.
 

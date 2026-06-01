@@ -8,16 +8,39 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from agora.core.checkpoint import is_checkpoint_capable
-from agora.core.constants import DEFAULT_PREFETCH_LIMIT, PRODUCER_JOIN_TIMEOUT_S
+from agora.core.constants import (
+    DEFAULT_PREFETCH_LIMIT,
+    PRODUCER_JOIN_TIMEOUT_S,
+    RUST_PREFETCH_WAIT_TIMEOUT_MS,
+)
 from agora.core.runtime._delivery import SourceQueueError, SourceRecord
 from agora.core.source import DeliveryHookSource, prefetch_limit_for, source_runtime_metrics
 
 try:
     from agora_rs import MetricsAccumulator, RecordBuffer
 
-    _RUST_AVAILABLE = True
+    try:
+        _test_ma = MetricsAccumulator()
+        _test_rb = RecordBuffer(1)
+        del _test_ma, _test_rb
+        _RUST_AVAILABLE = True
+    except Exception:
+        _RUST_AVAILABLE = False
 except ImportError:
     _RUST_AVAILABLE = False
+
+    class RecordBuffer:  # type: ignore[no-redef]
+        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
+
+        def __init__(self, capacity: int) -> None:
+            raise ImportError("agora-etl-rs is not installed.")
+
+    class MetricsAccumulator:  # type: ignore[no-redef]
+        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
+
+        def __init__(self, flush_interval: int = 100) -> None:
+            raise ImportError("agora-etl-rs is not installed.")
+
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -50,15 +73,18 @@ class SourceRuntimeAdapter:
         checkpoint_capable = is_checkpoint_capable(self.source)
         has_delivery_hook = isinstance(self.source, DeliveryHookSource)
 
-        # Rust prefetch only for buffered pipelines — linear uses stream() directly.
-        use_rust = (
+        # Rust prefetch is an explicit source capability. Buffered pipelines may
+        # use it when the extension is installed, but async-only sources must
+        # stay on the Python queue path even if Rust is available globally.
+        use_rust_prefetch = (
             _RUST_AVAILABLE
             and getattr(self.source, "supports_rust_prefetch", False)
             and self.has_buffered_stages
         )
-        if use_rust:
+        if use_rust_prefetch:
             ctx.metrics.runtime.source_prefetch_enabled = True
             ctx.metrics.runtime.source_prefetch_limit = prefetch_limit or DEFAULT_PREFETCH_LIMIT
+            ctx.metrics.runtime.rust_prefetch_active = True
             ctx.log.info(
                 "pipeline_source_prefetch_enabled",
                 source=self.source.source_name,
@@ -93,7 +119,7 @@ class SourceRuntimeAdapter:
             prefetch_limit=prefetch_limit,
         )
         # Non-buffered pipelines with prefetch_limit > 0 use the Python path only.
-        if _RUST_AVAILABLE and self.has_buffered_stages:
+        if use_rust_prefetch:
             async for record in self._iter_prefetched_rust(ctx, prefetch_limit):
                 yield record
         else:
@@ -113,6 +139,18 @@ class SourceRuntimeAdapter:
         error_holder: list[Exception] = []
 
         def _producer() -> None:
+            pending_batch: list[SourceRecord] = []
+
+            def _flush_pending_batch() -> bool:
+                if not pending_batch:
+                    return True
+                pushed = buf.push_batch(pending_batch)
+                ctx.metrics.runtime.rust_prefetch_push_batch_count += 1
+                if pushed < len(pending_batch):
+                    return False
+                pending_batch.clear()
+                return True
+
             try:
                 if _stream_sync is not None:
                     for record in _stream_sync():
@@ -123,8 +161,11 @@ class SourceRuntimeAdapter:
                             if _has_delivery_hook
                             else None,
                         )
-                        if not buf.push(sr):
+                        pending_batch.append(sr)
+                        if len(pending_batch) >= prefetch_limit and not _flush_pending_batch():
                             break
+                    else:
+                        _flush_pending_batch()
                 else:
                     raise RuntimeError(
                         f"Source '{self.source.source_name}' uses Rust prefetch but does not "
@@ -144,23 +185,25 @@ class SourceRuntimeAdapter:
 
         try:
             while True:
-                item = buf.try_pop()
-                if item is not None:
+                batch = buf.pop_batch(prefetch_limit)
+                if batch:
+                    ctx.metrics.runtime.rust_prefetch_batch_drain_count += 1
                     ctx.metrics.runtime.source_prefetch_max_depth = max(
                         ctx.metrics.runtime.source_prefetch_max_depth,
-                        buf.size(),
+                        len(batch),
                     )
-                    yield cast("SourceRecord", item)
-                    while True:
-                        extra = buf.try_pop()
-                        if extra is None:
-                            break
-                        yield cast("SourceRecord", extra)
-                elif buf.is_done():
+                    for item in batch:
+                        yield cast("SourceRecord", item)
+                    continue
+
+                if buf.is_done():
                     break
-                else:
-                    ctx.metrics.runtime.source_prefetch_block_count += 1
-                    await asyncio.sleep(0)
+
+                ctx.metrics.runtime.source_prefetch_block_count += 1
+                ctx.metrics.runtime.rust_prefetch_wait_count += 1
+                ready = await asyncio.to_thread(buf.wait_for_item, RUST_PREFETCH_WAIT_TIMEOUT_MS)
+                if not ready and buf.is_done():
+                    break
         finally:
             buf.close()
             producer.join(timeout=PRODUCER_JOIN_TIMEOUT_S)

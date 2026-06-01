@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agora.core.runtime import (
-    CheckpointState,
     DeliveryEngine,
     ExecutionCoordinator,
     RecordDeliveryError,
     build_runtime_plan,
+    make_checkpoint_state,
 )
 from agora.core.session import PipelineLifecycleController, PipelineRunState
 from agora.core.source import SourceRecordError
@@ -52,7 +52,7 @@ class PipelineExecutor:
         state: PipelineRunState,
         execution: ExecutionCoordinator,
     ) -> None:
-        checkpoint_state = CheckpointState()
+        checkpoint_state = make_checkpoint_state()
 
         async with self._spec.source:
             with state.ctx.trace_span(
@@ -60,6 +60,11 @@ class PipelineExecutor:
                 source=self._spec.source.source_name,
                 buffered=execution.plan.uses_buffered_lane,
                 lane=execution.plan.lane,
+                batch_source=execution.plan.batch_source,
+                buffered_stage_count=len(execution.plan.buffered_stages),
+                direct_flush_eligible=execution.plan.writer.direct_flush_eligible,
+                arrow_fast_path_eligible=execution.plan.writer.arrow_fast_path,
+                arrow_chain_eligible=execution.plan.writer.arrow_chain,
             ):
                 await execution.run(
                     state.ctx,
@@ -148,7 +153,13 @@ class PipelineExecutor:
             pipeline_id=self._spec.pipeline_id,
             run_id=state.ctx.run_id,
             source=self._spec.source.source_name,
-        ):
+            planned_lane=plan.lane,
+            batch_source=plan.batch_source,
+            buffered_stage_count=len(plan.buffered_stages),
+            direct_flush_eligible=plan.writer.direct_flush_eligible,
+            arrow_fast_path_eligible=plan.writer.arrow_fast_path,
+            arrow_chain_eligible=plan.writer.arrow_chain,
+        ) as span:
             try:
                 await self._lifecycle.start_runtime(state)
                 await self._run_stream(state, execution)
@@ -163,6 +174,13 @@ class PipelineExecutor:
             finally:
                 shutdown_error = await self._lifecycle.shutdown_runtime(state)
                 execution.sync_source_runtime_metrics(state.ctx)
+                if span is not None:
+                    runtime = state.ctx.metrics.runtime
+                    span.set_attribute("execution_lane", runtime.execution_lane)
+                    span.set_attribute("direct_flush_active", runtime.direct_flush_active)
+                    span.set_attribute("arrow_fast_path_active", runtime.arrow_fast_path_active)
+                    span.set_attribute("arrow_chain_active", runtime.arrow_chain_active)
+                    span.set_attribute("rust_prefetch_active", runtime.rust_prefetch_active)
 
         if cancellation_error is not None:
             raise cancellation_error

@@ -126,7 +126,7 @@ def test_runtime_plan_selects_batch_lane_for_batch_source() -> None:
     assert plan.batch_source is True
 
 
-def test_runtime_plan_disables_direct_flush_when_delivery_hooks_exist() -> None:
+def test_runtime_plan_keeps_direct_flush_when_delivery_hooks_exist() -> None:
     plan = build_runtime_plan(
         _HookSource(),
         MiddlewareChain([]),
@@ -135,7 +135,7 @@ def test_runtime_plan_disables_direct_flush_when_delivery_hooks_exist() -> None:
     )
 
     assert plan.has_delivery_hooks is True
-    assert plan.writer.direct_flush_eligible is False
+    assert plan.writer.direct_flush_eligible is True
 
 
 class _ArrowNativeSink(BaseSink[int]):

@@ -6,16 +6,17 @@ _When to read this: you are building a plugin package and want to declare compat
 
 Agora uses two version numbers that are intentionally separate:
 
-| Constant | Current value | Tracks |
-|---|---|---|
-| `agora-etl` package version | `0.1.9` | The framework release — features, fixes, API changes |
-| `AGORA_PLUGIN_MANIFEST_VERSION` | `"0.3"` | The optional MANIFEST metadata schema understood by this release |
+| Constant | Tracks |
+|---|---|
+| `agora-etl` package version | The framework release — features, fixes, API changes |
+| `AGORA_PLUGIN_MANIFEST_VERSION` | The optional MANIFEST metadata schema understood by the installed release |
 
 These are not the same thing and they do not move together.
 
-`AGORA_PLUGIN_MANIFEST_VERSION` only bumps when the shape of the `MANIFEST` object that plugins can declare changes — for example, if a new required field is added or an existing field is renamed. It does not bump on every `agora-etl` release.
-
-A plugin that was compatible with `agora-etl 0.1.7` and declares `agora_api_version = "0.3"` is still compatible with `agora-etl 0.1.9` — the manifest schema has not changed.
+`AGORA_PLUGIN_MANIFEST_VERSION` only bumps when the shape of the `MANIFEST`
+object that plugins can declare changes — for example, if a new required field
+is added or an existing field is renamed. It does not bump on every
+`agora-etl` release.
 
 ## What is a MANIFEST?
 
@@ -39,7 +40,7 @@ class _Manifest:
 MANIFEST = _Manifest(
     package="my-plugin",
     version="1.0.0",
-    agora_api_version="0.3",  # must match AGORA_PLUGIN_MANIFEST_VERSION
+    agora_api_version="0.4",  # must match AGORA_PLUGIN_MANIFEST_VERSION
 )
 ```
 
@@ -53,7 +54,7 @@ The object does not need to be a dataclass — any object with the right attribu
 
 All fields are optional. Missing fields are treated as `None` in diagnostics.
 
-## Compatibility matrix
+## Compatibility outcomes
 
 | Plugin declares | Result |
 |---|---|
@@ -70,7 +71,7 @@ When a plugin is excluded for incompatibility, the log emits:
 
 ```
 registry_entrypoint_incompatible  registry=sources  group=agora.sources
-  name=my_source  plugin_api_version=0.2  expected_manifest_version=0.3
+  name=my_source  plugin_api_version=0.3  expected_manifest_version=0.4
 ```
 
 The fields tell you:
@@ -78,24 +79,27 @@ The fields tell you:
 - `plugin_api_version` — what the plugin declared
 - `expected_manifest_version` — what this release of `agora-etl` expects
 
-To fix: update your plugin's `MANIFEST.agora_api_version` to `"0.3"` and verify the plugin still works with the current base classes.
+To fix: update your plugin's `MANIFEST.agora_api_version` to match the
+currently installed `AGORA_PLUGIN_MANIFEST_VERSION`, then verify the plugin
+still works with the current base classes.
 
 ## Checking the current value at runtime
 
 ```python
 from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION
 
-print(AGORA_PLUGIN_MANIFEST_VERSION)  # "0.3"
+print(AGORA_PLUGIN_MANIFEST_VERSION)
 ```
 
 ## AGORA_API_VERSION alias
 
 Older plugin packages may import `AGORA_API_VERSION` from `agora.core.registry`. This is a backward-compatible alias for `AGORA_PLUGIN_MANIFEST_VERSION` — both resolve to the same value.
 
-`AGORA_API_VERSION` is deprecated as of `0.1.9`. It will be removed in `0.2.0`. New plugins should use `AGORA_PLUGIN_MANIFEST_VERSION` directly.
+`AGORA_API_VERSION` is a backward-compatible alias. New plugins should use
+`AGORA_PLUGIN_MANIFEST_VERSION` directly.
 
 ```python
-# Old — deprecated, will be removed in 0.2.0
+# Old — backward-compatible alias
 from agora.core.registry import AGORA_API_VERSION
 
 # New — use this
@@ -116,7 +120,9 @@ Examples that do NOT trigger a bump:
 - A bug fix in the runtime.
 - A new entry-point group is added (the group is new, the schema is not).
 
-The current value `"0.3"` has been stable since before `0.1.6`. It is not expected to change before `0.2.0`.
+Avoid hard-coding the expected value in prose or docs of your own. Read the
+constant at runtime in tests or compatibility checks so your plugin docs stay in
+sync with the installed Agora release.
 
 ## Viewing all registered plugins
 

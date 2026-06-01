@@ -1,5 +1,7 @@
 # Scheduling Plugins
 
+_When to read this: Agora's built-in interval schedules are not expressive enough and you need cron-style timing._
+
 Use the scheduling family when simple fixed intervals are not expressive enough
 for how your jobs should run.
 

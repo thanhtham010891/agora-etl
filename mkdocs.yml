@@ -13,6 +13,7 @@ nav:
   - Guides:
       - Quickstart: guides/quickstart.md
       - Pipelines: guides/pipelines.md
+      - Lifecycle: guides/lifecycle.md
       - Runtime Guarantees: guides/runtime-guarantees.md
       - Failure Handling: guides/failure-handling.md
       - Checkpointing: guides/checkpointing.md
@@ -26,6 +27,8 @@ nav:
       - Sources: sources.md
       - Sinks: sinks.md
       - Middlewares: middlewares.md
+      - Schema: schema.md
+      - State: state.md
       - Architecture: architecture.md
       - Plugins:
           - Overview: plugins/index.md
@@ -38,11 +41,6 @@ nav:
           - Plugin Contract: plugins/contract.md
           - Manifest Contract: plugins/manifest.md
           - Developing Plugins: plugins/developing.md
-  - Benchmark:
-      - Overview: benchmark/index.md
-      - Core: benchmark/core.md
-      - Kafka: benchmark/kafka.md
-      - Redis: benchmark/redis.md
   - Change Log: change-log/index.md
 markdown_extensions:
   - admonition

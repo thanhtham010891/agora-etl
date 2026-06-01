@@ -1,5 +1,7 @@
 # Middlewares
 
+_When to read this: you are choosing or writing transformation stages and need to understand how records move through the middleware chain._
+
 Middlewares are the transformation layer between source and sink. Each middleware receives a record, optionally transforms it, and returns the result — or `None` to drop the record.
 
 ## Middleware execution order
@@ -29,6 +31,7 @@ If a middleware raises an exception, the chain stops for that record. The runtim
 | `EnrichMiddleware` | Add fields via an async callable |
 | `DedupMiddleware` | Drop duplicate records by a computed key |
 | `RouteMiddleware` | Dispatch to different sub-middlewares by a key function |
+| `SchemaMiddleware` | Track and enforce evolving record shape across runs |
 
 ### MapMiddleware
 
@@ -60,7 +63,8 @@ Batch-native counterparts of `MapMiddleware` and `FilterMiddleware`. On the
 [batch execution lane](sources.md#batch-execution-lane) a regular `Middleware`
 still works, but the runtime applies it record-by-record inside the batch. The
 `Batch*` variants implement `process_batch()` so the whole batch is transformed
-in one call — keeping the batch lane's throughput advantage.
+in one call — preserving batch-lane execution instead of dropping back to
+per-record middleware dispatch.
 
 ```python
 from agora import BatchMapMiddleware, BatchFilterMiddleware
@@ -199,7 +203,7 @@ Fuzzy dedup is O(n) per record up to `max_fuzzy_keys`. For large-scale fuzzy ded
 Dispatch each record to a different sub-middleware based on a key function. Useful when a single pipeline handles records from multiple sources that need different transformations.
 
 ```python
-from agora.core.middleware import RouteMiddleware
+from agora import RouteMiddleware
 
 pipeline.pipe(
     RouteMiddleware(key=lambda r: r.source)
@@ -210,6 +214,28 @@ pipeline.pipe(
 ```
 
 Records with no matching route and no default are dropped, and a warning is logged.
+
+### SchemaMiddleware
+
+Track record shape over time and apply a schema-evolution contract while the
+pipeline runs.
+
+```python
+from agora.schema import SchemaContract, SchemaMiddleware
+
+pipeline.pipe(
+    SchemaMiddleware(
+        table="public.users",
+        contract=SchemaContract.EVOLVE,
+    )
+)
+```
+
+`SchemaMiddleware` is useful when your payload shape is not fully fixed yet and
+you want to observe, persist, or constrain that evolution. It lives in
+`agora.schema`, not `agora.middlewares`.
+
+See [Schema](schema.md) for contracts, stores, and Pydantic model generation.
 
 ## AI middlewares
 
@@ -223,18 +249,41 @@ The three `on_error` values:
 | `"drop"` | Record is dropped and counted as `records_dropped` |
 | `"raise"` | Exception propagates — routes to DLQ if configured, stops pipeline if not |
 
+### AI cache helpers
+
+Core Agora ships three cache helpers for AI middleware:
+
+| Cache | When to use |
+|---|---|
+| `InMemoryLLMCache` | Tests and short-lived local runs |
+| `SQLiteLLMCache` | Local persistence across reruns |
+| `StateBackendLLMCache` | Reuse an existing `StateBackend` choice |
+
+If your middleware is configured from data rather than Python code, use
+`build_llm_cache()`:
+
+```python
+from agora.ai import build_llm_cache
+
+cache = build_llm_cache({"type": "sqlite", "path": ".cache/llm.db"})
+```
+
+Plugin packages can register additional cache backends through
+`agora.ai.caches`.
+
 ### AIEnrichMiddleware
 
 Add fields to each record using an LLM. Use `LLMCache` to avoid re-calling the API for records you've already processed.
 
 ```python
+from agora.ai import SQLiteLLMCache
 from agora.middlewares.ai.enrich import AIEnrichMiddleware
 
 pipeline.pipe(AIEnrichMiddleware(
     provider=my_provider,
     prompt_template="Summarize this product: {name}. Return JSON: {\"summary\": \"...\"}",
     output_fields=["summary"],
-    cache=LLMCache(".cache/llm.db"),
+    cache=SQLiteLLMCache(".cache/llm.db"),
 ))
 ```
 
@@ -323,8 +372,7 @@ pipeline.pipe(AIBatchMiddleware(
 Subclass `Middleware[T, U]` and implement `process()`:
 
 ```python
-from agora.core.middleware import Middleware
-from agora.core.context import PipelineContext
+from agora import Middleware, PipelineContext
 
 class NormalizeMiddleware(Middleware[RawRecord, CleanRecord]):
     name = "normalize"
