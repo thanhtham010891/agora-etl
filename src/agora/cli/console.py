@@ -305,7 +305,7 @@ class _Console:
     def plugins_table(self, data: dict[str, list[dict[str, str]]]) -> None:
         """Render all plugins in a single unified Rich table.
 
-        ``data`` format: ``{kind: [{key, type, origin, extra, package, version, compatibility}]}``
+        ``data`` format: ``{kind: [{key, type, origin, extra, package, version, manifest, compatibility}]}``
 
         Columns: Key | Category | Status | Package | Version | Manifest | Install
         """
@@ -344,21 +344,34 @@ class _Console:
         table.add_column("Manifest", no_wrap=True, min_width=10)
         table.add_column("Install", style="dim", no_wrap=True, min_width=24)
 
-        for kind, rows in data.items():
+        kind_order = {"source": 0, "sink": 1, "middleware": 2}
+        flattened_rows: list[tuple[str, dict[str, str]]] = [
+            (kind, row) for kind, rows in data.items() for row in rows
+        ]
+
+        for kind, row in sorted(
+            flattened_rows,
+            key=lambda item: (
+                item[1].get("key", ""),
+                kind_order.get(item[0], 99),
+            ),
+        ):
             k_color, k_label = kind_styles.get(kind, ("white", kind))
-            for row in rows:
-                status_key = (row.get("type", "instance"), row.get("origin", "manual"))
-                s_style, s_label = status_styles.get(status_key, ("white", row["type"]))
-                compatibility = row.get("compatibility", "n/a")
-                table.add_row(
-                    row["key"],
-                    Text(k_label, style=f"bold {k_color}"),
-                    Text(s_label, style=s_style),
-                    row.get("package", ""),
-                    row.get("version", ""),
-                    Text(compatibility, style=compatibility_styles.get(compatibility, "yellow")),
-                    row["extra"],
-                )
+            status_key = (row.get("type", "instance"), row.get("origin", "manual"))
+            s_style, s_label = status_styles.get(status_key, ("white", row["type"]))
+            compatibility = row.get("compatibility", "n/a")
+            table.add_row(
+                row["key"],
+                Text(k_label, style=f"bold {k_color}"),
+                Text(s_label, style=s_style),
+                row.get("package", ""),
+                row.get("version", ""),
+                Text(
+                    row.get("manifest", "") or "n/a",
+                    style=compatibility_styles.get(compatibility, "yellow"),
+                ),
+                row["extra"],
+            )
 
         _out.print(table)
         _out.print()

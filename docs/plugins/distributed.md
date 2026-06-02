@@ -86,6 +86,42 @@ What this shows:
 - only the worker holding the lease should execute the scheduled run
 - graceful stop matters because it releases leases and deregisters the worker
 
+## WorkerPool example
+
+This is the shape most teams actually use: a normal `WorkerPool` with scheduled
+pipelines, plus a coordinator that prevents duplicate runs across replicas.
+
+```python
+from agora.runner import Schedule, ScheduledPipeline, WorkerPool
+from agora_plugins.distributed import RedisWorkerCoordinator
+
+
+async def build_orders_pipeline():
+    return make_orders_pipeline()
+
+
+def get_worker() -> WorkerPool:
+    pool = WorkerPool(
+        coordinator=RedisWorkerCoordinator(
+            redis_url="redis://localhost:6379",
+            lease_ttl_seconds=300,
+            heartbeat_interval=30,
+        ),
+        health_port=8080,
+    )
+    pool.register(
+        ScheduledPipeline(
+            factory=build_orders_pipeline,
+            schedule=Schedule.cron("0 * * * *"),
+            pipeline_id="orders-hourly",
+        )
+    )
+    return pool
+```
+
+If you run two or five copies of the same worker deployment, each replica can
+start normally, but only one should acquire the lease for a given pipeline run.
+
 ## Common pattern
 
 - several worker processes share the same schedule definitions

@@ -58,6 +58,102 @@ pip install "agora-etl-plugins[postgres]"
 pip install "agora-etl-plugins[all]"
 ```
 
+## Common pipeline shapes
+
+| Pipeline shape | Plugin family | Start with |
+|---|---|---|
+| Redis Streams in, relational table out | Redis + PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+| Kafka topic in, Kafka topic out | Kafka | [Kafka](kafka.md) |
+| Periodic sync every hour or every weekday | Scheduling | [Scheduling](scheduling.md) |
+| Same schedules deployed on multiple workers | Distributed coordination | [Distributed Coordination](distributed.md) |
+| Shared replay or dead-letter inspection | Redis or PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+
+## Quick examples
+
+### Redis stream to PostgreSQL table
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora_plugins.postgres import PostgresSink
+from agora_plugins.redis import RedisStreamSource
+
+
+source = RedisStreamSource(
+    url="redis://localhost:6379",
+    stream="orders:raw",
+    group="orders-projection",
+    consumer="worker-1",
+    deserializer=lambda fields: {
+        "order_id": int(fields["order_id"]),
+        "status": fields["status"],
+    },
+)
+
+sink = PostgresSink(
+    dsn="postgresql://app:secret@localhost:5432/app",
+    table="order_projection",
+    row_mapper=lambda record: record,
+    conflict_key="order_id",
+)
+
+summary = await (
+    Pipeline(source)
+    .build(sink, config=DeliveryConfig(batch_size=100))
+    .run(max_records=1_000)
+)
+```
+
+### Kafka topic to topic enrichment
+
+```python
+import json
+
+from agora import DeliveryConfig, Pipeline
+from agora_plugins.kafka import KafkaSink, KafkaSource
+
+
+summary = await (
+    Pipeline(
+        KafkaSource(
+            topics=["orders.raw"],
+            bootstrap_servers="localhost:9092",
+            group_id="orders-cleaner",
+            deserializer=lambda value: json.loads(value.decode("utf-8")),
+        )
+    )
+    .build(
+        KafkaSink(
+            topic="orders.cleaned",
+            bootstrap_servers="localhost:9092",
+            serializer=lambda record: json.dumps(record).encode("utf-8"),
+        ),
+        config=DeliveryConfig(batch_size=100),
+    )
+    .run(max_records=1_000)
+)
+```
+
+### Cron-scheduled worker with shared lease ownership
+
+```python
+from agora.runner import Schedule, ScheduledPipeline, WorkerPool
+from agora_plugins.distributed import RedisWorkerCoordinator
+
+
+def get_worker() -> WorkerPool:
+    pool = WorkerPool(
+        coordinator=RedisWorkerCoordinator(redis_url="redis://localhost:6379"),
+    )
+    pool.register(
+        ScheduledPipeline(
+            factory=build_daily_pipeline,
+            schedule=Schedule.cron("0 2 * * *"),
+            pipeline_id="daily-sync",
+        )
+    )
+    return pool
+```
+
 ## How to think about plugins
 
 Use a plugin when:

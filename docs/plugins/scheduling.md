@@ -56,6 +56,34 @@ What this shows:
 - validation happens before the worker loop trusts an expression
 - it works well when jobs follow wall-clock rules instead of fixed intervals
 
+## Worker example
+
+In practice the cron plugin is most often used through `Schedule.cron(...)`
+inside a scheduled worker.
+
+```python
+from agora.runner import Schedule, ScheduledPipeline, WorkerPool
+
+
+async def build_daily_pipeline():
+    return make_pipeline()
+
+
+def get_worker() -> WorkerPool:
+    pool = WorkerPool()
+    pool.register(
+        ScheduledPipeline(
+            factory=build_daily_pipeline,
+            schedule=Schedule.cron("0 2 * * 1-5"),
+            pipeline_id="weekday-2am-sync",
+        )
+    )
+    return pool
+```
+
+Use this when the question is not just "how long should I sleep?" but "how do I
+embed calendar timing into a real long-lived Agora worker?"
+
 ## Why keep it as a plugin
 
 Cron parsing pulls in calendar semantics and an extra dependency. That is

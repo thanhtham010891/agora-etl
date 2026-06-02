@@ -55,6 +55,12 @@ This gives you a practical tradeoff surface:
 - `copy` for raw append-heavy throughput
 - `copy_merge` when you want bulk loading with conflict-aware final writes
 
+| Mode | Best for | Notes |
+|---|---|---|
+| `sql` | moderate upsert workloads | simplest operational default |
+| `copy` | append-only bulk loads | fastest when no upsert is needed |
+| `copy_merge` | large upsert-heavy loads | stage first, then merge into the target table |
+
 ### Schema adapter
 
 `PostgresSchemaAdapter` wraps a sink and applies table changes from runtime
@@ -79,13 +85,13 @@ This works well when:
 - replay needs SQL-level visibility
 - failure records should participate in existing backup, access, or audit paths
 
-## Sample
+## Quickstart
 
 This example reads active customers from PostgreSQL and upserts the transformed
 rows into another table.
 
 ```python
-from agora import Pipeline
+from agora import DeliveryConfig, Pipeline
 from agora_plugins.postgres import PostgresSink, PostgresSource
 
 
@@ -119,7 +125,11 @@ sink = PostgresSink(
     batch_size=500,
 )
 
-pipeline = Pipeline(source).build(sink)
+summary = await (
+    Pipeline(source)
+    .build(sink, config=DeliveryConfig(batch_size=100))
+    .run(max_records=10_000)
+)
 ```
 
 What this shows:
@@ -128,6 +138,87 @@ What this shows:
 - composite checkpoints work when one cursor field is not enough
 - `copy_merge` is the bulk-write option when append-only `COPY` is not enough
 - `conflict_key` defines the upsert identity
+
+## Schema-aware sink example
+
+If you are already using `SchemaMiddleware`, wrap the sink with
+`PostgresSchemaAdapter` so missing tables or columns can be created from the
+runtime schema shape.
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora.schema import SchemaMiddleware
+from agora_plugins.postgres import PostgresSchemaAdapter, PostgresSink
+from agora_plugins.redis import RedisStreamSource
+
+
+source = RedisStreamSource(
+    url="redis://localhost:6379",
+    stream="customers:raw",
+    group="customer-sync",
+    consumer="worker-1",
+    deserializer=lambda fields: {
+        "customer_id": int(fields["customer_id"]),
+        "email": fields["email"],
+        "status": fields["status"],
+    },
+)
+
+sink = PostgresSchemaAdapter(
+    PostgresSink(
+        dsn="postgresql://app:secret@localhost:5432/app",
+        table="public.customer_projection",
+        row_mapper=lambda record: record,
+        conflict_key="customer_id",
+    )
+)
+
+summary = await (
+    Pipeline(source)
+    .pipe(SchemaMiddleware(table="public.customer_projection"))
+    .build(sink, config=DeliveryConfig(batch_size=100))
+    .run(max_records=5_000)
+)
+```
+
+Use this when the record shape is still evolving but the relational target
+should stay close to what the pipeline emits.
+
+## DLQ example
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora_plugins.postgres import PostgresDLQSink, PostgresSink, PostgresSource
+
+
+dlq = PostgresDLQSink(
+    dsn="postgresql://app:secret@localhost:5432/app",
+    table="ops.agora_dlq",
+)
+
+summary = await (
+    Pipeline(
+        PostgresSource(
+            dsn="postgresql://app:secret@localhost:5432/app",
+            query="SELECT id, payload FROM inbox ORDER BY id",
+            row_mapper=lambda row: row,
+        )
+    )
+    .build(
+        PostgresSink(
+            dsn="postgresql://app:secret@localhost:5432/app",
+            table="processed_events",
+            row_mapper=lambda record: record,
+            conflict_key="id",
+        ),
+        config=DeliveryConfig(dlq=dlq, batch_size=100),
+    )
+    .run()
+)
+```
+
+Use PostgreSQL DLQ when operators already inspect failures through SQL tooling
+and you want replay records in the same operational estate.
 
 ## Common patterns
 

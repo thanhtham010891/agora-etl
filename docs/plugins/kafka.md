@@ -82,7 +82,7 @@ Use these when:
 Registry subjects are treated as path segments rather than raw URL fragments, so
 names that include characters like `/` stay safe and unambiguous.
 
-## Sample
+## Quickstart
 
 This example consumes JSON payloads from one topic, enriches them, and publishes
 the result to another topic.
@@ -90,7 +90,7 @@ the result to another topic.
 ```python
 import json
 
-from agora import Pipeline
+from agora import DeliveryConfig, Pipeline
 from agora_plugins.kafka import KafkaSink, KafkaSource
 
 
@@ -111,7 +111,11 @@ sink = KafkaSink(
     compression_type="gzip",
 )
 
-pipeline = Pipeline(source).build(sink)
+summary = await (
+    Pipeline(source)
+    .build(sink, config=DeliveryConfig(batch_size=100))
+    .run(max_records=1_000)
+)
 ```
 
 What this shows:
@@ -120,6 +124,63 @@ What this shows:
 - commits are explicit and cadence-controlled
 - `KafkaSink` is async, bounded, and idempotence-friendly by default
 - record keys are optional but useful when downstream partitioning matters
+
+## Schema registry example
+
+This example uses Confluent-compatible schema registry helpers so both the
+consumer and producer work with Avro payloads instead of raw JSON.
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora_plugins.kafka import (
+    AvroSchemaRegistryDeserializer,
+    AvroSchemaRegistrySerializer,
+    ConfluentSchemaRegistryClient,
+    KafkaSink,
+    KafkaSource,
+)
+
+
+registry = ConfluentSchemaRegistryClient("http://localhost:8081")
+
+event_schema = {
+    "type": "record",
+    "name": "OrderEvent",
+    "fields": [
+        {"name": "order_id", "type": "long"},
+        {"name": "status", "type": "string"},
+    ],
+}
+
+summary = await (
+    Pipeline(
+        KafkaSource(
+            topics=["orders.raw"],
+            bootstrap_servers="localhost:9092",
+            group_id="orders-avro",
+            deserializer=AvroSchemaRegistryDeserializer(
+                registry_client=registry,
+            ),
+        )
+    )
+    .build(
+        KafkaSink(
+            topic="orders.validated",
+            bootstrap_servers="localhost:9092",
+            serializer=AvroSchemaRegistrySerializer(
+                registry_client=registry,
+                subject="orders.validated-value",
+                schema=event_schema,
+            ),
+        ),
+        config=DeliveryConfig(batch_size=100),
+    )
+    .run(max_records=1_000)
+)
+```
+
+Use this when multiple services share the same topic contract and you want the
+wire format to stay registry-governed.
 
 ## Common patterns
 

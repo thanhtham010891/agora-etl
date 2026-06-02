@@ -25,6 +25,36 @@ Or install everything:
 pip install "agora-etl-plugins[all]"
 ```
 
+## Quick decision table
+
+| If you need... | Install | First object to try |
+|---|---|---|
+| Redis Streams, shared state, Redis-backed DLQ | `agora-etl-plugins[redis]` | `RedisStreamSource`, `RedisSink`, `RedisBackend` |
+| Topic-based ingestion and delivery | `agora-etl-plugins[kafka]` | `KafkaSource`, `KafkaSink` |
+| SQL extraction, upsert, `COPY`, relational DLQ | `agora-etl-plugins[postgres]` | `PostgresSource`, `PostgresSink` |
+| Cron expressions in `Schedule.cron(...)` | `agora-etl-plugins[cron]` | `Schedule.cron(...)` |
+| Multi-worker lease ownership | `agora-etl-plugins[distributed]` | `RedisWorkerCoordinator` |
+
+## Example install profiles
+
+### Event-driven stack
+
+```bash
+pip install "agora-etl-plugins[redis,kafka]"
+```
+
+Use this when Redis is the ingest/control plane and Kafka is the durable event
+backbone.
+
+### Relational sync stack
+
+```bash
+pip install "agora-etl-plugins[postgres,cron]"
+```
+
+Use this when jobs are scheduled and PostgreSQL is both the source of truth and
+the operational sink.
+
 ## Pick the right family
 
 ### Redis

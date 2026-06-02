@@ -174,6 +174,7 @@ def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
 
     assert rows[0]["origin"] == "entrypoint"
     assert rows[0]["extra"] == "agora-etl-plugins[redis]"
+    assert rows[0]["manifest"] == ""
 
 
 def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
@@ -191,4 +192,70 @@ def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
 
     assert rows[0]["origin"] == "entrypoint_incompatible"
     assert rows[0]["compatibility"] == "incompatible"
+    assert rows[0]["manifest"] == "9.9"
     assert rows[0]["extra"] == "agora-etl[all]"
+
+
+def test_registry_manifest_lookup_walks_up_to_parent_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = ModuleType("agora_plugins")
+    kafka_package = ModuleType("agora_plugins.kafka")
+    kafka_package.MANIFEST = _Manifest(
+        name="kafka",
+        version="0.3.0",
+        agora_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+        package="agora-etl-plugins",
+        capabilities=("source:kafka", "sink:kafka"),
+    )
+    kafka_sources_package = ModuleType("agora_plugins.kafka.sources")
+    plugin_module = ModuleType("agora_plugins.kafka.sources.kafka")
+
+    class KafkaSource:
+        pass
+
+    KafkaSource.__module__ = "agora_plugins.kafka.sources.kafka"
+    plugin_module.KafkaSource = KafkaSource
+
+    monkeypatch.setitem(sys.modules, "agora_plugins", package)
+    monkeypatch.setitem(sys.modules, "agora_plugins.kafka", kafka_package)
+    monkeypatch.setitem(sys.modules, "agora_plugins.kafka.sources", kafka_sources_package)
+    monkeypatch.setitem(sys.modules, "agora_plugins.kafka.sources.kafka", plugin_module)
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "kafka",
+                KafkaSource,
+                dist_name="agora-etl-plugins",
+                dist_version="0.3.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="source")
+    registry.load_entrypoints("agora.sources")
+
+    item = registry.describe_items()[0]
+    assert item.package == "agora-etl-plugins"
+    assert item.version == "0.3.0"
+    assert item.agora_api_version == AGORA_PLUGIN_MANIFEST_VERSION
+    assert item.compatible is True
+
+
+def test_registry_rows_are_sorted_by_key() -> None:
+    registry: Registry[type] = Registry(name="sink")
+
+    class ZSink:
+        pass
+
+    class ASink:
+        pass
+
+    registry.register("zeta", ZSink)
+    registry.register("alpha", ASink)
+
+    rows = _registry_rows(registry, "sink")
+
+    assert [row["key"] for row in rows] == ["alpha", "zeta"]

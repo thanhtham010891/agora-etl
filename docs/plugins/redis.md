@@ -107,13 +107,13 @@ same: this is a pragmatic small-scale dedup helper, not a vector search system.
 Use it when the same prompt patterns repeat across runs and you want cache hits
 to survive process restarts.
 
-## Sample
+## Quickstart
 
 This example consumes JSON-like events from a Redis Stream and writes a compact
 status record back into Redis as a key-value entry.
 
 ```python
-from agora import Pipeline
+from agora import DeliveryConfig, Pipeline
 from agora_plugins.redis import RedisSink, RedisStreamSource
 
 
@@ -144,7 +144,11 @@ sink = RedisSink(
     ttl_seconds=3600,
 )
 
-pipeline = Pipeline(source).build(sink)
+summary = await (
+    Pipeline(source)
+    .build(sink, config=DeliveryConfig(batch_size=100))
+    .run(max_records=1_000)
+)
 ```
 
 What this shows:
@@ -154,6 +158,53 @@ What this shows:
 - acknowledgements can be flushed in batches instead of one message at a time
 - `RedisSink` in `set` mode is good for lightweight derived state
 - TTL is only applied on `set`, not on list or stream modes
+
+## Quick recipes
+
+### Inspect only failed sink writes from a shared DLQ
+
+```python
+from agora_plugins.redis import RedisDLQSource
+
+
+source = RedisDLQSource(
+    url="redis://localhost:6379",
+    key_prefix="agora:dlq",
+    pipeline_id="orders-sync",
+    stage="sink",
+    limit=100,
+)
+
+async with source:
+    async for record in source.stream():
+        print(record.error_type, record.error_message)
+```
+
+Use this when operators need a bounded, shared replay view instead of a
+node-local SQLite file.
+
+### Keep short-lived shared pipeline state in Redis
+
+```python
+import time
+
+from agora_plugins.redis import RedisBackend
+
+
+backend = RedisBackend(url="redis://localhost:6379", prefix="agora:state:")
+backend.set(
+    "orders:last-success",
+    {"cursor": 42},
+    expires_at=time.time() + 3600,
+)
+
+stored = backend.get("orders:last-success")
+print(stored.value if stored else None)
+backend.close()
+```
+
+Use this when more than one worker or process needs to observe the same runtime
+state.
 
 ## Common patterns
 

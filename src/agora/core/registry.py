@@ -88,20 +88,20 @@ def _coerce_manifest(
     if not isinstance(module_name, str) or not module_name:
         return None
 
-    package_name = module_name.split(".", 1)[0]
-    try:
-        package = importlib.import_module(package_name)
-    except ImportError:
-        if distribution_name is None and distribution_version is None:
-            return None
-        return {
-            "package": distribution_name or package_name,
-            "version": distribution_version,
-            "agora_api_version": None,
-            "compatible": None,
-        }
+    module_parts = module_name.split(".")
+    manifest = None
+    package_name = module_parts[0]
+    for index in range(len(module_parts), 0, -1):
+        candidate = ".".join(module_parts[:index])
+        try:
+            package = importlib.import_module(candidate)
+        except ImportError:
+            continue
+        manifest = getattr(package, "MANIFEST", None)
+        if manifest is not None:
+            package_name = candidate
+            break
 
-    manifest = getattr(package, "MANIFEST", None)
     if manifest is None:
         if distribution_name is None and distribution_version is None:
             return None

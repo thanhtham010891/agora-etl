@@ -115,11 +115,12 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
                     "origin": item.origin,
                     "package": item.package or "",
                     "version": item.version or "",
+                    "manifest": item.agora_api_version or "",
                     "compatibility": compatibility,
                     "extra": _extra_hint(item.key, item.type, category, item.origin),
                 }
             )
-        return rows
+        return sorted(rows, key=lambda row: row["key"])
 
     rows = []
     for key, kind in registry.all_items():
@@ -130,11 +131,12 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
                 "origin": "manual",
                 "package": "",
                 "version": "",
+                "manifest": "",
                 "compatibility": "n/a",
                 "extra": _extra_hint(key, kind, category, "manual"),
             }
         )
-    return rows
+    return sorted(rows, key=lambda row: row["key"])
 
 
 # Nested by category so identical keys (e.g. "kafka", "postgres") in
