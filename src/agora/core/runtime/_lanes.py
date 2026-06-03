@@ -138,7 +138,7 @@ class LinearLaneStrategy:
         # The standalone Rust MetricsAccumulator does not currently outperform
         # the Python hot path on the linear lane. Keep this path on
         # HotPathMetrics even when Rust prefetch support is available.
-        hot = HotPathMetrics.for_source(source_name)
+        hot = HotPathMetrics.for_source(source_name, metrics=metrics)
 
         try:
             async for source_record in source_records:
@@ -215,7 +215,7 @@ class BufferedLaneStrategy:
         next_commit = 0
         state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
         source_error: BaseException | None = None
-        hot = HotPathMetrics.for_source(c.source.source_name)
+        hot = HotPathMetrics.for_source(c.source.source_name, metrics=ctx.metrics)
 
         try:
             async for source_record in source_records:
@@ -462,7 +462,7 @@ class BatchLaneStrategy:
         metrics = ctx.metrics
         has_max = max_records is not None
         records_consumed = 0
-        hot = HotPathMetrics.for_source(source_name)
+        hot = HotPathMetrics.for_source(source_name, metrics=metrics)
 
         arrow_sink: Any = None
         if c.plan.writer.arrow_fast_path:

@@ -24,6 +24,13 @@ class HotPathMetrics:
     _written: int = 0
     _ticks: int = 0
 
+    def snapshot_pending(self) -> dict[str, int | str]:
+        return {
+            "source_name": self._source_name,
+            "records_consumed": self._consumed,
+            "records_written": self._written,
+        }
+
     def inc_consumed(self, count: int = 1) -> bool:
         """Increment consumed counter. Returns True when flush interval is reached."""
         self._consumed += count
@@ -51,5 +58,13 @@ class HotPathMetrics:
         self.flush(metrics)
 
     @staticmethod
-    def for_source(source_name: str, flush_interval: int = 100) -> HotPathMetrics:
-        return HotPathMetrics(_source_name=source_name, _flush_interval=flush_interval)
+    def for_source(
+        source_name: str,
+        *,
+        metrics: PipelineMetrics | None = None,
+        flush_interval: int = 100,
+    ) -> HotPathMetrics:
+        hot = HotPathMetrics(_source_name=source_name, _flush_interval=flush_interval)
+        if metrics is not None:
+            metrics.register_live_metric_overlay(hot)
+        return hot

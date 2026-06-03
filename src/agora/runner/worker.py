@@ -40,6 +40,7 @@ import logstruct
 from agora.metrics.collector import MetricsCollector
 
 if TYPE_CHECKING:
+    from agora.core.context import PipelineContext
     from agora.health import HealthServer
     from agora.runner.coordinator import WorkerCoordinator
     from agora.runner.runtime import RunRecord
@@ -131,6 +132,12 @@ class WorkerPool:
 
         # Wire metrics into each pipeline via public Observer API
         for p in self._pipelines:
+            await self.metrics.register_pipeline(
+                p.pipeline_id,
+                schedule=str(p.schedule),
+            )
+            if p.live_metrics_callback is None:
+                p.set_live_metrics_callback(self._make_live_metrics_callback(p.pipeline_id))
             if p not in self._metrics_observers:
                 callback = self._make_metrics_callback(p.pipeline_id)
                 p.add_observer(callback)
@@ -281,6 +288,21 @@ class WorkerPool:
                 pipeline_id=pipeline_id,
                 summary=record.summary,
                 error=record.error,
+            )
+
+        return _callback
+
+    def _make_live_metrics_callback(self, pipeline_id: str) -> Any:
+        async def _callback(ctx: PipelineContext) -> None:
+            summary = ctx.metrics.snapshot(
+                pipeline_id=pipeline_id,
+                run_id=ctx.run_id,
+            )
+            await self.metrics.record_live_run(
+                pipeline_id=pipeline_id,
+                summary=summary,
+                run_id=ctx.run_id,
+                started_at=ctx.started_at,
             )
 
         return _callback

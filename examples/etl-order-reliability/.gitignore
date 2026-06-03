@@ -1,0 +1,4 @@
+agora.env
+.agora*.db
+__pycache__/
+.pytest_cache/

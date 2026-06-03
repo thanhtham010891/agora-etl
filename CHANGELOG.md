@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.2.2](docs/change-log/0.2.2.md) — live worker observability, timed batch flushes, and Kafka worker example hardening
 - [0.2.1](docs/change-log/0.2.1.md) — Correctness hardening, performance improvements, and Arrow-native sink expansion
 - [0.2.0](docs/change-log/0.2.0.md) — batch-native execution lane
 - [0.1.9](docs/change-log/0.1.9.md) — plugin contract stabilization

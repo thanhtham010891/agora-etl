@@ -52,6 +52,7 @@ from agora.runner.runtime import (
 )
 
 if TYPE_CHECKING:
+    from agora.core.context import PipelineContext
     from agora.core.pipeline import BoundPipeline
 
 logger = logstruct.getLogger(__name__)
@@ -201,6 +202,7 @@ class ScheduledPipeline:
         backoff_policy: BackoffPolicy | None = None,
         on_run_complete: Callable[[RunRecord], Awaitable[None]] | None = None,
         pre_run_hook: Callable[[], Awaitable[bool]] | None = None,
+        live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None,
     ) -> None:
         self._factory = factory
         self._schedule = schedule
@@ -215,6 +217,7 @@ class ScheduledPipeline:
         # Called before each run; return False to skip this run without
         # counting as an error (used by WorkerPool for lease gating).
         self._pre_run_hook = pre_run_hook
+        self._live_metrics_callback = live_metrics_callback
 
         self._state = ScheduledPipelineState()
 
@@ -243,6 +246,13 @@ class ScheduledPipeline:
             ``async def callback(record: RunRecord) -> None``
         """
         self._observers.append(callback)
+
+    def set_live_metrics_callback(
+        self,
+        callback: Callable[[PipelineContext], Awaitable[None]] | None,
+    ) -> None:
+        """Attach a live metrics callback invoked while a run is active."""
+        self._live_metrics_callback = callback
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -293,6 +303,10 @@ class ScheduledPipeline:
     @property
     def observers(self) -> list[Callable[[RunRecord], Awaitable[None]]]:
         return self._observers
+
+    @property
+    def live_metrics_callback(self) -> Callable[[PipelineContext], Awaitable[None]] | None:
+        return self._live_metrics_callback
 
     @property
     def state(self) -> ScheduledPipelineState:

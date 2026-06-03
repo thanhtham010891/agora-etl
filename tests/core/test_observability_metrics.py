@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from agora.core.metrics import MiddlewareMetrics, PipelineRunSummary, RuntimeMetrics
+from agora.core.runtime import HotPathMetrics
 from agora.metrics.collector import MetricsCollector
 from agora.metrics.exporters import PrometheusTextExporter
 
@@ -81,6 +84,87 @@ async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -
     assert pipeline["runtime"]["last_run"]["buffered_stage_max_in_flight"] == 7
     assert pipeline["runtime"]["last_run"]["checkpoint_save_time_ms"] == 12.5
     assert pipeline["runtime"]["last_run"]["writer_flush_time_ms"] == 25.0
+
+
+@pytest.mark.asyncio
+async def test_health_dict_lists_registered_pipeline_and_live_run_snapshot() -> None:
+    collector = MetricsCollector()
+    runtime = RuntimeMetrics(
+        execution_lane="linear",
+        direct_flush_active=True,
+        writer_flush_count=3,
+        writer_flush_time_ms=7.5,
+    )
+
+    await collector.register_pipeline("orders", schedule="continuous")
+    await collector.record_live_run(
+        "orders",
+        summary=_make_summary(
+            elapsed_seconds=4.0,
+            records_consumed=40,
+            records_written=39,
+            records_dropped=1,
+            records_errored=0,
+            runtime=runtime,
+        ),
+        run_id="run-live",
+        started_at=datetime(2026, 6, 3, 10, 0, tzinfo=UTC),
+    )
+
+    health = collector.to_health_dict()
+    pipeline = health["pipelines"]["orders"]
+
+    assert pipeline["schedule"] == "continuous"
+    assert health["status"] == "running"
+    assert pipeline["status"] == "running"
+    assert pipeline["lifecycle"]["running"] is True
+    assert pipeline["lifecycle"]["state"] == "running"
+    assert pipeline["lifecycle"]["active_run_id"] == "run-live"
+    assert pipeline["live"]["records_consumed"] == 40
+    assert pipeline["live"]["records_written"] == 39
+    assert pipeline["live"]["records_dropped"] == 1
+    assert pipeline["live"]["records_pending"] == 0
+    assert pipeline["live"]["throughput_rps"] == 10.0
+    assert pipeline["live"]["runtime"]["execution_lane"] == "linear"
+    assert pipeline["live"]["runtime"]["direct_flush_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_health_dict_live_pending_records_explains_inflight_gap() -> None:
+    collector = MetricsCollector()
+
+    await collector.register_pipeline("orders", schedule="continuous")
+    await collector.record_live_run(
+        "orders",
+        summary=_make_summary(
+            elapsed_seconds=5.0,
+            records_consumed=5000,
+            records_written=4900,
+            records_dropped=15,
+            records_errored=4,
+        ),
+        run_id="run-live",
+        started_at=datetime(2026, 6, 3, 10, 0, tzinfo=UTC),
+    )
+
+    health = collector.to_health_dict()
+    pipeline = health["pipelines"]["orders"]
+
+    assert pipeline["live"]["records_pending"] == 81
+
+
+def test_pipeline_metrics_snapshot_includes_unflushed_hot_path_counters() -> None:
+    from agora.core.metrics import PipelineMetrics
+
+    metrics = PipelineMetrics(records_consumed=9900, records_written=9961)
+    hot = HotPathMetrics.for_source("kafka", metrics=metrics)
+    hot.inc_consumed(61)
+
+    summary = metrics.snapshot(pipeline_id="orders_projection", run_id="run-live")
+
+    assert summary.records_consumed == 9961
+    assert summary.records_written == 9961
+    assert summary.by_source["kafka"] == 61
 
 
 @pytest.mark.asyncio
@@ -195,6 +279,45 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
         'agora_pipeline_runtime_last{pipeline_id="orders",signal="adaptive_backpressure_max_limit"} 16'
         in rendered
     )
+
+
+@pytest.mark.asyncio
+async def test_prometheus_exporter_renders_live_pipeline_metrics() -> None:
+    collector = MetricsCollector()
+    runtime = RuntimeMetrics(
+        execution_lane="linear",
+        direct_flush_active=True,
+        writer_flush_count=2,
+        writer_flush_time_ms=11.0,
+    )
+    await collector.register_pipeline("orders", schedule="continuous")
+    await collector.record_live_run(
+        "orders",
+        summary=_make_summary(
+            elapsed_seconds=5.0,
+            records_consumed=50,
+            records_written=49,
+            records_dropped=1,
+            records_errored=0,
+            runtime=runtime,
+        ),
+        run_id="run-live",
+        started_at=datetime(2026, 6, 3, 10, 0, tzinfo=UTC),
+    )
+
+    rendered = PrometheusTextExporter(collector=collector, namespace="agora").render()
+
+    assert 'agora_pipeline_registered{pipeline_id="orders",schedule="continuous"} 1' in rendered
+    assert 'agora_pipeline_running{pipeline_id="orders"} 1' in rendered
+    assert 'agora_pipeline_live_run_duration_seconds{pipeline_id="orders"} 5.000000' in rendered
+    assert 'agora_pipeline_live_throughput_rps{pipeline_id="orders"} 10.000000' in rendered
+    assert 'agora_pipeline_live_records{pipeline_id="orders",outcome="consumed"} 50' in rendered
+    assert 'agora_pipeline_live_records{pipeline_id="orders",outcome="pending"} 0' in rendered
+    assert (
+        'agora_pipeline_runtime_current{pipeline_id="orders",signal="direct_flush_active"} 1'
+        in rendered
+    )
+    assert 'agora_pipeline_runtime_lane_current{pipeline_id="orders",lane="linear"} 1' in rendered
 
 
 @pytest.mark.asyncio

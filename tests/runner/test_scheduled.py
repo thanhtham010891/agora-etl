@@ -381,6 +381,35 @@ class TestWorkerPool:
         assert stats.successful_runs == 2
         assert len(scheduled._observers) == 1
 
+    async def test_worker_pool_registers_pipeline_in_metrics_before_run_completes(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def factory():
+            class SlowPipeline:
+                async def run(self, max_records=None):
+                    del max_records
+                    started.set()
+                    await release.wait()
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SlowPipeline()
+
+        pool = WorkerPool(graceful_shutdown_timeout=0.01)
+        pool.register(
+            ScheduledPipeline(factory=factory, schedule=Schedule.once(), pipeline_id="slow_once")
+        )
+
+        task = asyncio.create_task(pool.run())
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        stats = pool.metrics.get("slow_once")
+        assert stats is not None
+        assert stats.schedule == "once"
+
+        release.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
     async def test_worker_pool_repeated_run_does_not_duplicate_release_observers(self) -> None:
         class FakeCoordinator:
             def __init__(self) -> None:

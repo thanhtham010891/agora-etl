@@ -41,6 +41,63 @@ class PrometheusTextExporter:
         ns = self._ns
         stats_by_pipeline = self._collector.all()
         lines: list[str] = [
+            f"# HELP {ns}_pipeline_registered Registered pipelines known to the worker",
+            f"# TYPE {ns}_pipeline_registered gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            schedule = _escape_label_value(stats.schedule or "")
+            lines.append(
+                f'{ns}_pipeline_registered{{pipeline_id="{epid}",schedule="{schedule}"}} 1'
+            )
+
+        lines += [
+            f"# HELP {ns}_pipeline_running Whether the pipeline currently has an active run",
+            f"# TYPE {ns}_pipeline_running gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            lines.append(f'{ns}_pipeline_running{{pipeline_id="{epid}"}} {int(stats.is_running)}')
+
+        lines += [
+            f"# HELP {ns}_pipeline_live_run_duration_seconds Duration of the current active run",
+            f"# TYPE {ns}_pipeline_live_run_duration_seconds gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            lines.append(
+                f'{ns}_pipeline_live_run_duration_seconds{{pipeline_id="{epid}"}} '
+                f"{stats.active_run_duration_s:.6f}"
+            )
+
+        lines += [
+            f"# HELP {ns}_pipeline_live_throughput_rps Records consumed per second in the active run",
+            f"# TYPE {ns}_pipeline_live_throughput_rps gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            lines.append(
+                f'{ns}_pipeline_live_throughput_rps{{pipeline_id="{epid}"}} '
+                f"{stats.active_run_throughput_rps:.6f}"
+            )
+
+        lines += [
+            f"# HELP {ns}_pipeline_live_records Current active-run record counters",
+            f"# TYPE {ns}_pipeline_live_records gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            for outcome, value in [
+                ("consumed", stats.live_records_consumed),
+                ("written", stats.live_records_written),
+                ("dropped", stats.live_records_dropped),
+                ("errored", stats.live_records_errored),
+                ("pending", stats.live_records_pending),
+            ]:
+                label = f'{{pipeline_id="{epid}",outcome="{outcome}"}}'
+                lines.append(f"{ns}_pipeline_live_records{label} {value}")
+
+        lines += [
             f"# HELP {ns}_pipeline_runs_total Total pipeline runs",
             f"# TYPE {ns}_pipeline_runs_total counter",
         ]
@@ -169,6 +226,37 @@ class PrometheusTextExporter:
                 continue
             lane = _escape_label_value(runtime.execution_lane)
             lines.append(f'{ns}_pipeline_runtime_lane_last{{pipeline_id="{epid}",lane="{lane}"}} 1')
+
+        lines += [
+            f"# HELP {ns}_pipeline_runtime_current Current-run runtime gauges",
+            f"# TYPE {ns}_pipeline_runtime_current gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            runtime = stats.live_runtime
+            if runtime is None:
+                continue
+            for signal, attr_name in runtime_gauges:
+                value = getattr(runtime, attr_name)
+                if isinstance(value, bool):
+                    value = int(value)
+                lines.append(
+                    f'{ns}_pipeline_runtime_current{{pipeline_id="{epid}",signal="{signal}"}} {value}'
+                )
+
+        lines += [
+            f"# HELP {ns}_pipeline_runtime_lane_current Current-run execution lane marker",
+            f"# TYPE {ns}_pipeline_runtime_lane_current gauge",
+        ]
+        for pid, stats in stats_by_pipeline.items():
+            epid = _escape_label_value(pid)
+            runtime = stats.live_runtime
+            if runtime is None or not runtime.execution_lane:
+                continue
+            lane = _escape_label_value(runtime.execution_lane)
+            lines.append(
+                f'{ns}_pipeline_runtime_lane_current{{pipeline_id="{epid}",lane="{lane}"}} 1'
+            )
 
         lines += [
             f"# HELP {ns}_pipeline_middleware_records_total Cumulative middleware record counters",

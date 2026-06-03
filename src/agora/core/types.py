@@ -152,6 +152,7 @@ class DeliveryConfig:
     checkpoint_every: int = 1
     checkpoint_failure_policy: CheckpointFailurePolicy = CheckpointFailurePolicy.FAIL_CLOSED
     batch_size: int = 1
+    batch_flush_interval_ms: int | None = None
     sink_failure_policy: SinkFailurePolicy = SinkFailurePolicy.FAIL_CLOSED
     sink_concurrency: int | None = None
     max_buffer_size: int | None = None

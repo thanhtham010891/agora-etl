@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,9 @@ from agora.core.session import PipelineLifecycleController, PipelineRunState
 from agora.core.source import SourceRecordError
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from agora.core.context import PipelineContext
     from agora.core.metrics import PipelineRunSummary
     from agora.core.middleware import MiddlewareChain
     from agora.core.source import BaseSource
@@ -33,6 +37,7 @@ class PipelineRuntimeSpec:
     writer: Writer[Any]
     pipeline_id: str
     config: DeliveryConfig
+    live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
 
 
 class PipelineExecutor:
@@ -46,6 +51,27 @@ class PipelineExecutor:
     def __init__(self, spec: PipelineRuntimeSpec) -> None:
         self._spec = spec
         self._lifecycle = PipelineLifecycleController(spec)
+
+    async def _report_live_metrics(
+        self,
+        state: PipelineRunState,
+        execution: ExecutionCoordinator,
+        stop_event: asyncio.Event,
+    ) -> None:
+        callback = self._spec.live_metrics_callback
+        if callback is None:
+            return
+
+        while not stop_event.is_set():
+            execution.sync_source_runtime_metrics(state.ctx)
+            try:
+                await callback(state.ctx)
+            except Exception as exc:
+                state.ctx.log.warning("pipeline_live_metrics_callback_error", error=str(exc))
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+            except TimeoutError:
+                continue
 
     async def _run_stream(
         self,
@@ -147,6 +173,8 @@ class PipelineExecutor:
         )
         shutdown_error: Exception | None = None
         cancellation_error: asyncio.CancelledError | None = None
+        live_metrics_stop: asyncio.Event | None = None
+        live_metrics_task: asyncio.Task[None] | None = None
 
         with state.ctx.trace_span(
             "pipeline.run",
@@ -162,6 +190,20 @@ class PipelineExecutor:
         ) as span:
             try:
                 await self._lifecycle.start_runtime(state)
+                if self._spec.live_metrics_callback is not None:
+                    execution.sync_source_runtime_metrics(state.ctx)
+                    try:
+                        await self._spec.live_metrics_callback(state.ctx)
+                    except Exception as exc:
+                        state.ctx.log.warning(
+                            "pipeline_live_metrics_callback_error",
+                            error=str(exc),
+                        )
+                    live_metrics_stop = asyncio.Event()
+                    live_metrics_task = asyncio.create_task(
+                        self._report_live_metrics(state, execution, live_metrics_stop),
+                        name=f"{self._spec.pipeline_id}-live-metrics",
+                    )
                 await self._run_stream(state, execution)
             except asyncio.CancelledError as exc:
                 state.ctx.log.info("pipeline_cancelled")
@@ -172,6 +214,11 @@ class PipelineExecutor:
             except Exception as exc:
                 await self._handle_run_error(state, coordinator, exc)
             finally:
+                if live_metrics_stop is not None:
+                    live_metrics_stop.set()
+                if live_metrics_task is not None:
+                    with contextlib.suppress(Exception):
+                        await live_metrics_task
                 shutdown_error = await self._lifecycle.shutdown_runtime(state)
                 execution.sync_source_runtime_metrics(state.ctx)
                 if span is not None:

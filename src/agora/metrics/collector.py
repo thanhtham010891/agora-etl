@@ -202,6 +202,18 @@ class PipelineStats:
     last_run_throughput_rps: float = 0.0
     last_error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    schedule: str | None = None
+    is_running: bool = False
+    active_run_id: str | None = None
+    active_run_started_at: datetime | None = None
+    active_run_duration_s: float = 0.0
+    active_run_throughput_rps: float = 0.0
+    live_records_consumed: int = 0
+    live_records_written: int = 0
+    live_records_dropped: int = 0
+    live_records_errored: int = 0
+    live_runtime: RuntimeMetrics | None = None
+    last_live_at: datetime | None = None
 
     # AI metrics — None until the first AI-powered run
     ai: AIRunStats | None = None
@@ -225,6 +237,8 @@ class PipelineStats:
     @property
     def status(self) -> str:
         """``'ok'``, ``'degraded'``, or ``'failing'``."""
+        if self.is_running:
+            return "running"
         if self.total_runs == 0:
             return "idle"
         if self.failed_runs == 0:
@@ -232,6 +246,16 @@ class PipelineStats:
         if self.success_rate >= 0.5:
             return "degraded"
         return "failing"
+
+    @property
+    def live_records_pending(self) -> int:
+        return max(
+            self.live_records_consumed
+            - self.live_records_written
+            - self.live_records_dropped
+            - self.live_records_errored,
+            0,
+        )
 
     def _absorb_ai(self, ai_summary: object) -> None:
         """Merge AIMetrics from a run summary into cumulative AIRunStats."""
@@ -246,10 +270,24 @@ class PipelineStats:
         self.ai.total_validation_pass += getattr(ai_summary, "total_validation_pass", 0)
         self.ai.total_validation_fail += getattr(ai_summary, "total_validation_fail", 0)
 
+    def clear_live_run(self) -> None:
+        self.is_running = False
+        self.active_run_id = None
+        self.active_run_started_at = None
+        self.active_run_duration_s = 0.0
+        self.active_run_throughput_rps = 0.0
+        self.live_records_consumed = 0
+        self.live_records_written = 0
+        self.live_records_dropped = 0
+        self.live_records_errored = 0
+        self.live_runtime = None
+        self.last_live_at = None
+
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "pipeline_id": self.pipeline_id,
             "status": self.status,
+            "schedule": self.schedule,
             "total_runs": self.total_runs,
             "successful_runs": self.successful_runs,
             "failed_runs": self.failed_runs,
@@ -263,6 +301,14 @@ class PipelineStats:
             "last_run_throughput_rps": round(self.last_run_throughput_rps, 3),
             "last_error": self.last_error,
             "uptime_seconds": round(self.uptime_seconds, 1),
+            "lifecycle": {
+                "state": "running" if self.is_running else "idle",
+                "running": self.is_running,
+                "active_run_id": self.active_run_id,
+                "active_run_started_at": (
+                    self.active_run_started_at.isoformat() if self.active_run_started_at else None
+                ),
+            },
         }
         if self.ai is not None:
             d["ai"] = self.ai.to_dict()
@@ -270,6 +316,19 @@ class PipelineStats:
         d["middlewares"] = {
             name: stats.to_dict() for name, stats in sorted(self.middlewares.items())
         }
+        if self.is_running and self.active_run_id is not None:
+            d["live"] = {
+                "run_id": self.active_run_id,
+                "elapsed_seconds": round(self.active_run_duration_s, 3),
+                "throughput_rps": round(self.active_run_throughput_rps, 3),
+                "records_consumed": self.live_records_consumed,
+                "records_written": self.live_records_written,
+                "records_dropped": self.live_records_dropped,
+                "records_errored": self.live_records_errored,
+                "records_pending": self.live_records_pending,
+                "runtime": self.live_runtime.to_dict() if self.live_runtime is not None else {},
+                "updated_at": self.last_live_at.isoformat() if self.last_live_at else None,
+            }
         if self.last_slowest_middleware is not None:
             d["slowest_middleware"] = {
                 "name": self.last_slowest_middleware,
@@ -295,6 +354,50 @@ class MetricsCollector:
         self._pipelines: dict[str, PipelineStats] = {}
         self._started_at = datetime.now(UTC)
         self._lock = asyncio.Lock()
+
+    async def register_pipeline(
+        self,
+        pipeline_id: str,
+        *,
+        schedule: str | None = None,
+    ) -> None:
+        async with self._lock:
+            stats = self._pipelines.get(pipeline_id)
+            if stats is None:
+                stats = PipelineStats(pipeline_id=pipeline_id)
+                self._pipelines[pipeline_id] = stats
+            if schedule is not None:
+                stats.schedule = schedule
+
+    async def record_live_run(
+        self,
+        pipeline_id: str,
+        summary: PipelineRunSummary,
+        *,
+        run_id: str,
+        started_at: datetime,
+    ) -> None:
+        async with self._lock:
+            stats = self._pipelines.get(pipeline_id)
+            if stats is None:
+                stats = PipelineStats(pipeline_id=pipeline_id)
+                self._pipelines[pipeline_id] = stats
+
+            stats.is_running = True
+            stats.active_run_id = run_id
+            stats.active_run_started_at = started_at
+            stats.active_run_duration_s = summary.elapsed_seconds
+            stats.active_run_throughput_rps = (
+                summary.records_consumed / summary.elapsed_seconds
+                if summary.elapsed_seconds > 0
+                else 0.0
+            )
+            stats.live_records_consumed = summary.records_consumed
+            stats.live_records_written = summary.records_written
+            stats.live_records_dropped = summary.records_dropped
+            stats.live_records_errored = summary.records_errored
+            stats.live_runtime = summary.runtime.copy()
+            stats.last_live_at = datetime.now(UTC)
 
     # ------------------------------------------------------------------ #
     # Record                                                               #
@@ -323,6 +426,7 @@ class MetricsCollector:
                 self._pipelines[pipeline_id] = PipelineStats(pipeline_id=pipeline_id)
 
             stats = self._pipelines[pipeline_id]
+            stats.clear_live_run()
             stats.total_runs += 1
             stats.last_run_at = datetime.now(UTC)
 
@@ -375,6 +479,8 @@ class MetricsCollector:
             s = copy.copy(stats)
             s.middlewares = {k: copy.copy(v) for k, v in stats.middlewares.items()}
             s.runtime = copy.copy(stats.runtime)
+            if stats.live_runtime is not None:
+                s.live_runtime = stats.live_runtime.copy()
             if stats.ai is not None:
                 s.ai = copy.copy(stats.ai)
             return s
@@ -391,6 +497,8 @@ class MetricsCollector:
             return "failing"
         if "degraded" in statuses:
             return "degraded"
+        if "running" in statuses:
+            return "running"
         if "idle" in statuses and len(statuses) == 1:
             return "idle"
         return "ok"

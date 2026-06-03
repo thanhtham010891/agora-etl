@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC
 from dataclasses import dataclass
@@ -145,6 +146,13 @@ class RunState:
     checkpoint_state: CheckpointState
     pending_writes: list[PendingWrite]
     processed_count: int = 0
+    pending_write_batch_size: int = 1
+    pending_write_flush_interval_s: float | None = None
+    pending_write_notify: asyncio.Event | None = None
+    pending_write_stop: asyncio.Event | None = None
+    pending_write_flushed: asyncio.Event | None = None
+    pending_write_owner_task: asyncio.Task[None] | None = None
+    pending_write_error: BaseException | None = None
 
 
 @dataclass(slots=True)
@@ -161,6 +169,127 @@ class DeliveryEngine:
     checkpoint_failure_policy: CheckpointFailurePolicy
     checkpoint_key: str
     checkpoint_every: int
+    batch_flush_interval_ms: int | None = None
+
+    def _uses_pending_write_owner(
+        self,
+        writer_batch_size: int,
+    ) -> bool:
+        return (
+            writer_batch_size > 1
+            and self.batch_flush_interval_ms is not None
+            and self.batch_flush_interval_ms > 0
+        )
+
+    async def _ensure_pending_write_owner(
+        self,
+        state: RunState,
+        writer_batch_size: int,
+    ) -> None:
+        if not self._uses_pending_write_owner(writer_batch_size):
+            return
+        if state.pending_write_owner_task is not None:
+            return
+        flush_interval_ms = self.batch_flush_interval_ms
+        if flush_interval_ms is None:
+            return
+
+        state.pending_write_batch_size = writer_batch_size
+        state.pending_write_flush_interval_s = flush_interval_ms / 1000.0
+        state.pending_write_notify = asyncio.Event()
+        state.pending_write_stop = asyncio.Event()
+        state.pending_write_flushed = asyncio.Event()
+        state.pending_write_flushed.set()
+        state.pending_write_error = None
+        state.pending_write_owner_task = asyncio.create_task(
+            self._run_pending_write_owner(state),
+            name=f"{state.ctx.pipeline_id}-pending-write-owner",
+        )
+
+    async def _run_pending_write_owner(self, state: RunState) -> None:
+        notify = state.pending_write_notify
+        stop = state.pending_write_stop
+        flushed = state.pending_write_flushed
+        batch_size = state.pending_write_batch_size
+        flush_interval_s = state.pending_write_flush_interval_s
+        assert notify is not None
+        assert stop is not None
+        assert flushed is not None
+        assert flush_interval_s is not None
+
+        try:
+            while True:
+                if stop.is_set() and not state.pending_writes:
+                    return
+
+                if len(state.pending_writes) >= batch_size:
+                    await self._flush_pending_writes_once(state)
+                    flushed.set()
+                    continue
+
+                timeout: float | None = flush_interval_s if state.pending_writes else None
+                timed_out = False
+                try:
+                    if timeout is None:
+                        await notify.wait()
+                    else:
+                        await asyncio.wait_for(notify.wait(), timeout=timeout)
+                except TimeoutError:
+                    timed_out = True
+                finally:
+                    notify.clear()
+
+                if stop.is_set() and state.pending_writes:
+                    await self._flush_pending_writes_once(state)
+                    flushed.set()
+                    continue
+
+                if timed_out and state.pending_writes:
+                    await self._flush_pending_writes_once(state)
+                    flushed.set()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            state.pending_write_error = exc
+            flushed.set()
+            raise
+
+    async def _wait_for_pending_write_capacity(
+        self,
+        state: RunState,
+        writer_batch_size: int,
+    ) -> None:
+        flushed = state.pending_write_flushed
+        assert flushed is not None
+
+        while len(state.pending_writes) >= writer_batch_size:
+            if state.pending_write_error is not None:
+                raise state.pending_write_error
+            await flushed.wait()
+
+    async def close_pending_write_owner(self, state: RunState) -> None:
+        task = state.pending_write_owner_task
+        if task is None:
+            return
+
+        stop = state.pending_write_stop
+        notify = state.pending_write_notify
+        assert stop is not None
+        assert notify is not None
+
+        stop.set()
+        notify.set()
+        try:
+            await task
+        finally:
+            state.pending_write_owner_task = None
+            state.pending_write_notify = None
+            state.pending_write_stop = None
+            state.pending_write_flushed = None
+            error = state.pending_write_error
+            state.pending_write_error = None
+            if error is not None:
+                raise error
 
     async def write_to_dlq(
         self,
@@ -532,7 +661,7 @@ class DeliveryEngine:
         for hook in delivered_hooks:
             await hook()
 
-    async def flush_pending_writes(self, state: RunState) -> None:
+    async def _flush_pending_writes_once(self, state: RunState) -> None:
         if not state.pending_writes:
             return
 
@@ -570,6 +699,14 @@ class DeliveryEngine:
 
         await self._commit_outcomes(state, outcomes)
 
+    async def flush_pending_writes(self, state: RunState) -> None:
+        if state.pending_write_owner_task is not None:
+            notify = state.pending_write_notify
+            assert notify is not None
+            notify.set()
+            await self.close_pending_write_owner(state)
+        await self._flush_pending_writes_once(state)
+
     async def queue_processed_record(
         self,
         state: RunState,
@@ -585,6 +722,10 @@ class DeliveryEngine:
             await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
             return
 
+        await self._ensure_pending_write_owner(state, writer_batch_size)
+
+        if state.pending_write_flushed is not None:
+            state.pending_write_flushed.clear()
         state.pending_writes.append(
             PendingWrite(
                 processed=result,
@@ -593,6 +734,12 @@ class DeliveryEngine:
                 on_success=on_success,
             )
         )
+        if state.pending_write_notify is not None:
+            state.pending_write_notify.set()
+        if state.pending_write_owner_task is not None:
+            if len(state.pending_writes) >= writer_batch_size:
+                await self._wait_for_pending_write_capacity(state, writer_batch_size)
+            return
         if len(state.pending_writes) >= writer_batch_size:
             await self.flush_pending_writes(state)
 

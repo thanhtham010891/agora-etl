@@ -94,6 +94,7 @@ class PipelineLifecycleController:
             checkpoint_failure_policy=config.checkpoint_failure_policy,
             checkpoint_key=config.checkpoint_key or self._spec.pipeline_id,
             checkpoint_every=config.checkpoint_every,
+            batch_flush_interval_ms=config.batch_flush_interval_ms,
         )
 
     async def restore_checkpoint(self, ctx: PipelineContext) -> None:

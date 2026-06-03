@@ -175,6 +175,9 @@ class ScheduledPipelineRunner:
 
         try:
             pipeline = await self._pipeline.build()
+            live_metrics_callback = self._pipeline.live_metrics_callback
+            if live_metrics_callback is not None and hasattr(pipeline, "set_live_metrics_callback"):
+                pipeline.set_live_metrics_callback(live_metrics_callback)
             summary = await pipeline.run(max_records=self._pipeline.max_records)
             self._handle_run_success(record, summary)
         except asyncio.CancelledError as exc:

@@ -36,8 +36,9 @@ from agora.core.tracing import NoopTracer
 from agora.core.types import DeliveryConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
+    from agora.core.context import PipelineContext
     from agora.core.metrics import PipelineRunSummary
     from agora.core.source import BaseSource
     from agora.core.writer import Writer
@@ -173,6 +174,7 @@ class BoundPipeline(Generic[T]):
             batch_size=max(config.batch_size, 1),
             tracer=config.tracer or NoopTracer(),
         )
+        self._live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
 
     @property
     def pipeline_id(self) -> str:
@@ -188,6 +190,12 @@ class BoundPipeline(Generic[T]):
             config=self._config,
         )
 
+    def set_live_metrics_callback(
+        self,
+        callback: Callable[[PipelineContext], Awaitable[None]] | None,
+    ) -> None:
+        self._live_metrics_callback = callback
+
     def _runtime_spec(self) -> PipelineRuntimeSpec:
         return PipelineRuntimeSpec(
             source=self._source,
@@ -195,15 +203,23 @@ class BoundPipeline(Generic[T]):
             writer=self._writer,
             pipeline_id=self._pipeline_id,
             config=self._config,
+            live_metrics_callback=self._live_metrics_callback,
         )
 
     async def run(
         self,
         max_records: int | None = None,
         run_id: str | None = None,
+        live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None,
     ) -> PipelineRunSummary:
-        executor = PipelineExecutor(self._runtime_spec())
-        return await executor.execute(
-            max_records=max_records,
-            run_id=run_id,
-        )
+        previous_live_metrics_callback = self._live_metrics_callback
+        if live_metrics_callback is not None:
+            self._live_metrics_callback = live_metrics_callback
+        try:
+            executor = PipelineExecutor(self._runtime_spec())
+            return await executor.execute(
+                max_records=max_records,
+                run_id=run_id,
+            )
+        finally:
+            self._live_metrics_callback = previous_live_metrics_callback

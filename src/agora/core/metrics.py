@@ -12,6 +12,7 @@ when AI middlewares are present — zero-cost for non-AI pipelines.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -182,6 +183,7 @@ class PipelineMetrics:
     # Runtime pressure / bounded-memory signals
     runtime: RuntimeMetrics = field(default_factory=lambda: RuntimeMetrics())
     last_checkpoint: Checkpoint | None = None
+    _live_metric_overlays: list[Any] = field(default_factory=list, repr=False)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -211,17 +213,40 @@ class PipelineMetrics:
                 has_ai = True
         return agg if has_ai else None
 
+    def register_live_metric_overlay(self, overlay: Any) -> None:
+        self._live_metric_overlays.append(overlay)
+
+    def unregister_live_metric_overlay(self, overlay: Any) -> None:
+        with contextlib.suppress(ValueError):
+            self._live_metric_overlays.remove(overlay)
+
     def snapshot(self, pipeline_id: str, run_id: str) -> PipelineRunSummary:
         elapsed = time.monotonic() - self.started_at
+        records_consumed = self.records_consumed
+        records_written = self.records_written
+        by_source = dict(self.by_source)
+
+        for overlay in self._live_metric_overlays:
+            pending = overlay.snapshot_pending()
+            pending_consumed = pending.get("records_consumed", 0)
+            pending_written = pending.get("records_written", 0)
+            if pending_consumed:
+                records_consumed += pending_consumed
+                source_name = pending.get("source_name")
+                if source_name:
+                    by_source[source_name] = by_source.get(source_name, 0) + pending_consumed
+            if pending_written:
+                records_written += pending_written
+
         return PipelineRunSummary(
             pipeline_id=pipeline_id,
             run_id=run_id,
             elapsed_seconds=elapsed,
-            records_consumed=self.records_consumed,
-            records_written=self.records_written,
+            records_consumed=records_consumed,
+            records_written=records_written,
             records_dropped=self.records_dropped,
             records_errored=self.records_errored,
-            by_source=dict(self.by_source),
+            by_source=by_source,
             by_middleware=dict(self.by_middleware.items()),
             ai=self.aggregate_ai(),
             runtime=self.runtime.copy(),

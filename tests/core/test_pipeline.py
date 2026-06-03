@@ -88,6 +88,47 @@ async def test_run_with_max_records():
     assert summary.records_written == 5
 
 
+@pytest.mark.asyncio
+async def test_batch_flush_interval_flushes_partial_batches_for_long_lived_sources():
+    source = TimedBatchSource(values=[1, 2], delays_after_yield=[0.03, 0.0])
+    sink = StrictBatchCollectSink()
+
+    summary = await (
+        Pipeline(source)
+        .build(
+            sink,
+            config=DeliveryConfig(batch_size=100, batch_flush_interval_ms=10),
+        )
+        .run()
+    )
+
+    assert summary.records_consumed == 2
+    assert summary.records_written == 2
+    assert sink.batches == [[1], [2]]
+
+
+@pytest.mark.asyncio
+async def test_batch_flush_interval_does_not_duplicate_records_when_timeout_and_new_data_are_close():
+    source = TimedBatchSource(values=[1, 2], delays_after_yield=[0.011, 0.0])
+    sink = StrictBatchCollectSink()
+
+    summary = await (
+        Pipeline(source)
+        .build(
+            sink,
+            config=DeliveryConfig(batch_size=2, batch_flush_interval_ms=10),
+        )
+        .run()
+    )
+
+    flattened = [record for batch in sink.batches for record in batch]
+
+    assert summary.records_consumed == 2
+    assert summary.records_written == 2
+    assert flattened == [1, 2]
+    assert len(flattened) == 2
+
+
 class InfiniteCounterSource(BaseSource[int]):
     source_name = "infinite_counter"
 
@@ -135,6 +176,42 @@ class BatchCollectSink:
     async def write_batch(self, records: list[int]) -> None:
         self.batches.append(list(records))
         self.records.extend(records)
+
+    async def flush(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class TimedBatchSource(BaseSource[int]):
+    source_name = "timed_batch"
+
+    def __init__(self, values: list[int], delays_after_yield: list[float]) -> None:
+        self._values = values
+        self._delays_after_yield = delays_after_yield
+
+    async def stream(self):
+        for value, delay in zip(self._values, self._delays_after_yield, strict=True):
+            yield value
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+
+class StrictBatchCollectSink:
+    sink_name = "strict_batch_collect"
+
+    def __init__(self) -> None:
+        self.batches: list[list[int]] = []
+
+    async def open(self) -> None:
+        pass
+
+    async def write(self, record: int) -> None:
+        raise AssertionError(f"single-record write should not be used: {record}")
+
+    async def write_batch(self, records: list[int]) -> None:
+        self.batches.append(list(records))
 
     async def flush(self) -> None:
         pass
