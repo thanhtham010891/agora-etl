@@ -36,11 +36,13 @@ import inspect
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
 from agora.core.batch import BatchMiddleware, BatchProcessResult
+from agora.core.data_plane import DataPlane
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -69,6 +71,34 @@ class MiddlewareProcessResult:
 
     value: Any | None
     failure: MiddlewareFailure | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PipelinedBatchStageSpec:
+    """Runtime-selected batch stage that can submit whole batches concurrently."""
+
+    index: int
+    middleware: Any
+    name: str
+    max_in_flight: int
+    ordered: bool
+    arrow_stage: bool
+
+
+class MiddlewareDataPlane(StrEnum):
+    """Logical data plane flowing between middleware stages."""
+
+    PYTHON_ROWS = DataPlane.PYTHON_ROWS.value
+    ARROW_BATCHES = DataPlane.ARROW_BATCHES.value
+
+
+@dataclass(frozen=True, slots=True)
+class MiddlewareModeSpec:
+    """One row in the middleware compatibility matrix."""
+
+    index: int
+    name: str
+    data_plane: MiddlewareDataPlane
 
 
 # ======================================================================
@@ -503,12 +533,41 @@ class MiddlewareChain(Generic[T, U]):
 
         return any(isinstance(m, BatchMiddleware) for m in self._middlewares)
 
-    def has_only_arrow_batch_stages(self) -> bool:
-        """Return True when the chain is non-empty and every stage is an ArrowBatchMiddleware."""
+    def stage_mode_matrix(self) -> tuple[MiddlewareModeSpec, ...]:
+        """Return the middleware data-plane matrix used for compatibility checks."""
         from agora.core.batch import ArrowBatchMiddleware
 
-        return bool(self._middlewares) and all(
-            isinstance(m, ArrowBatchMiddleware) for m in self._middlewares
+        matrix: list[MiddlewareModeSpec] = []
+        for index, middleware in enumerate(self._middlewares):
+            data_plane = MiddlewareDataPlane.ARROW_BATCHES
+            if not isinstance(middleware, ArrowBatchMiddleware):
+                data_plane = MiddlewareDataPlane.PYTHON_ROWS
+            matrix.append(
+                MiddlewareModeSpec(
+                    index=index,
+                    name=getattr(middleware, "name", type(middleware).__name__),
+                    data_plane=data_plane,
+                )
+            )
+        return tuple(matrix)
+
+    def has_arrow_batch_stages(self) -> bool:
+        """Return True if any middleware in the chain expects Arrow batches."""
+        return any(
+            spec.data_plane == MiddlewareDataPlane.ARROW_BATCHES
+            for spec in self.stage_mode_matrix()
+        )
+
+    def has_mixed_data_planes(self) -> bool:
+        """Return True when Arrow and Python-row stages are mixed in one chain."""
+        planes = {spec.data_plane for spec in self.stage_mode_matrix()}
+        return len(planes) > 1
+
+    def has_only_arrow_batch_stages(self) -> bool:
+        """Return True when the chain is non-empty and every stage is an ArrowBatchMiddleware."""
+        matrix = self.stage_mode_matrix()
+        return bool(matrix) and all(
+            spec.data_plane == MiddlewareDataPlane.ARROW_BATCHES for spec in matrix
         )
 
     async def process_arrow_batch(
@@ -516,18 +575,21 @@ class MiddlewareChain(Generic[T, U]):
         batch: Any,
         ctx: PipelineContext,
     ) -> BatchProcessResult:
-        """Run *batch* (a ``pa.RecordBatch``) through every Arrow-native stage in order.
+        """Run *batch* through every Arrow-native stage in order."""
+        return await self.process_arrow_batch_range(0, len(self._middlewares), batch, ctx)
 
-        Each stage receives the output of the previous one. A stage returning a
-        zero-row batch is treated as "drop the whole batch" — downstream stages
-        are skipped and the empty batch is returned. If a stage raises, the
-        exception is wrapped in a ``BatchProcessResult`` with ``failure`` set
-        (same Option-A semantics as ``process_batch``).
-        """
+    async def process_arrow_batch_range(
+        self,
+        start: int,
+        stop: int,
+        batch: Any,
+        ctx: PipelineContext,
+    ) -> BatchProcessResult:
+        """Run an Arrow-native batch through a slice of the middleware chain."""
         from agora.core.batch import ArrowBatchMiddleware, BatchFailure, BatchProcessResult
 
         current = batch
-        for middleware in self._middlewares:
+        for middleware in self._middlewares[start:stop]:
             if not isinstance(middleware, ArrowBatchMiddleware):
                 continue
             t0 = time.monotonic()
@@ -585,9 +647,22 @@ class MiddlewareChain(Generic[T, U]):
         if not self._middlewares:
             return BatchProcessResult(results=records)
 
+        return await self.process_batch_range(0, len(self._middlewares), records, ctx)
+
+    async def process_batch_range(
+        self,
+        start: int,
+        stop: int,
+        records: list[Any],
+        ctx: PipelineContext,
+    ) -> BatchProcessResult:
+        """Run *records* through a slice of the chain in batch mode."""
+        from agora.core.batch import BatchProcessResult
+
         current: list[Any] = list(records)
 
-        for idx, middleware in enumerate(self._middlewares):
+        for idx in range(start, stop):
+            middleware = self._middlewares[idx]
             result = await middleware.apply_in_batch(current, ctx, self, idx)
             if isinstance(result, BatchProcessResult):
                 return result
@@ -610,10 +685,45 @@ class MiddlewareChain(Generic[T, U]):
             return None
         return stages[0]
 
+    def pipelined_batch_stages(self) -> tuple[PipelinedBatchStageSpec, ...]:
+        """Return every middleware that can submit whole batches concurrently."""
+        from agora.core.batch import ArrowBatchMiddleware
+
+        stages: list[PipelinedBatchStageSpec] = []
+        for index, middleware in enumerate(self._middlewares):
+            submit_batch = getattr(middleware, "submit_batch", None)
+            max_in_flight = max(1, int(getattr(middleware, "batch_in_flight_limit", 1)))
+            if not callable(submit_batch) or max_in_flight <= 1:
+                continue
+            stages.append(
+                PipelinedBatchStageSpec(
+                    index=index,
+                    middleware=middleware,
+                    name=getattr(middleware, "name", "pipelined_batch"),
+                    max_in_flight=max_in_flight,
+                    ordered=bool(getattr(middleware, "ordered_batch_commits", True)),
+                    arrow_stage=isinstance(middleware, ArrowBatchMiddleware),
+                )
+            )
+        return tuple(stages)
+
+    def first_pipelined_batch_stage(self) -> PipelinedBatchStageSpec | None:
+        stages = self.pipelined_batch_stages()
+        if not stages:
+            return None
+        return stages[0]
+
     async def drain_buffered(self, ctx: PipelineContext) -> None:
         """Ask buffered middlewares to flush pending records before shutdown."""
         for middleware in self._middlewares:
             drain_pending = getattr(middleware, "drain_pending", None)
+            if callable(drain_pending):
+                await drain_pending(ctx)
+
+    async def drain_pipelined_batches(self, ctx: PipelineContext) -> None:
+        """Ask pipelined batch middlewares to flush any batch-local buffers."""
+        for middleware in self._middlewares:
+            drain_pending = getattr(middleware, "drain_pending_batches", None)
             if callable(drain_pending):
                 await drain_pending(ctx)
 

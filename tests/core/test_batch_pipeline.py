@@ -29,6 +29,8 @@ from agora import (
     is_batch_capable_source,
 )
 from agora.core.batch import is_arrow_native_sink
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
+from agora.core.errors import PipelineError
 from agora.core.source import BaseSource
 
 if TYPE_CHECKING:
@@ -86,7 +88,6 @@ class _BatchSource(BaseSource[int]):
     """A minimal batch-capable source for testing."""
 
     source_name = "batch_test_source"
-    supports_batch_emit: bool = True
     supports_checkpoint: bool = True
 
     def __init__(self, batches: list[list[int]]) -> None:
@@ -100,6 +101,14 @@ class _BatchSource(BaseSource[int]):
 
     async def prepare_resume(self, checkpoint: Any) -> None:
         return None
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
 
     async def stream_batches(self):  # type: ignore[override]
         for i, batch in enumerate(self._batches):
@@ -448,7 +457,7 @@ async def test_b09_no_middleware_batch_pipeline_writes_all_records() -> None:
 
 @pytest.mark.asyncio
 async def test_b10_max_records_respected_in_batch_mode() -> None:
-    """[BATCH-10] max_records stops the batch pipeline after the threshold."""
+    """[BATCH-10] max_records trims the source before the final batch overshoots."""
     sink = _CollectSink()
     source = _BatchSource([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
 
@@ -458,10 +467,9 @@ async def test_b10_max_records_respected_in_batch_mode() -> None:
         .run(max_records=4)
     )
 
-    # max_records=4 stops after the first batch that crosses the threshold.
-    # First batch: 3 records (total=3), second batch: 3 records (total=6 >= 4) → stop.
-    assert summary.records_consumed <= 6
-    assert summary.records_consumed >= 3
+    assert summary.records_consumed == 4
+    assert summary.records_written == 4
+    assert sink.records == [1, 2, 3, 4]
 
 
 # ======================================================================
@@ -607,8 +615,6 @@ class _ArrowBatchSource(BaseSource[Any]):
     """Arrow-emitting batch source for testing the arrow chain path."""
 
     source_name = "arrow_batch_source"
-    supports_batch_emit = True
-    emits_arrow_batches = True
 
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
@@ -619,6 +625,14 @@ class _ArrowBatchSource(BaseSource[Any]):
 
     async def prepare_resume(self, checkpoint: Any) -> None:
         return None
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.ARROW_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=True,
+        )
 
     async def stream_batches(self):
         pa = pytest.importorskip("pyarrow")
@@ -707,6 +721,77 @@ async def test_arrow_filter_all_rows_dropped_skips_write() -> None:
     assert summary.runtime.arrow_chain_active is True
 
 
+async def test_arrow_fast_path_active_with_fan_out_arrow_sinks() -> None:
+    """Arrow-native fan-out keeps the batch columnar when every sink supports Arrow."""
+    pytest.importorskip("pyarrow")
+    from agora import ArrowMapMiddleware
+
+    src = _ArrowBatchSource([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
+    sink_one = _ArrowNativeSink()
+    sink_two = _ArrowNativeSink()
+
+    summary = await (
+        Pipeline(src)
+        .pipe(ArrowMapMiddleware(lambda b: b))
+        .fan_out([sink_one, sink_two])  # type: ignore[list-item]
+        .run()
+    )
+
+    assert len(sink_one.batches) == 1
+    assert len(sink_two.batches) == 1
+    assert sink_one.batches[0].num_rows == 2
+    assert sink_two.batches[0].num_rows == 2
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
+
+
+async def test_arrow_chain_fan_out_mixes_arrow_and_list_sinks() -> None:
+    """Arrow middleware stays columnar, but non-Arrow sinks still receive Python rows."""
+    pytest.importorskip("pyarrow")
+    from agora import ArrowMapMiddleware
+
+    src = _ArrowBatchSource([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
+    arrow_sink = _ArrowNativeSink()
+    list_sink = _CollectSink()
+
+    summary = await (
+        Pipeline(src)
+        .pipe(ArrowMapMiddleware(lambda b: b))
+        .fan_out([arrow_sink, list_sink])  # type: ignore[list-item]
+        .run()
+    )
+
+    assert len(arrow_sink.batches) == 1
+    assert arrow_sink.batches[0].num_rows == 2
+    assert list_sink.records == [{"id": 1, "v": 10}, {"id": 2, "v": 20}]
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
+
+
+async def test_arrow_source_can_materialize_into_python_row_chain() -> None:
+    """Arrow source may materialize once into a pure Python row/list-dict chain."""
+    pytest.importorskip("pyarrow")
+
+    from agora import MapMiddleware
+
+    src = _ArrowBatchSource([{"id": 1}, {"id": 2}])
+    sink = _CollectSink()
+
+    summary = await (
+        Pipeline(src)
+        .pipe(MapMiddleware(lambda row: {"id": row["id"], "seen": True}))
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [{"id": 1, "seen": True}, {"id": 2, "seen": True}]
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.runtime.arrow_fast_path_active is False
+    assert summary.runtime.arrow_chain_active is False
+
+
 async def test_arrow_map_then_filter_chained() -> None:
     """Chained ArrowMap + ArrowFilter compose correctly."""
     pytest.importorskip("pyarrow")
@@ -735,8 +820,8 @@ async def test_arrow_map_then_filter_chained() -> None:
     assert sink.batches[0].num_rows == 3
 
 
-async def test_mixed_chain_falls_back_to_pylist() -> None:
-    """A chain mixing ArrowBatchMiddleware + regular Middleware falls back to list path."""
+async def test_mixed_chain_raises_pipeline_error() -> None:
+    """Arrow and Python row/list-dict stages cannot coexist in one chain."""
     pytest.importorskip("pyarrow")
 
     from agora import ArrowMapMiddleware, MapMiddleware
@@ -744,20 +829,14 @@ async def test_mixed_chain_falls_back_to_pylist() -> None:
     src = _ArrowBatchSource([{"id": 1}, {"id": 2}])
     sink = _CollectSink()
 
-    # MapMiddleware is NOT ArrowBatchMiddleware → chain is mixed → to_pylist fallback
-    summary = await (
-        Pipeline(src)
-        .pipe(ArrowMapMiddleware(lambda b: b))
-        .pipe(MapMiddleware(lambda r: r))
-        .build(sink)  # type: ignore[arg-type]
-        .run()
-    )
-
-    assert summary.records_consumed == 2
-    assert len(sink.records) == 2
-    assert summary.runtime.execution_lane == "batch"
-    assert summary.runtime.arrow_fast_path_active is False
-    assert summary.runtime.arrow_chain_active is False
+    with pytest.raises(PipelineError, match="mixes incompatible data planes"):
+        await (
+            Pipeline(src)
+            .pipe(ArrowMapMiddleware(lambda b: b))
+            .pipe(MapMiddleware(lambda r: r))
+            .build(sink)  # type: ignore[arg-type]
+            .run()
+        )
 
 
 async def test_arrow_chain_middleware_failure_routes_to_dlq() -> None:

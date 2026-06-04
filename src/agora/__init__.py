@@ -8,6 +8,7 @@ The most important classes are importable directly from ``agora``::
     from agora import Pipeline, BoundPipeline
     from agora import BaseSource, BaseSink, Middleware
     from agora import Registry, PipelineContext, PipelineRunSummary
+    from agora import DataPlane, SourceDataPlaneSpec, SinkDataPlaneSpec
 
     # Plugin system
     from agora import Plugin, Lifecycle, Configurable
@@ -61,9 +62,11 @@ from agora.core.checkpoint import (
 )
 from agora.core.container import AgoraContainer
 from agora.core.context import PipelineContext
+from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
 from agora.core.discovery import discover_plugins
 from agora.core.dlq import DLQRecord, DLQSink
 from agora.core.errors import AgoraError
+from agora.core.explain import MiddlewareStageExplain, PipelineExplain, SinkWriteExplain
 from agora.core.metrics import PipelineMetrics, PipelineRunSummary
 from agora.core.middleware import (
     BatchFilterMiddleware,
@@ -93,6 +96,7 @@ from agora.core.types import (
 )
 from agora.core.writer import Writer, WriteResult
 from agora.middlewares.arrow import ArrowFilterMiddleware, ArrowMapMiddleware
+from agora.middlewares.process import ArrowProcessBatchMiddleware, ProcessBatchMiddleware
 from agora.sources.file.csv import ArrowCsvSource
 from agora.sources.file.jsonlines import ArrowJsonLinesSource
 from agora.state import (
@@ -119,6 +123,7 @@ __all__ = [
     "ArrowJsonLinesSource",
     "ArrowMapMiddleware",
     "ArrowNativeSink",
+    "ArrowProcessBatchMiddleware",
     "Backpressure",
     "BaseSink",
     "BaseSource",
@@ -136,6 +141,7 @@ __all__ = [
     "DLQFailurePolicy",
     "DLQRecord",
     "DLQSink",
+    "DataPlane",
     "DedupStoreFailurePolicy",
     "DeliveryConfig",
     "FilterMiddleware",
@@ -147,23 +153,29 @@ __all__ = [
     "MembershipKeyStore",
     "MemoryBackend",
     "Middleware",
+    "MiddlewareStageExplain",
     "NoopTracer",
     "OnError",
     "OpenTelemetryTracer",
     "Pipeline",
     "PipelineContext",
+    "PipelineExplain",
     "PipelineMetrics",
     "PipelineRunSummary",
     "Plugin",
+    "ProcessBatchMiddleware",
     "Registry",
     "RetryMiddleware",
     "RetryPolicy",
     "RouteMiddleware",
     "SQLiteBackend",
     "SQLiteCheckpointStore",
+    "SinkDataPlaneSpec",
     "SinkFailurePolicy",
     "SinkFanOut",
     "SinkRouter",
+    "SinkWriteExplain",
+    "SourceDataPlaneSpec",
     "SourceRecordError",
     "SourceRecordFailurePolicy",
     "SourceRuntimeMetrics",

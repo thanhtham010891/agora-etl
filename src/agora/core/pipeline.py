@@ -24,13 +24,17 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
 from agora.core.executor import PipelineExecutor, PipelineRuntimeSpec
+from agora.core.explain import PipelineExplain
 from agora.core.middleware import FilterMiddleware, MiddlewareChain
+from agora.core.runtime import build_runtime_plan
 from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
 from agora.core.tracing import NoopTracer
 from agora.core.types import DeliveryConfig
@@ -144,6 +148,16 @@ class Pipeline(Generic[T]):
         config = config or DeliveryConfig()
         return self._build_bound_pipeline(router, config)
 
+    def explain(
+        self,
+        sink: BaseSink[Any] | None = None,
+        *,
+        config: DeliveryConfig | None = None,
+        max_records: int | None = None,
+    ) -> PipelineExplain:
+        """Build the default writer and return the pre-run execution summary."""
+        return self.build(sink, config=config).explain(max_records=max_records)
+
 
 # ======================================================================
 # BoundPipeline — async runner
@@ -206,6 +220,21 @@ class BoundPipeline(Generic[T]):
             live_metrics_callback=self._live_metrics_callback,
         )
 
+    def explain(self, max_records: int | None = None) -> PipelineExplain:
+        """Return the resolved runtime plan without starting the pipeline."""
+        source = self._source.limit(max_records) if max_records is not None else self._source
+        plan = build_runtime_plan(
+            source,
+            self._chain,
+            self._writer,
+            writer_batch_size=self._config.batch_size,
+        )
+        return PipelineExplain.from_runtime_plan(
+            pipeline_id=self._pipeline_id,
+            plan=plan,
+            source_limit=max_records,
+        )
+
     async def run(
         self,
         max_records: int | None = None,
@@ -223,3 +252,61 @@ class BoundPipeline(Generic[T]):
             )
         finally:
             self._live_metrics_callback = previous_live_metrics_callback
+
+    def run_sync(
+        self,
+        max_records: int | None = None,
+        run_id: str | None = None,
+    ) -> PipelineRunSummary:
+        """Run the pipeline synchronously — no ``asyncio.run()`` required.
+
+        Behaviour by calling context
+        ----------------------------
+        - **Plain script / Django management command / no running loop**: calls
+          ``asyncio.run()`` directly.
+        - **Already-running event loop** (e.g. Jupyter, another async framework):
+          runs the coroutine in a new background thread with its own event loop,
+          then blocks the calling thread until it completes.  This avoids the
+          ``asyncio.run()`` restriction that forbids nesting event loops.
+
+        Notes
+        -----
+        - Notebook users should prefer ``await pipeline.run()`` for better
+          integration with the kernel's event loop.  ``run_sync()`` works in
+          notebooks but spawns a thread, which may interact poorly with widgets
+          or kernel-level async tooling.
+        - ``run_sync()`` is not thread-safe: do not call it from multiple threads
+          on the same ``BoundPipeline`` instance simultaneously.
+        """
+        coro = self.run(max_records=max_records, run_id=run_id)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            # No running loop — safe to call asyncio.run() directly.
+            return asyncio.run(coro)
+
+        # A loop is already running (Jupyter, FastAPI startup, etc.).
+        # Run the coroutine in a dedicated background thread with its own loop
+        # so we don't block or nest the caller's loop.
+        result: PipelineRunSummary | None = None
+        exc: BaseException | None = None
+
+        def _run_in_thread() -> None:
+            nonlocal result, exc
+            try:
+                result = asyncio.run(coro)
+            except BaseException as e:
+                exc = e
+
+        thread = threading.Thread(target=_run_in_thread, daemon=True)
+        thread.start()
+        thread.join()
+
+        if exc is not None:
+            raise exc
+        assert result is not None
+        return result

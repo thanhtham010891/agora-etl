@@ -17,9 +17,14 @@ from agora import (
     Pipeline,
     SinkFailurePolicy,
 )
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
+from agora.core.errors import PipelineError
 from agora.core.middleware import Middleware
 from agora.core.runtime import _buffered, _source_adapter
+from agora.core.sink import BaseSink
 from agora.core.source import BaseSource
+from agora.sinks.file.csv import CsvSink
+from agora.sinks.file.jsonlines import JsonLinesSink
 from agora.sinks.io.stdout import StdoutSink
 
 # ======================================================================
@@ -62,6 +67,157 @@ def test_pipeline_filter_shorthand():
     assert isinstance(p._middlewares[0], FilterMiddleware)
 
 
+def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
+    pipeline = (
+        Pipeline(make_source(5))
+        .pipe(MapMiddleware(lambda x: x * 2, name="double"))
+        .build(StdoutSink())
+    )
+
+    explain = pipeline.explain(max_records=2)
+
+    assert explain.pipeline_id == "iterable"
+    assert explain.source_limit == 2
+    assert explain.planned_lane == "linear"
+    assert explain.source_data_plane == DataPlane.PYTHON_ROWS
+    assert explain.writer_input_data_plane == DataPlane.PYTHON_ROWS
+    assert explain.middleware_matrix[0].name == "double"
+    assert explain.middleware_matrix[0].data_plane == DataPlane.PYTHON_ROWS
+    assert explain.sinks[0].sink_name == "stdout"
+    assert explain.sink_downgrade_count == 0
+    assert explain.to_dict()["source_limit"] == 2
+    assert "PipelineExplain(" in str(explain)
+
+
+def test_pipeline_explain_reports_arrow_fanout_sink_downgrades() -> None:
+    class _ArrowBatchSource(BaseSource[int]):
+        source_name = "arrow_batch_source"
+
+        async def stream(self):
+            yield 1
+
+        async def stream_batches(self):  # type: ignore[override]
+            yield []
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.ARROW_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=True,
+            )
+
+    class _ArrowSink(BaseSink[int]):
+        sink_name = "arrow_sink"
+        accepted_data_planes = (
+            DataPlane.PYTHON_ROWS,
+            DataPlane.ARROW_BATCHES,
+        )
+        native_data_planes = accepted_data_planes
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def write_arrow_batch(self, batch) -> None:
+            del batch
+
+    class _RowSink(BaseSink[int]):
+        sink_name = "row_sink"
+
+        async def write(self, record: int) -> None:
+            del record
+
+    explain = Pipeline(_ArrowBatchSource()).fan_out([_ArrowSink(), _RowSink()]).explain()
+
+    assert explain.planned_lane == "batch"
+    assert explain.source_data_plane == DataPlane.ARROW_BATCHES
+    assert explain.writer_input_data_plane == DataPlane.ARROW_BATCHES
+    assert explain.arrow_chain_eligible is True
+    assert explain.arrow_fast_path_eligible is True
+    assert explain.sink_downgrade_count == 1
+    assert [sink.selected_data_plane for sink in explain.sinks] == [
+        DataPlane.ARROW_BATCHES,
+        DataPlane.PYTHON_ROWS,
+    ]
+    assert "(downgraded)" in str(explain)
+
+
+def test_pipeline_explain_file_fanout_keeps_arrow_boundary(tmp_path) -> None:
+    class _ArrowBatchSource(BaseSource[int]):
+        source_name = "arrow_batch_source"
+
+        async def stream(self):
+            yield 1
+
+        async def stream_batches(self):  # type: ignore[override]
+            yield []
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.ARROW_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=True,
+            )
+
+    explain = (
+        Pipeline(_ArrowBatchSource())
+        .fan_out(
+            [
+                JsonLinesSink(path=tmp_path / "out.jsonl", serializer=lambda row: row),
+                CsvSink(path=tmp_path / "out.csv", row_mapper=lambda row: row),
+            ]
+        )
+        .explain()
+    )
+
+    assert explain.writer_input_data_plane == DataPlane.ARROW_BATCHES
+    assert [sink.selected_data_plane for sink in explain.sinks] == [
+        DataPlane.ARROW_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    ]
+
+
+def test_pipeline_explain_fail_fast_on_invalid_mixed_chain() -> None:
+    from agora.core.batch import ArrowBatchMiddleware
+
+    class _ArrowBatchSource(BaseSource[int]):
+        source_name = "arrow_batch_source"
+
+        async def stream(self):
+            yield 1
+
+        async def stream_batches(self):  # type: ignore[override]
+            yield []
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.ARROW_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=True,
+            )
+
+    class _ArrowMW(ArrowBatchMiddleware):
+        name = "arrow_stage"
+
+        async def process_arrow_batch(self, batch, ctx):
+            del ctx
+            return batch
+
+    class _RowMW(Middleware[int, int]):
+        name = "row_stage"
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    pipeline = Pipeline(_ArrowBatchSource()).pipe(_ArrowMW()).pipe(_RowMW()).build(StdoutSink())
+
+    with pytest.raises(PipelineError, match="mixes incompatible data planes"):
+        pipeline.explain()
+
+
 # ======================================================================
 # BoundPipeline.run() tests
 # ======================================================================
@@ -86,6 +242,41 @@ async def test_run_with_max_records():
     summary = await pipeline.run(max_records=5)
     assert summary.records_consumed == 5
     assert summary.records_written == 5
+
+
+@pytest.mark.asyncio
+async def test_fan_out_with_max_records_limits_at_source_boundary() -> None:
+    seen_left: list[int] = []
+    seen_right: list[int] = []
+
+    class _CollectSink:
+        sink_name = "collect"
+
+        def __init__(self, target: list[int]) -> None:
+            self._target = target
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            self._target.append(record)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    summary = await (
+        Pipeline(IterableSource(list(range(100))))
+        .fan_out([_CollectSink(seen_left), _CollectSink(seen_right)])  # type: ignore[list-item]
+        .run(max_records=3)
+    )
+
+    assert summary.records_consumed == 3
+    assert summary.records_written == 3
+    assert seen_left == [0, 1, 2]
+    assert seen_right == [0, 1, 2]
 
 
 @pytest.mark.asyncio

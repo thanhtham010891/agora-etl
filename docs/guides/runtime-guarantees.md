@@ -117,6 +117,26 @@ Batch and Arrow paths may change how data is grouped or represented in memory,
 but they do not change the core guarantees around ordering, checkpoint gating,
 or fail-closed delivery defaults.
 
+### Process-isolated batch middleware keeps the same commit contract
+
+`ProcessBatchMiddleware` runs the batch transform in a separate worker process,
+but the commit boundary stays in the main runtime.
+
+That means:
+
+- checkpoint advancement still waits for the downstream write / DLQ outcome
+- a raised or timed-out process batch still fails the whole batch
+- later batches do not commit ahead of earlier ones
+- a timed-out worker pool is recycled before the next batch is accepted
+- in ordered pipelined mode, unresolved sibling batches from that recycled
+  worker-pool generation are failed rather than committed from stale worker
+  state
+- on pipeline cancellation or abort, Agora terminates the active process-pool
+  generation instead of waiting indefinitely for worker code to return
+
+So process isolation changes where compute happens, not when a batch is
+considered durably handled.
+
 ## Guaranteed sink and delivery behavior
 
 ### Sink failure is fail-closed by default

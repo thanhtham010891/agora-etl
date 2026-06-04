@@ -222,17 +222,6 @@ class ExecutionCoordinator:
             on_success=processed_record.source_record.on_success,
         )
 
-    def reached_max_records(
-        self,
-        ctx: PipelineContext,
-        count: int,
-        max_records: int | None,
-    ) -> bool:
-        if max_records is None or count < max_records:
-            return False
-        ctx.log.info("pipeline_max_records_reached", max_records=max_records)
-        return True
-
     def sync_source_runtime_metrics(self, ctx: PipelineContext) -> None:
         self._source_adapter.sync_runtime_metrics(ctx)
 
@@ -254,11 +243,13 @@ class ExecutionCoordinator:
         self,
         ctx: PipelineContext,
         checkpoint_state: CheckpointState,
-        max_records: int | None,
     ) -> None:
         ctx.metrics.runtime.execution_lane = self.plan.lane.value
+        ctx.metrics.runtime.source_data_plane = self.plan.source.emitted_plane.value
+        ctx.metrics.runtime.writer_input_data_plane = self.plan.writer.input_data_plane.value
+        ctx.metrics.runtime.writer_downgraded_sink_count = self.plan.writer.downgraded_sink_count
         if self.plan.lane == RuntimeLane.BATCH:
-            await self._batch_lane.run(ctx, checkpoint_state, max_records)
+            await self._batch_lane.run(ctx, checkpoint_state)
             return
 
         source_records = self._source_adapter.iter_source_records(ctx)
@@ -267,9 +258,8 @@ class ExecutionCoordinator:
                 ctx,
                 source_records,
                 checkpoint_state,
-                max_records,
                 self.plan.buffered_stages,
             )
             return
 
-        await self._linear_lane.run(ctx, source_records, checkpoint_state, max_records)
+        await self._linear_lane.run(ctx, source_records, checkpoint_state)

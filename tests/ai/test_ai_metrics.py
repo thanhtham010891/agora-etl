@@ -174,6 +174,41 @@ def test_run_summary_str_includes_ai_when_present():
     assert "tokens=150" in s
 
 
+def test_run_summary_str_includes_arrow_runtime_signals_when_present():
+    runtime = RuntimeMetrics(
+        execution_lane="batch",
+        source_data_plane="arrow_batches",
+        writer_input_data_plane="arrow_batches",
+        arrow_chain_active=True,
+        arrow_fast_path_active=True,
+        csv_arrow_native_batch_count=3,
+        csv_arrow_native_row_count=600,
+        csv_arrow_downgrade_batch_count=2,
+        csv_arrow_downgrade_row_count=150,
+    )
+    summary = PipelineRunSummary(
+        pipeline_id="test",
+        run_id="run-1",
+        elapsed_seconds=1.0,
+        records_consumed=10,
+        records_written=10,
+        records_dropped=0,
+        records_errored=0,
+        by_source={},
+        by_middleware={},
+        runtime=runtime,
+    )
+
+    s = str(summary)
+    assert "lane=batch" in s
+    assert "source_plane=arrow_batches" in s
+    assert "writer_plane=arrow_batches" in s
+    assert "arrow_chain=on" in s
+    assert "arrow_fast_path=on" in s
+    assert "csv_arrow_native=3b/600r" in s
+    assert "csv_arrow_downgraded=2b/150r" in s
+
+
 # ======================================================================
 # AIMiddleware._cached_complete metrics wiring
 # ======================================================================

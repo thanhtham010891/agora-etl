@@ -173,6 +173,10 @@ class PrometheusTextExporter:
                 ("writer_flush", stats.runtime.total_writer_flush_count),
                 ("adaptive_scale_up", stats.runtime.total_adaptive_scale_up_count),
                 ("adaptive_scale_down", stats.runtime.total_adaptive_scale_down_count),
+                ("csv_arrow_native_batch", stats.runtime.total_csv_arrow_native_batch_count),
+                ("csv_arrow_native_row", stats.runtime.total_csv_arrow_native_row_count),
+                ("csv_arrow_downgrade_batch", stats.runtime.total_csv_arrow_downgrade_batch_count),
+                ("csv_arrow_downgrade_row", stats.runtime.total_csv_arrow_downgrade_row_count),
             ]
             for event, value in runtime_totals:
                 lines.append(
@@ -195,12 +199,19 @@ class PrometheusTextExporter:
             ("rust_prefetch_push_batch_count", "rust_prefetch_push_batch_count"),
             ("buffered_stage_limit", "buffered_stage_limit"),
             ("buffered_stage_max_in_flight", "buffered_stage_max_in_flight"),
+            ("process_batch_stage_limit", "process_batch_stage_limit"),
+            ("process_batch_stage_max_in_flight", "process_batch_stage_max_in_flight"),
+            ("process_batch_stage_drain_count", "process_batch_stage_drain_count"),
             ("checkpoint_save_time_ms", "checkpoint_save_time_ms"),
             ("writer_flush_time_ms", "writer_flush_time_ms"),
             ("writer_flush_max_batch_size", "writer_flush_max_batch_size"),
             ("checkpoint_save_max_batch_size", "checkpoint_save_max_batch_size"),
             ("adaptive_backpressure_min_limit", "adaptive_backpressure_min_limit"),
             ("adaptive_backpressure_max_limit", "adaptive_backpressure_max_limit"),
+            ("csv_arrow_native_batch_count", "csv_arrow_native_batch_count"),
+            ("csv_arrow_native_row_count", "csv_arrow_native_row_count"),
+            ("csv_arrow_downgrade_batch_count", "csv_arrow_downgrade_batch_count"),
+            ("csv_arrow_downgrade_row_count", "csv_arrow_downgrade_row_count"),
         ]
         for pid, stats in stats_by_pipeline.items():
             epid = _escape_label_value(pid)

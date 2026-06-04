@@ -42,10 +42,10 @@ check:  ## Lint + format check (no auto-fix, for CI)
 
 # ─── Testing ──────────────────────────────────────────────────────────────────
 test:  ## Run all tests (excluding integration)
-	PYTHONPATH=src $(PYTEST) tests/ --ignore=tests/integration -q
+	PYTHONPATH=src $(PYTEST) tests/ --ignore=tests/integration -v
 
 test-all:  ## Run all tests including integration (requires external services)
-	PYTHONPATH=src $(PYTEST) tests/ -q
+	PYTHONPATH=src $(PYTEST) tests/ -v
 
 ci:  ## Full CI check: lint + format + type check + tests (mirrors GitHub Actions)
 	$(MAKE) check

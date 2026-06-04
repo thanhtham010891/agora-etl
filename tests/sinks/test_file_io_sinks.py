@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -7,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agora.core.context import PipelineContext
+from agora.core.metrics import PipelineMetrics
 from agora.sinks.file.csv import CsvSink
 from agora.sinks.file.jsonlines import JsonLinesSink
 from agora.sinks.file.parquet import ParquetSink
@@ -182,6 +185,109 @@ async def test_csv_reuses_open_file_across_flushes(tmp_path: Path) -> None:
         await sink.close()
 
     assert open_mock.call_count == 1
+
+
+async def test_csv_arrow_batch_falls_back_for_nested_columns(tmp_path: Path) -> None:
+    """Arrow CSV fallback stringifies nested values when pyarrow CSV cannot."""
+    pa = pytest.importorskip("pyarrow")
+
+    output = tmp_path / "nested.csv"
+    sink = CsvSink(path=output, row_mapper=lambda r: r)
+    batch = pa.RecordBatch.from_pylist(
+        [
+            {"id": 1, "names": {"primary": "Alpha", "alternate": ["A"]}},
+            {"id": 2, "names": {"primary": "Beta", "alternate": ["B1", "B2"]}},
+        ]
+    )
+
+    await sink.write_arrow_batch(batch)
+    await sink.close()
+
+    content = output.read_text()
+    lines = content.strip().split("\n")
+    assert lines[0] == "id,names"
+    assert "Alpha" in lines[1]
+    assert "alternate" in lines[1]
+    assert "Beta" in lines[2]
+
+
+async def test_csv_arrow_batch_records_runtime_downgrade_metrics(tmp_path: Path) -> None:
+    """CSV sink exposes when Arrow lane stayed active but sink downgraded internally."""
+    pa = pytest.importorskip("pyarrow")
+
+    output = tmp_path / "runtime-downgrade.csv"
+    sink = CsvSink(path=output, row_mapper=lambda r: r)
+    ctx = PipelineContext(pipeline_id="csv-runtime", metrics=PipelineMetrics())
+    ctx.metrics.runtime.arrow_chain_active = True
+    ctx.metrics.runtime.arrow_fast_path_active = True
+    sink.bind_context(ctx)
+    batch = pa.RecordBatch.from_pylist([{"id": 1, "names": {"primary": "Alpha"}}])
+
+    await sink.write_arrow_batch(batch)
+
+    runtime = ctx.metrics.runtime
+    assert runtime.arrow_chain_active is True
+    assert runtime.arrow_fast_path_active is True
+    assert runtime.csv_arrow_native_batch_count == 0
+    assert runtime.csv_arrow_native_row_count == 0
+    assert runtime.csv_arrow_downgrade_batch_count == 1
+    assert runtime.csv_arrow_downgrade_row_count == 1
+
+
+async def test_csv_arrow_batch_falls_back_when_pyarrow_csv_rejects_payload(tmp_path: Path) -> None:
+    """Arrow CSV fallback preserves output when pyarrow CSV rejects the batch."""
+    pa = pytest.importorskip("pyarrow")
+
+    output = tmp_path / "fallback.csv"
+    sink = CsvSink(path=output, row_mapper=lambda r: {"id": r["id"], "value": r["value"]})
+    batch = pa.RecordBatch.from_pylist([{"id": 1, "value": "ok"}])
+
+    with patch("pyarrow.csv.write_csv", side_effect=pa.ArrowInvalid("Invalid UTF8 payload")):
+        await sink.write_arrow_batch(batch)
+    await sink.close()
+
+    content = output.read_text()
+    lines = content.strip().split("\n")
+    assert lines == ["id,value", "1,ok"]
+
+
+async def test_csv_arrow_batch_records_runtime_native_metrics(tmp_path: Path) -> None:
+    """CSV sink counts batches that stayed on the native Arrow CSV path."""
+    pa = pytest.importorskip("pyarrow")
+
+    output = tmp_path / "runtime-native.csv"
+    sink = CsvSink(path=output, row_mapper=lambda r: r)
+    ctx = PipelineContext(pipeline_id="csv-runtime", metrics=PipelineMetrics())
+    ctx.metrics.runtime.arrow_chain_active = True
+    ctx.metrics.runtime.arrow_fast_path_active = True
+    sink.bind_context(ctx)
+    batch = pa.RecordBatch.from_pylist([{"id": 1, "value": "ok"}, {"id": 2, "value": "yes"}])
+
+    await sink.write_arrow_batch(batch)
+
+    runtime = ctx.metrics.runtime
+    assert runtime.csv_arrow_native_batch_count == 1
+    assert runtime.csv_arrow_native_row_count == 2
+    assert runtime.csv_arrow_downgrade_batch_count == 0
+    assert runtime.csv_arrow_downgrade_row_count == 0
+
+
+async def test_csv_arrow_append_mode_no_duplicate_header(tmp_path: Path) -> None:
+    """Arrow-native append mode should not write a second header."""
+    pa = pytest.importorskip("pyarrow")
+
+    output = tmp_path / "append-arrow.csv"
+    output.write_text("id,value\n1,old\n")
+    sink = CsvSink(path=output, row_mapper=lambda r: r, append=True)
+    batch = pa.RecordBatch.from_pylist([{"id": 2, "value": "new"}])
+
+    await sink.write_arrow_batch(batch)
+    await sink.close()
+
+    lines = output.read_text().strip().splitlines()
+    rows = list(csv.reader(lines))
+    assert rows == [["id", "value"], ["1", "old"], ["2", "new"]]
+    assert lines.count("id,value") == 1
 
 
 # ============================================================================

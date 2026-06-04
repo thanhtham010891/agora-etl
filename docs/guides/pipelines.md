@@ -20,6 +20,45 @@ dev_pipeline  = base.build(PostgresSink(dsn=dev_dsn))
 
 The chain is: `source → middlewares → writer (sink/fan-out/router)`. Nothing runs until you call `.run()`.
 
+When you want to inspect the resolved execution shape before running, call
+`.explain()` on a built pipeline:
+
+```python
+bound = Pipeline(source).pipe(NormalizeMiddleware()).build(CsvSink(path="out.csv"))
+
+plan = bound.explain(max_records=1_000)
+print(plan)
+print(plan.to_dict())
+```
+
+`PipelineExplain` surfaces the same planner decisions the runtime will use:
+
+- `planned_lane`
+- `source_data_plane`
+- `middleware_matrix`
+- `writer_input_data_plane`
+- per-sink selected plane and downgrade markers
+
+## Middleware chain compatibility
+
+Agora now treats the middleware chain as a single data plane:
+
+- ordinary middleware (`Middleware`, `MapMiddleware`, `FilterMiddleware`) runs on Python rows
+- Arrow middleware (`ArrowBatchMiddleware`, `ArrowMapMiddleware`, `ArrowFilterMiddleware`) runs on `pyarrow.RecordBatch`
+
+Supported shapes:
+
+- Python-row chain with any non-Arrow source
+- Python-row chain with an Arrow-emitting source, where the runtime materializes rows once before the chain
+- all-Arrow chain with an Arrow-emitting batch source
+
+Rejected shape:
+
+- a mixed chain that combines Arrow middleware with Python-row/list-batch middleware
+
+That last case now fails during pipeline planning with a `PipelineError` instead
+of silently switching shapes mid-chain.
+
 ## .pipe() and .filter()
 
 `.pipe(middleware)` appends any `Middleware` subclass to the chain. `.filter(predicate)` is shorthand for `.pipe(FilterMiddleware(predicate))` — use it when you only need a boolean gate and don't want to write a class.
@@ -152,6 +191,16 @@ A failure in one sink does not prevent writes to the others — each sink's resu
 
 `sink_concurrency` here limits how many sinks write concurrently. With two sinks and `sink_concurrency=2`, both write in parallel. With `sink_concurrency=1`, they write sequentially.
 
+If the pipeline is on the Arrow chain, `fan_out()` now chooses the best write
+path per sink:
+
+- sinks that implement `write_arrow_batch()` receive the original `RecordBatch`
+- sinks without Arrow support receive a materialized `list[dict]` fallback at the sink boundary
+
+That means a mixed fan-out like `ParquetSink + CsvSink + JsonLinesSink` can keep
+the Arrow path where it is supported without forcing every sink to expose the
+same write contract.
+
 ## route — write to one matching sink per record
 
 Use `.route()` when different records belong in different destinations. The router evaluates predicates in order and sends each record to the first match:
@@ -186,13 +235,32 @@ Use `route` when records are mutually exclusive by type, region, or tenant and e
 
 ## BoundPipeline.run()
 
-`.run()` is async and blocks until the source is exhausted (or `max_records` is reached):
+`.run()` is async and blocks until the source is exhausted:
 
 ```python
 summary = await bound.run(max_records=10_000)
 ```
 
-`max_records` is useful for smoke tests and backfill jobs where you want to process a fixed slice. Leave it unset for continuous or full-dataset runs.
+When `max_records` is set, Agora now wraps the source in a limiting source
+adapter before execution starts. In other words, this:
+
+```python
+summary = await bound.run(max_records=10_000)
+```
+
+is conceptually equivalent to:
+
+```python
+summary = await Pipeline(source.limit(10_000)).build(sink).run()
+```
+
+This matters for two reasons:
+
+- the same limit behavior now applies uniformly to `build()`, `fan_out()`, `route()`, `.run()`, and `.run_sync()`
+- batch and Arrow sources trim the last emitted batch at the source boundary instead of overshooting and stopping later inside the runtime
+
+`max_records` is still useful for smoke tests and bounded backfills. Leave it
+unset for continuous or full-dataset runs.
 
 `.run()` returns a `PipelineRunSummary`:
 

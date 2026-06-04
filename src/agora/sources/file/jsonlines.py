@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
 from agora.sources.file.base import FileSource
@@ -71,7 +72,16 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         self.supports_rust_prefetch: bool = True
         self.supports_prefetch: bool = False  # linear path uses sync stream() directly
         self._emit_batch_size = max(emit_batch_size, 1)
-        self.supports_batch_emit: bool = emit_batches
+        self._emit_batches = emit_batches
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        emitted_plane = DataPlane.PYTHON_BATCHES if self._emit_batches else DataPlane.PYTHON_ROWS
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=emitted_plane,
+            supports_batch_emit=self._emit_batches,
+            emits_arrow_batches=False,
+        )
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
         if checkpoint is None:
@@ -301,6 +311,14 @@ class ArrowJsonLinesSource(FileSource[Any]):
 
     async def prepare_resume(self, checkpoint: Any) -> None:
         return None
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.ARROW_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=True,
+        )
 
     async def stream_batches(self) -> AsyncIterator[Any]:
         try:

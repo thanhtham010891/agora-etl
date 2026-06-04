@@ -130,8 +130,19 @@ python pipeline.py
 
 No CLI, no config files, no daemon. It's just Python.
 
+## Common starting points
+
+When moving beyond the in-memory quickstart, start from the doc that
+matches the system boundary:
+
+- [Kafka plugin](../plugins/kafka.md) for topic consumer or topic-to-topic flows
+- [PostgreSQL plugin](../plugins/postgresql.md) for incremental extracts and relational loads
+- [Redis plugin](../plugins/redis.md) for Redis Streams, shared state, and replay
+- [ArrowProcessBatchMiddleware](../middleware/arrow-process-batch.md) for columnar process-isolated transforms
+- [Sources](../source/index.md) for file readers such as `CsvSource`, `JsonLinesSource`, and `ArrowCsvSource`
+
 ## Next steps
 
 - [Composing pipelines](pipelines.md) — fan-out, routing, batching, backpressure
 - [Handling failures](failure-handling.md) — DLQ, retry, sink failure policies
-- [Sources](../sources.md) — file, HTTP polling, DLQ replay, and custom sources
+- [Sources](../source/index.md) — file, HTTP polling, DLQ replay, and custom sources

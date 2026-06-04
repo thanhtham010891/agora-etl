@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from agora.core.errors import PipelineError
 from agora.core.runtime import (
     DeliveryEngine,
     ExecutionCoordinator,
@@ -77,16 +78,20 @@ class PipelineExecutor:
         self,
         state: PipelineRunState,
         execution: ExecutionCoordinator,
+        *,
+        source: BaseSource[Any],
     ) -> None:
         checkpoint_state = make_checkpoint_state()
 
-        async with self._spec.source:
+        async with source:
             with state.ctx.trace_span(
                 "source.stream",
-                source=self._spec.source.source_name,
+                source=source.source_name,
                 buffered=execution.plan.uses_buffered_lane,
                 lane=execution.plan.lane,
                 batch_source=execution.plan.batch_source,
+                source_data_plane=execution.plan.source.emitted_plane,
+                writer_input_data_plane=execution.plan.writer.input_data_plane,
                 buffered_stage_count=len(execution.plan.buffered_stages),
                 direct_flush_eligible=execution.plan.writer.direct_flush_eligible,
                 arrow_fast_path_eligible=execution.plan.writer.arrow_fast_path,
@@ -95,7 +100,6 @@ class PipelineExecutor:
                 await execution.run(
                     state.ctx,
                     checkpoint_state,
-                    state.max_records,
                 )
 
     async def _handle_run_error(
@@ -139,11 +143,30 @@ class PipelineExecutor:
         self, state: PipelineRunState, shutdown_error: Exception | None
     ) -> None:
         if state.run_error is not None:
-            if isinstance(state.run_error, RecordDeliveryError):
-                raise state.run_error.original
-            if isinstance(state.run_error, SourceRecordError):
-                raise state.run_error.original
-            raise state.run_error
+            exc = state.run_error
+            if isinstance(exc, (RecordDeliveryError, SourceRecordError)):
+                original: BaseException = exc.original
+            else:
+                original = exc
+
+            # If the original exception is already a PipelineError, enrich it
+            # with runtime context and re-raise. Otherwise re-raise the original
+            # exception unchanged so existing callers are not surprised.
+            if isinstance(original, PipelineError):
+                stage = "source_stream"
+                if isinstance(exc, SourceRecordError):
+                    stage = exc.stage or "source_stream"
+                elif isinstance(exc, RecordDeliveryError):
+                    stage = "sink"
+                raise original.with_context(
+                    pipeline_id=state.ctx.pipeline_id,
+                    run_id=state.ctx.run_id,
+                    stage=original.stage or stage,
+                    source_name=original.source_name or self._spec.source.source_name,
+                ) from original.__cause__
+
+            raise original
+
         if shutdown_error is not None:
             raise shutdown_error
 
@@ -153,47 +176,62 @@ class PipelineExecutor:
         max_records: int | None = None,
         run_id: str | None = None,
     ) -> PipelineRunSummary:
-        state = self._lifecycle.create_run_state(run_id=run_id, max_records=max_records)
-        await self._lifecycle.restore_checkpoint(state.ctx)
-        coordinator = self._lifecycle.make_delivery_coordinator()
+        spec = self._spec
+        if max_records is not None:
+            spec = replace(spec, source=spec.source.limit(max_records))
+
+        lifecycle = PipelineLifecycleController(spec)
+        state = lifecycle.create_run_state(run_id=run_id, source_limit=max_records)
+        await lifecycle.restore_checkpoint(state.ctx)
+        coordinator = lifecycle.make_delivery_coordinator()
         plan = build_runtime_plan(
-            self._spec.source,
-            self._spec.chain,
-            self._spec.writer,
-            writer_batch_size=self._spec.config.batch_size,
+            spec.source,
+            spec.chain,
+            spec.writer,
+            writer_batch_size=spec.config.batch_size,
         )
         execution = ExecutionCoordinator(
-            source=self._spec.source,
-            chain=self._spec.chain,
-            writer_batch_size=self._spec.config.batch_size,
+            source=spec.source,
+            chain=spec.chain,
+            writer_batch_size=spec.config.batch_size,
             delivery=coordinator,
             plan=plan,
-            max_buffer_size=self._spec.config.max_buffer_size,
-            backpressure=self._spec.config.backpressure,
+            max_buffer_size=spec.config.max_buffer_size,
+            backpressure=spec.config.backpressure,
         )
         shutdown_error: Exception | None = None
         cancellation_error: asyncio.CancelledError | None = None
         live_metrics_stop: asyncio.Event | None = None
         live_metrics_task: asyncio.Task[None] | None = None
 
+        if max_records is not None:
+            state.ctx.log.info(
+                "pipeline_source_limit_applied",
+                source=spec.source.source_name,
+                source_limit=max_records,
+            )
+
         with state.ctx.trace_span(
             "pipeline.run",
-            pipeline_id=self._spec.pipeline_id,
+            pipeline_id=spec.pipeline_id,
             run_id=state.ctx.run_id,
-            source=self._spec.source.source_name,
+            source=spec.source.source_name,
             planned_lane=plan.lane,
             batch_source=plan.batch_source,
+            source_data_plane=plan.source.emitted_plane,
+            writer_input_data_plane=plan.writer.input_data_plane,
+            downgraded_sink_count=plan.writer.downgraded_sink_count,
             buffered_stage_count=len(plan.buffered_stages),
             direct_flush_eligible=plan.writer.direct_flush_eligible,
             arrow_fast_path_eligible=plan.writer.arrow_fast_path,
             arrow_chain_eligible=plan.writer.arrow_chain,
         ) as span:
             try:
-                await self._lifecycle.start_runtime(state)
-                if self._spec.live_metrics_callback is not None:
+                await lifecycle.start_runtime(state)
+                if spec.live_metrics_callback is not None:
                     execution.sync_source_runtime_metrics(state.ctx)
                     try:
-                        await self._spec.live_metrics_callback(state.ctx)
+                        await spec.live_metrics_callback(state.ctx)
                     except Exception as exc:
                         state.ctx.log.warning(
                             "pipeline_live_metrics_callback_error",
@@ -202,9 +240,9 @@ class PipelineExecutor:
                     live_metrics_stop = asyncio.Event()
                     live_metrics_task = asyncio.create_task(
                         self._report_live_metrics(state, execution, live_metrics_stop),
-                        name=f"{self._spec.pipeline_id}-live-metrics",
+                        name=f"{spec.pipeline_id}-live-metrics",
                     )
-                await self._run_stream(state, execution)
+                await self._run_stream(state, execution, source=spec.source)
             except asyncio.CancelledError as exc:
                 state.ctx.log.info("pipeline_cancelled")
                 state.interrupted = True
@@ -219,14 +257,20 @@ class PipelineExecutor:
                 if live_metrics_task is not None:
                     with contextlib.suppress(Exception):
                         await live_metrics_task
-                shutdown_error = await self._lifecycle.shutdown_runtime(state)
+                shutdown_error = await lifecycle.shutdown_runtime(state)
                 execution.sync_source_runtime_metrics(state.ctx)
                 if span is not None:
                     runtime = state.ctx.metrics.runtime
                     span.set_attribute("execution_lane", runtime.execution_lane)
+                    span.set_attribute("source_data_plane", runtime.source_data_plane)
+                    span.set_attribute("writer_input_data_plane", runtime.writer_input_data_plane)
                     span.set_attribute("direct_flush_active", runtime.direct_flush_active)
                     span.set_attribute("arrow_fast_path_active", runtime.arrow_fast_path_active)
                     span.set_attribute("arrow_chain_active", runtime.arrow_chain_active)
+                    span.set_attribute(
+                        "writer_downgraded_sink_count",
+                        runtime.writer_downgraded_sink_count,
+                    )
                     span.set_attribute("rust_prefetch_active", runtime.rust_prefetch_active)
 
         if cancellation_error is not None:

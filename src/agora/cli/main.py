@@ -23,8 +23,11 @@ from __future__ import annotations
 import sys
 
 from agora.cli.commands.base import CommandError
+from agora.cli.commands.checkpoint import CheckpointCommand
 from agora.cli.commands.config import ConfigCommand
+from agora.cli.commands.diagnose import DiagnoseCommand
 from agora.cli.commands.dlq import DLQCommand
+from agora.cli.commands.doctor import DoctorCommand
 from agora.cli.commands.new import NewCommand
 from agora.cli.commands.pipelines import PipelinesCommand
 from agora.cli.commands.plugins import PluginsCommand
@@ -55,6 +58,9 @@ def _build_registry() -> CommandRegistry:
     registry.register(PluginsCommand())
     registry.register(ConfigCommand())
     registry.register(DLQCommand())
+    registry.register(CheckpointCommand())
+    registry.register(DiagnoseCommand())
+    registry.register(DoctorCommand())
     registry.register(VersionCommand())
     return registry
 

@@ -139,6 +139,68 @@ What this shows:
 - `copy_merge` is the bulk-write option when append-only `COPY` is not enough
 - `conflict_key` defines the upsert identity
 
+If you want the incremental extract shape pre-wired:
+
+```bash
+agora new my-extractor --preset postgres-incremental
+cd my-extractor
+pip install -e '.[dev]'
+```
+
+That scaffold gives a runnable cursor-based extractor, test, and project
+layout to extend.
+
+## Incremental extract pattern
+
+This is the narrow pattern most teams want from PostgreSQL first: query only
+rows newer than the last checkpoint and normalize them before writing
+downstream.
+
+```python
+from __future__ import annotations
+
+import os
+
+from agora import DeliveryConfig, MapMiddleware, Pipeline
+from agora_plugins.postgres import PostgresSource
+from agora.sinks.io.stdout import StdoutSink
+
+
+def normalise(record: dict) -> dict:
+    return {
+        key: (value.isoformat() if hasattr(value, "isoformat") else value)
+        for key, value in record.items()
+    }
+
+
+source = PostgresSource(
+    dsn=os.environ["DATABASE_URL"],
+    query="""
+        SELECT *
+        FROM events
+        WHERE updated_at > :cursor
+        ORDER BY updated_at
+    """,
+    cursor_column="updated_at",
+)
+
+summary = await (
+    Pipeline(source, id="postgres_incremental")
+    .pipe(MapMiddleware(normalise, name="normalise"))
+    .build(
+        StdoutSink(),
+        config=DeliveryConfig(batch_size=1_000, checkpoint_every=10),
+    )
+    .run()
+)
+```
+
+What this pattern shows:
+
+- `PostgresSource` can own the resume cursor directly
+- normalization can stay in ordinary middleware before the sink
+- checkpoint state advances after successful batch delivery, not after query read
+
 ## Schema-aware sink example
 
 If you are already using `SchemaMiddleware`, wrap the sink with

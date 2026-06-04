@@ -10,6 +10,7 @@ from agora.core.checkpoint import (
 )
 from agora.core.container import AgoraContainer
 from agora.core.context import PipelineContext
+from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
 from agora.core.discovery import discover_plugins
 from agora.core.dlq import DLQRecord, DLQSink
 from agora.core.errors import (
@@ -21,6 +22,7 @@ from agora.core.errors import (
     PluginValidationError,
     RegistryError,
 )
+from agora.core.explain import MiddlewareStageExplain, PipelineExplain, SinkWriteExplain
 from agora.core.metrics import PipelineMetrics, PipelineRunSummary
 from agora.core.middleware import (
     FilterMiddleware,
@@ -59,6 +61,7 @@ __all__ = [
     "DLQFailurePolicy",
     "DLQRecord",
     "DLQSink",
+    "DataPlane",
     "DedupStoreFailurePolicy",
     "FilterMiddleware",
     "InMemoryCheckpointStore",
@@ -66,10 +69,12 @@ __all__ = [
     "Lifecycle",
     "MapMiddleware",
     "Middleware",
+    "MiddlewareStageExplain",
     "OnError",
     "Pipeline",
     "PipelineContext",
     "PipelineError",
+    "PipelineExplain",
     "PipelineMetrics",
     "PipelineRunSummary",
     "Plugin",
@@ -82,8 +87,11 @@ __all__ = [
     "RetryPolicy",
     "RouteMiddleware",
     "SQLiteCheckpointStore",
+    "SinkDataPlaneSpec",
     "SinkFanOut",
     "SinkRouter",
+    "SinkWriteExplain",
+    "SourceDataPlaneSpec",
     "WriteResult",
     "Writer",
     "discover_plugins",

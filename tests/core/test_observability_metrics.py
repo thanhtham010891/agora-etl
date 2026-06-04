@@ -42,6 +42,10 @@ async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -
         direct_flush_active=False,
         arrow_fast_path_active=False,
         arrow_chain_active=False,
+        csv_arrow_native_batch_count=2,
+        csv_arrow_native_row_count=200,
+        csv_arrow_downgrade_batch_count=1,
+        csv_arrow_downgrade_row_count=50,
         source_prefetch_limit=64,
         source_prefetch_max_depth=16,
         source_prefetch_block_count=3,
@@ -77,6 +81,10 @@ async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -
     assert pipeline["runtime"]["total_dlq_failure_count"] == 1
     assert pipeline["runtime"]["total_adaptive_scale_up_count"] == 2
     assert pipeline["runtime"]["total_adaptive_scale_down_count"] == 1
+    assert pipeline["runtime"]["total_csv_arrow_native_batch_count"] == 2
+    assert pipeline["runtime"]["total_csv_arrow_native_row_count"] == 200
+    assert pipeline["runtime"]["total_csv_arrow_downgrade_batch_count"] == 1
+    assert pipeline["runtime"]["total_csv_arrow_downgrade_row_count"] == 50
     assert pipeline["runtime"]["last_run"]["execution_lane"] == "buffered"
     assert pipeline["runtime"]["last_run"]["direct_flush_active"] is False
     assert pipeline["runtime"]["last_run"]["rust_prefetch_active"] is True
@@ -84,6 +92,8 @@ async def test_health_dict_includes_last_run_throughput_and_runtime_snapshot() -
     assert pipeline["runtime"]["last_run"]["buffered_stage_max_in_flight"] == 7
     assert pipeline["runtime"]["last_run"]["checkpoint_save_time_ms"] == 12.5
     assert pipeline["runtime"]["last_run"]["writer_flush_time_ms"] == 25.0
+    assert pipeline["runtime"]["last_run"]["csv_arrow_native_batch_count"] == 2
+    assert pipeline["runtime"]["last_run"]["csv_arrow_downgrade_batch_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -210,6 +220,10 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
         direct_flush_active=False,
         arrow_fast_path_active=True,
         arrow_chain_active=True,
+        csv_arrow_native_batch_count=3,
+        csv_arrow_native_row_count=600,
+        csv_arrow_downgrade_batch_count=2,
+        csv_arrow_downgrade_row_count=150,
         source_prefetch_limit=32,
         source_prefetch_max_depth=12,
         source_prefetch_block_count=5,
@@ -240,6 +254,14 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
     assert 'agora_pipeline_last_run_throughput_rps{pipeline_id="orders"} 10.000000' in rendered
     assert (
         'agora_pipeline_runtime_events_total{pipeline_id="orders",event="writer_flush"} 7'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_events_total{pipeline_id="orders",event="csv_arrow_native_batch"} 3'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_events_total{pipeline_id="orders",event="csv_arrow_downgrade_batch"} 2'
         in rendered
     )
     assert (
@@ -277,6 +299,14 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
     )
     assert (
         'agora_pipeline_runtime_last{pipeline_id="orders",signal="adaptive_backpressure_max_limit"} 16'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="csv_arrow_native_row_count"} 600'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_runtime_last{pipeline_id="orders",signal="csv_arrow_downgrade_row_count"} 150'
         in rendered
     )
 

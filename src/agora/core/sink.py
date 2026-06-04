@@ -24,10 +24,13 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import warnings
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, runtime_checkable
 
+from agora.core.batch import is_arrow_native_sink
+from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, ordered_unique_planes
 from agora.core.writer import WriteResult
 
 # Singleton reused for every successfully written record in the fast path.
@@ -40,6 +43,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 T = TypeVar("T")
+_WARNED_LEGACY_SINK_TYPES: set[type[object]] = set()
 
 
 @runtime_checkable
@@ -65,14 +69,73 @@ class SinkCapabilities:
     """Execution hints advertised by sinks to the runtime/writer."""
 
     batch_writable_native: bool = False
+    arrow_passthrough_native: bool = False
     parallel_writes_safe: bool = False
     ordered_writes_required: bool = True
+    accepted_data_planes: tuple[DataPlane, ...] = ()
+    native_data_planes: tuple[DataPlane, ...] = ()
 
 
 def bind_context_if_supported(target: object, ctx: Any) -> None:
     """Bind context when the target advertises that capability."""
     if isinstance(target, ContextBindable):
         target.bind_context(ctx)
+
+
+def _default_sink_data_planes(
+    *,
+    batch_native: bool,
+    arrow_native: bool,
+) -> tuple[tuple[DataPlane, ...], tuple[DataPlane, ...]]:
+    accepted = [DataPlane.PYTHON_ROWS]
+    native = [DataPlane.PYTHON_ROWS]
+    if batch_native:
+        accepted.append(DataPlane.PYTHON_BATCHES)
+        native.append(DataPlane.PYTHON_BATCHES)
+    if arrow_native:
+        accepted.append(DataPlane.ARROW_BATCHES)
+        native.append(DataPlane.ARROW_BATCHES)
+    return ordered_unique_planes(accepted), ordered_unique_planes(native)
+
+
+def _normalized_sink_capabilities(
+    capabilities: SinkCapabilities,
+    *,
+    batch_native: bool,
+    arrow_native: bool,
+) -> SinkCapabilities:
+    accepted_data_planes, native_data_planes = _default_sink_data_planes(
+        batch_native=batch_native,
+        arrow_native=arrow_native,
+    )
+    if capabilities.accepted_data_planes:
+        accepted_data_planes = capabilities.accepted_data_planes
+    if capabilities.native_data_planes:
+        native_data_planes = capabilities.native_data_planes
+    batch_native = batch_native or DataPlane.PYTHON_BATCHES in native_data_planes
+    arrow_native = arrow_native or DataPlane.ARROW_BATCHES in native_data_planes
+    return replace(
+        capabilities,
+        batch_writable_native=batch_native,
+        arrow_passthrough_native=arrow_native,
+        accepted_data_planes=accepted_data_planes,
+        native_data_planes=native_data_planes,
+    )
+
+
+def _warn_legacy_sink_flags_once(target: object) -> None:
+    sink_type = type(target)
+    if sink_type in _WARNED_LEGACY_SINK_TYPES:
+        return
+    _WARNED_LEGACY_SINK_TYPES.add(sink_type)
+    warnings.warn(
+        f"{sink_type.__name__} uses legacy sink data-plane bool flags; "
+        "advertise accepted_data_planes/native_data_planes or override "
+        "sink_capabilities() with explicit data planes instead. "
+        "Legacy flags remain supported in 0.3.x and are planned for removal in 0.4.0.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def sink_capabilities(target: object) -> SinkCapabilities:
@@ -87,27 +150,106 @@ def sink_capabilities(target: object) -> SinkCapabilities:
     if callable(advertised):
         value = advertised()
         if isinstance(value, SinkCapabilities):
-            return value
+            if (
+                (value.batch_writable_native or value.arrow_passthrough_native)
+                and not value.accepted_data_planes
+                and not value.native_data_planes
+            ):
+                _warn_legacy_sink_flags_once(target)
+            return _normalized_sink_capabilities(
+                value,
+                batch_native=bool(getattr(value, "batch_writable_native", False))
+                or DataPlane.PYTHON_BATCHES in value.native_data_planes,
+                arrow_native=(
+                    bool(getattr(value, "arrow_passthrough_native", False))
+                    or DataPlane.ARROW_BATCHES in value.native_data_planes
+                    or is_arrow_native_sink(target)
+                ),
+            )
         raise TypeError("sink_capabilities() must return SinkCapabilities")
 
     batch_native = False
+    arrow_native = False
     parallel_safe = False
     ordered_required = True
 
     if isinstance(target, BaseSink):
+        accepted_planes = tuple(getattr(target, "accepted_data_planes", ()))
+        native_planes = tuple(getattr(target, "native_data_planes", ()))
         batch_native = bool(getattr(target, "batch_writable_native", False))
+        arrow_native = bool(getattr(target, "arrow_passthrough_native", False))
         parallel_safe = bool(getattr(target, "parallel_writes_safe", False))
         ordered_required = bool(getattr(target, "ordered_writes_required", True))
+        if (batch_native or arrow_native) and not accepted_planes and not native_planes:
+            _warn_legacy_sink_flags_once(target)
         if not batch_native and type(target).write_batch is not BaseSink.write_batch:
             batch_native = True
     elif isinstance(target, BatchWritable):
         batch_native = True
+        arrow_native = is_arrow_native_sink(target)
+    else:
+        legacy_batch_native = bool(getattr(target, "batch_writable_native", False))
+        legacy_arrow_native = bool(getattr(target, "arrow_passthrough_native", False))
+        arrow_native = is_arrow_native_sink(target)
+        if (
+            (legacy_batch_native or legacy_arrow_native)
+            and not getattr(target, "accepted_data_planes", ())
+            and not getattr(target, "native_data_planes", ())
+        ):
+            _warn_legacy_sink_flags_once(target)
+        batch_native = legacy_batch_native
+        arrow_native = legacy_arrow_native or arrow_native
 
-    return SinkCapabilities(
-        batch_writable_native=batch_native,
-        parallel_writes_safe=parallel_safe,
-        ordered_writes_required=ordered_required,
+    return _normalized_sink_capabilities(
+        SinkCapabilities(
+            batch_writable_native=batch_native,
+            arrow_passthrough_native=arrow_native,
+            parallel_writes_safe=parallel_safe,
+            ordered_writes_required=ordered_required,
+            accepted_data_planes=tuple(getattr(target, "accepted_data_planes", ())),
+            native_data_planes=tuple(getattr(target, "native_data_planes", ())),
+        ),
+        batch_native=batch_native,
+        arrow_native=arrow_native,
     )
+
+
+def sink_data_plane_spec(target: object) -> SinkDataPlaneSpec:
+    """Return the sink-side data-plane contract for *target*."""
+    capabilities = sink_capabilities(target)
+    return SinkDataPlaneSpec(
+        sink_name=str(getattr(target, "sink_name", type(target).__name__)),
+        accepted_planes=capabilities.accepted_data_planes,
+        native_planes=capabilities.native_data_planes,
+    )
+
+
+def writer_target_data_plane_specs(writer: object) -> tuple[SinkDataPlaneSpec, ...]:
+    """Return sink-level data-plane specs visible behind *writer*."""
+    inner_sinks = getattr(writer, "_sinks", None)
+    if inner_sinks is not None:
+        return tuple(sink_data_plane_spec(sink) for sink in inner_sinks)
+
+    routes = getattr(writer, "_routes", None)
+    default_sink = getattr(writer, "_default", None)
+    if routes is not None:
+        seen: set[int] = set()
+        specs: list[SinkDataPlaneSpec] = []
+        for route in routes:
+            sink = route.sink
+            sink_id = id(sink)
+            if sink_id in seen:
+                continue
+            seen.add(sink_id)
+            specs.append(sink_data_plane_spec(sink))
+        if default_sink is not None and id(default_sink) not in seen:
+            specs.append(sink_data_plane_spec(default_sink))
+        return tuple(specs)
+
+    advertised = getattr(writer, "sink_capabilities", None)
+    if callable(advertised):
+        return (sink_data_plane_spec(writer),)
+    return ()
 
 
 # ======================================================================
@@ -130,8 +272,11 @@ class BaseSink(ABC, Generic[T]):
     # Subclasses must set a meaningful name (shown in logs and metrics).
     sink_name: str = "sink"
     batch_writable_native: bool = False
+    arrow_passthrough_native: bool = False
     parallel_writes_safe: bool = False
     ordered_writes_required: bool = True
+    accepted_data_planes: tuple[DataPlane, ...] = ()
+    native_data_planes: tuple[DataPlane, ...] = ()
 
     @abstractmethod
     async def write(self, record: T) -> None:
@@ -145,14 +290,33 @@ class BaseSink(ABC, Generic[T]):
 
     def sink_capabilities(self) -> SinkCapabilities:
         """Execution hints used by writer/runtime strategy selection."""
-        batch_writable_native = self.batch_writable_native
+        accepted_planes = self.accepted_data_planes
+        native_planes = self.native_data_planes
+        batch_writable_native = DataPlane.PYTHON_BATCHES in native_planes
+        arrow_passthrough_native = DataPlane.ARROW_BATCHES in native_planes
+        if not accepted_planes and not native_planes:
+            batch_writable_native = self.batch_writable_native
+            arrow_passthrough_native = self.arrow_passthrough_native
+            if batch_writable_native or arrow_passthrough_native:
+                _warn_legacy_sink_flags_once(self)
         if not batch_writable_native and type(self).write_batch is not BaseSink.write_batch:
             batch_writable_native = True
-        return SinkCapabilities(
-            batch_writable_native=batch_writable_native,
-            parallel_writes_safe=self.parallel_writes_safe,
-            ordered_writes_required=self.ordered_writes_required,
+        return _normalized_sink_capabilities(
+            SinkCapabilities(
+                batch_writable_native=batch_writable_native,
+                arrow_passthrough_native=arrow_passthrough_native,
+                parallel_writes_safe=self.parallel_writes_safe,
+                ordered_writes_required=self.ordered_writes_required,
+                accepted_data_planes=accepted_planes,
+                native_data_planes=native_planes,
+            ),
+            batch_native=batch_writable_native,
+            arrow_native=arrow_passthrough_native,
         )
+
+    def data_plane_spec(self) -> SinkDataPlaneSpec:
+        """Return the sink-side data-plane contract used by runtime planning."""
+        return sink_data_plane_spec(self)
 
     async def write_batch(self, records: list[T]) -> None:
         """Persist a batch of records.
@@ -218,6 +382,7 @@ class SinkFanOut(Generic[T]):
             cap.batch_writable_native and isinstance(s, BatchWritable)
             for s, cap in zip(sinks, self._sink_capabilities, strict=True)
         ]
+        self._sink_arrow_writable = [is_arrow_native_sink(s) for s in sinks]
 
     def with_concurrency(self, max_concurrency: int | None = None) -> SinkFanOut[T]:
         """Return a copy with opt-in concurrent sink writes enabled."""
@@ -226,6 +391,23 @@ class SinkFanOut(Generic[T]):
             concurrent_writes=True,
             max_concurrency=max_concurrency,
         )
+
+    @staticmethod
+    def _arrow_fallback_chunk_size(sink: BaseSink[T]) -> int:
+        """Best-effort chunk size for row-materialized Arrow fallback.
+
+        Text sinks such as CSV/JSONL often buffer around ``flush_every`` rows.
+        Reusing that size avoids turning one large Arrow batch into one giant
+        Python-object write burst.
+        """
+        candidates = (
+            getattr(sink, "_flush_every", None),
+            getattr(sink, "_batch_size", None),
+        )
+        for value in candidates:
+            if isinstance(value, int) and value > 0:
+                return value
+        return 1000
 
     async def _run_sink_calls(
         self,
@@ -409,6 +591,105 @@ class SinkFanOut(Generic[T]):
             WriteResult(written=written_flags[index], errors=errors_by_record[index])
             for index in range(len(records))
         ]
+
+    async def write_arrow_batch(self, batch: Any) -> None:
+        """Write one Arrow batch to every sink using the best path per sink.
+
+        - Arrow-capable sinks receive the original ``RecordBatch``.
+        - Non-Arrow sinks receive a materialized ``list[dict]`` through their
+          existing batch/write contract.
+        """
+        rows: list[Any] | None = None
+        sink_calls: list[tuple[BaseSink[T], Awaitable[object]]] = []
+
+        for sink, cap, batch_writable, arrow_writable in zip(
+            self._sinks,
+            self._sink_capabilities,
+            self._sink_batch_writable,
+            self._sink_arrow_writable,
+            strict=True,
+        ):
+            if arrow_writable:
+                arrow_sink = cast("Any", sink)
+                sink_calls.append((sink, arrow_sink.write_arrow_batch(batch)))
+                continue
+
+            if rows is None:
+                rows = await asyncio.to_thread(batch.to_pylist)
+            assert rows is not None
+            materialized_rows = rows
+            chunk_size = self._arrow_fallback_chunk_size(sink)
+            if chunk_size >= len(materialized_rows):
+                sink_calls.append(
+                    (
+                        sink,
+                        self._write_batch_to_sink(
+                            sink,
+                            materialized_rows,
+                            batch_writable=batch_writable,
+                            capabilities=cap,
+                        ),
+                    )
+                )
+                continue
+
+            async def _write_chunks(
+                target_sink: BaseSink[T],
+                target_rows: list[Any],
+                *,
+                target_batch_writable: bool,
+                target_capabilities: SinkCapabilities,
+                target_chunk_size: int,
+            ) -> object:
+                for start in range(0, len(target_rows), target_chunk_size):
+                    chunk = target_rows[start : start + target_chunk_size]
+                    result = await self._write_batch_to_sink(
+                        target_sink,
+                        chunk,
+                        batch_writable=target_batch_writable,
+                        capabilities=target_capabilities,
+                    )
+                    if isinstance(result, list):
+                        for error in result:
+                            if error is not None:
+                                return [error]
+                return None
+
+            sink_calls.append(
+                (
+                    sink,
+                    _write_chunks(
+                        sink,
+                        materialized_rows,
+                        target_batch_writable=batch_writable,
+                        target_capabilities=cap,
+                        target_chunk_size=chunk_size,
+                    ),
+                )
+            )
+
+        if not sink_calls:
+            return
+
+        results: list[object]
+        if not self._concurrent_writes:
+            seq: list[object] = []
+            for _, call in sink_calls:
+                try:
+                    seq.append(await call)
+                except Exception as exc:
+                    seq.append(exc)
+            results = seq
+        else:
+            results = await self._run_sink_calls(sink_calls)
+
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(result, list):
+                for error in result:
+                    if error is not None:
+                        raise error
 
     async def flush(self) -> None:
         """Flush all sinks."""

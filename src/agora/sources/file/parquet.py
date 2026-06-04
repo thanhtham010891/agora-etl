@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
 from agora.sources.file.base import FileSource
@@ -51,7 +52,6 @@ class ParquetSource(FileSource[T], Generic[T]):
     """
 
     source_name = "parquet"
-    supports_batch_emit: bool = False
 
     def __init__(
         self,
@@ -70,12 +70,22 @@ class ParquetSource(FileSource[T], Generic[T]):
         self._last_row_number = 0
         self._record_error_count = 0
         self._record_drop_count = 0
-        self.supports_batch_emit = use_arrow_batches
-        self.emits_arrow_batches = use_arrow_batches
+        self._use_arrow_batches = use_arrow_batches
         self._arrow_batch_size = 65536 if use_arrow_batches else self._batch_size
         self.supports_prefetch: bool = False
         self.supports_rust_prefetch: bool = True
         self.prefetch_limit: int = 10  # larger buffer for Parquet — to_pylist() is CPU-heavy
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        emitted_plane = (
+            DataPlane.ARROW_BATCHES if self._use_arrow_batches else DataPlane.PYTHON_ROWS
+        )
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=emitted_plane,
+            supports_batch_emit=self._use_arrow_batches,
+            emits_arrow_batches=self._use_arrow_batches,
+        )
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
         if checkpoint is None:

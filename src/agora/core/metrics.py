@@ -264,9 +264,12 @@ class RuntimeMetrics:
     """Runtime pressure signals captured during a pipeline run."""
 
     execution_lane: str = ""
+    source_data_plane: str = ""
+    writer_input_data_plane: str = ""
     direct_flush_active: bool = False
     arrow_fast_path_active: bool = False
     arrow_chain_active: bool = False
+    writer_downgraded_sink_count: int = 0
     source_prefetch_enabled: bool = False
     source_prefetch_limit: int = 0
     source_prefetch_block_count: int = 0
@@ -280,6 +283,9 @@ class RuntimeMetrics:
     buffered_stage_limit: int = 0
     buffered_stage_max_in_flight: int = 0
     buffered_stage_drain_count: int = 0
+    process_batch_stage_limit: int = 0
+    process_batch_stage_max_in_flight: int = 0
+    process_batch_stage_drain_count: int = 0
     adaptive_backpressure_enabled: bool = False
     adaptive_backpressure_min_limit: int = 0
     adaptive_backpressure_max_limit: int = 0
@@ -294,6 +300,10 @@ class RuntimeMetrics:
     writer_flush_count: int = 0
     writer_flush_max_batch_size: int = 0
     writer_flush_time_ms: float = 0.0
+    csv_arrow_native_batch_count: int = 0
+    csv_arrow_native_row_count: int = 0
+    csv_arrow_downgrade_batch_count: int = 0
+    csv_arrow_downgrade_row_count: int = 0
 
     def copy(self) -> RuntimeMetrics:
         from dataclasses import replace
@@ -303,9 +313,12 @@ class RuntimeMetrics:
     def to_dict(self) -> dict[str, int | bool | float | str]:
         return {
             "execution_lane": self.execution_lane,
+            "source_data_plane": self.source_data_plane,
+            "writer_input_data_plane": self.writer_input_data_plane,
             "direct_flush_active": self.direct_flush_active,
             "arrow_fast_path_active": self.arrow_fast_path_active,
             "arrow_chain_active": self.arrow_chain_active,
+            "writer_downgraded_sink_count": self.writer_downgraded_sink_count,
             "source_prefetch_enabled": self.source_prefetch_enabled,
             "source_prefetch_limit": self.source_prefetch_limit,
             "source_prefetch_block_count": self.source_prefetch_block_count,
@@ -319,6 +332,9 @@ class RuntimeMetrics:
             "buffered_stage_limit": self.buffered_stage_limit,
             "buffered_stage_max_in_flight": self.buffered_stage_max_in_flight,
             "buffered_stage_drain_count": self.buffered_stage_drain_count,
+            "process_batch_stage_limit": self.process_batch_stage_limit,
+            "process_batch_stage_max_in_flight": self.process_batch_stage_max_in_flight,
+            "process_batch_stage_drain_count": self.process_batch_stage_drain_count,
             "adaptive_backpressure_enabled": self.adaptive_backpressure_enabled,
             "adaptive_backpressure_min_limit": self.adaptive_backpressure_min_limit,
             "adaptive_backpressure_max_limit": self.adaptive_backpressure_max_limit,
@@ -333,6 +349,10 @@ class RuntimeMetrics:
             "writer_flush_count": self.writer_flush_count,
             "writer_flush_max_batch_size": self.writer_flush_max_batch_size,
             "writer_flush_time_ms": self.writer_flush_time_ms,
+            "csv_arrow_native_batch_count": self.csv_arrow_native_batch_count,
+            "csv_arrow_native_row_count": self.csv_arrow_native_row_count,
+            "csv_arrow_downgrade_batch_count": self.csv_arrow_downgrade_batch_count,
+            "csv_arrow_downgrade_row_count": self.csv_arrow_downgrade_row_count,
         }
 
 
@@ -366,6 +386,29 @@ class PipelineRunSummary:
             f"errors={self.records_errored}",
             f"elapsed={self.elapsed_seconds:.1f}s",
         ]
+        runtime = self.runtime
+        if runtime.execution_lane:
+            parts.append(f"lane={runtime.execution_lane}")
+        if runtime.source_data_plane:
+            parts.append(f"source_plane={runtime.source_data_plane}")
+        if runtime.writer_input_data_plane:
+            parts.append(f"writer_plane={runtime.writer_input_data_plane}")
+        if runtime.arrow_chain_active:
+            parts.append("arrow_chain=on")
+        if runtime.arrow_fast_path_active:
+            parts.append("arrow_fast_path=on")
+        if runtime.writer_downgraded_sink_count > 0:
+            parts.append(f"sink_downgrades={runtime.writer_downgraded_sink_count}")
+        if runtime.csv_arrow_native_batch_count > 0 or runtime.csv_arrow_native_row_count > 0:
+            parts.append(
+                "csv_arrow_native="
+                f"{runtime.csv_arrow_native_batch_count}b/{runtime.csv_arrow_native_row_count}r"
+            )
+        if runtime.csv_arrow_downgrade_batch_count > 0 or runtime.csv_arrow_downgrade_row_count > 0:
+            parts.append(
+                "csv_arrow_downgraded="
+                f"{runtime.csv_arrow_downgrade_batch_count}b/{runtime.csv_arrow_downgrade_row_count}r"
+            )
         if self.ai is not None:
             parts.append(f"llm_calls={self.ai.total_llm_calls}")
             parts.append(f"tokens={self.ai.total_tokens}")

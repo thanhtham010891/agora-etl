@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
+from agora.core.data_plane import DataPlane
 from agora.core.sink import BaseSink
 
 if TYPE_CHECKING:
@@ -41,7 +42,12 @@ class ParquetSink(BaseSink[T], Generic[T]):
     """
 
     sink_name = "parquet"
-    batch_writable_native = True
+    accepted_data_planes = (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+    native_data_planes = accepted_data_planes
 
     def __init__(
         self,

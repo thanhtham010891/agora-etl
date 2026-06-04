@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import logstruct
 
+from agora.core.data_plane import DataPlane
 from agora.core.sink import BaseSink, SinkCapabilities
 
 if TYPE_CHECKING:
@@ -108,8 +109,17 @@ class WebhookSink(BaseSink[T], Generic[T]):
         )
 
     def sink_capabilities(self) -> SinkCapabilities:
+        native_planes: tuple[DataPlane, ...]
+        if self._batch_mode:
+            native_planes = (
+                DataPlane.PYTHON_ROWS,
+                DataPlane.PYTHON_BATCHES,
+            )
+        else:
+            native_planes = (DataPlane.PYTHON_ROWS,)
         return SinkCapabilities(
-            batch_writable_native=self._batch_mode,
+            accepted_data_planes=native_planes,
+            native_data_planes=native_planes,
             parallel_writes_safe=False,
             ordered_writes_required=True,
         )

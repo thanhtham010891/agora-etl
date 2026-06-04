@@ -125,6 +125,17 @@ What this shows:
 - `KafkaSink` is async, bounded, and idempotence-friendly by default
 - record keys are optional but useful when downstream partitioning matters
 
+If you want a preset project instead of starting from an empty file:
+
+```bash
+agora new my-consumer --preset kafka-consumer
+cd my-consumer
+pip install -e '.[dev]'
+```
+
+That scaffold gives a runnable consumer pipeline, test, and local project
+layout to extend.
+
 ## Schema registry example
 
 This example uses Confluent-compatible schema registry helpers so both the

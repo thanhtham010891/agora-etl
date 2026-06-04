@@ -245,15 +245,22 @@ async def test_pipeline_tracing_captures_arrow_fast_path_metadata() -> None:
     pipeline_span = _span_by_name(tracer, "pipeline.run")[0]
     assert pipeline_span.attributes["planned_lane"] == "batch"
     assert pipeline_span.attributes["batch_source"] is True
+    assert pipeline_span.attributes["source_data_plane"] == "arrow_batches"
+    assert pipeline_span.attributes["writer_input_data_plane"] == "arrow_batches"
+    assert pipeline_span.attributes["downgraded_sink_count"] == 0
     assert pipeline_span.attributes["arrow_fast_path_eligible"] is True
     assert pipeline_span.attributes["arrow_chain_eligible"] is True
     assert pipeline_span.attributes["execution_lane"] == "batch"
+    assert pipeline_span.attributes["source_data_plane"] == "arrow_batches"
+    assert pipeline_span.attributes["writer_input_data_plane"] == "arrow_batches"
     assert pipeline_span.attributes["arrow_fast_path_active"] is True
     assert pipeline_span.attributes["arrow_chain_active"] is True
 
     source_span = _span_by_name(tracer, "source.stream")[0]
     assert source_span.attributes["lane"] == "batch"
     assert source_span.attributes["batch_source"] is True
+    assert source_span.attributes["source_data_plane"] == "arrow_batches"
+    assert source_span.attributes["writer_input_data_plane"] == "arrow_batches"
     assert source_span.attributes["arrow_fast_path_eligible"] is True
     assert source_span.attributes["arrow_chain_eligible"] is True
 

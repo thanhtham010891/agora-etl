@@ -1,4 +1,0 @@
-[project]
-name = "etl-parquet"
-version = "0.1.0"
-pipelines_package = "pipelines"

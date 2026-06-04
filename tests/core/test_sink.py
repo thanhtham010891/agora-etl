@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 
 import pytest
 
 from agora import IterableSource, Pipeline
-from agora.core.sink import BaseSink, SinkCapabilities, SinkFanOut, SinkRouter, sink_capabilities
+from agora.core.data_plane import DataPlane
+from agora.core.sink import (
+    BaseSink,
+    SinkCapabilities,
+    SinkFanOut,
+    SinkRouter,
+    sink_capabilities,
+    sink_data_plane_spec,
+)
+from agora.sinks.file.csv import CsvSink
+from agora.sinks.file.jsonlines import JsonLinesSink
 
 
 class _BlockingSink:
@@ -139,6 +150,67 @@ class _BatchFailingSink:
         return None
 
 
+class _ArrowBatchCollectSink:
+    sink_name = "arrow_batch_collect"
+
+    def __init__(self) -> None:
+        self.batches: list[object] = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: str) -> None:
+        raise AssertionError("arrow batch path should bypass write()")
+
+    async def write_arrow_batch(self, batch: object) -> None:
+        self.batches.append(batch)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _ListBatchCollectSink:
+    sink_name = "list_batch_collect"
+
+    def __init__(self) -> None:
+        self.batches: list[list[object]] = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: object) -> None:
+        self.batches.append([record])
+
+    async def write_batch(self, records: list[object]) -> None:
+        self.batches.append(list(records))
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class _ArrowSerializeOnlySink(BaseSink[object]):
+    sink_name = "arrow_serialize_only"
+
+    def __init__(self) -> None:
+        self.arrow_batches: list[object] = []
+        self.list_batches: list[list[object]] = []
+
+    async def write(self, record: object) -> None:
+        self.list_batches.append([record])
+
+    async def write_batch(self, records: list[object]) -> None:
+        self.list_batches.append(list(records))
+
+    async def write_arrow_batch(self, batch: object) -> None:
+        self.arrow_batches.append(batch)
+
+
 class _ParallelCapableFallbackSink(BaseSink[str]):
     sink_name = "parallel_capable_fallback"
     parallel_writes_safe = True
@@ -249,6 +321,88 @@ async def test_sink_fan_out_concurrent_batch_path_preserves_per_record_errors() 
         ["batch-broke", "single-write-broke"],
         ["batch-broke"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_arrow_batch_writes_to_all_sinks() -> None:
+    batch = object()
+    sink_one = _ArrowBatchCollectSink()
+    sink_two = _ArrowBatchCollectSink()
+    fan_out = SinkFanOut([sink_one, sink_two])  # type: ignore[list-item]
+
+    await fan_out.write_arrow_batch(batch)
+
+    assert sink_one.batches == [batch]
+    assert sink_two.batches == [batch]
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_arrow_batch_falls_back_to_list_batch_for_non_arrow_sink() -> None:
+    class _ArrowBatch:
+        def __init__(self) -> None:
+            self.rows = [{"id": 1}, {"id": 2}]
+
+        def to_pylist(self) -> list[dict[str, int]]:
+            return list(self.rows)
+
+    batch = _ArrowBatch()
+    arrow_sink = _ArrowBatchCollectSink()
+    list_sink = _ListBatchCollectSink()
+    fan_out = SinkFanOut([arrow_sink, list_sink])  # type: ignore[list-item]
+
+    await fan_out.write_arrow_batch(batch)
+
+    assert arrow_sink.batches == [batch]
+    assert list_sink.batches == [[{"id": 1}, {"id": 2}]]
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_arrow_batch_uses_arrow_path_for_sink_with_write_arrow_batch() -> None:
+    class _ArrowBatch:
+        def __init__(self) -> None:
+            self.rows = [{"id": 1}, {"id": 2}]
+
+        def to_pylist(self) -> list[dict[str, int]]:
+            return list(self.rows)
+
+    batch = _ArrowBatch()
+    sink = _ArrowSerializeOnlySink()
+    fan_out = SinkFanOut([sink])
+
+    await fan_out.write_arrow_batch(batch)
+
+    assert sink.arrow_batches == [batch]
+    assert sink.list_batches == []
+
+
+@pytest.mark.asyncio
+async def test_sink_router_with_max_records_limits_at_source_boundary() -> None:
+    class _CollectRouteSink:
+        sink_name = "collect_route"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            self.records.append(record)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    sink = _CollectRouteSink()
+    router = SinkRouter[int]().default(sink)  # type: ignore[arg-type]
+
+    summary = await Pipeline(IterableSource(list(range(100)))).route(router).run(max_records=4)
+
+    assert summary.records_consumed == 4
+    assert summary.records_written == 4
+    assert sink.records == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio
@@ -470,12 +624,92 @@ def test_sink_capabilities_prefers_explicit_contracts_and_detects_native_batch()
         batch_writable_native=False,
         parallel_writes_safe=True,
         ordered_writes_required=False,
+        accepted_data_planes=(DataPlane.PYTHON_ROWS,),
+        native_data_planes=(DataPlane.PYTHON_ROWS,),
     )
     assert sink_capabilities(_BatchOverrideSink()) == SinkCapabilities(
         batch_writable_native=True,
         parallel_writes_safe=False,
         ordered_writes_required=True,
+        accepted_data_planes=(DataPlane.PYTHON_ROWS, DataPlane.PYTHON_BATCHES),
+        native_data_planes=(DataPlane.PYTHON_ROWS, DataPlane.PYTHON_BATCHES),
     )
+
+    assert sink_data_plane_spec(_BatchOverrideSink()).native_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+    )
+
+
+def test_file_sinks_advertise_arrow_batch_boundary_when_supported() -> None:
+    csv_sink = CsvSink(path="out.csv", row_mapper=lambda row: row)
+    jsonl_sink = JsonLinesSink(path="out.jsonl", serializer=lambda row: row)
+
+    assert sink_data_plane_spec(csv_sink).native_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+    assert sink_data_plane_spec(jsonl_sink).native_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+
+
+def test_sink_capabilities_warn_once_for_legacy_bool_flags() -> None:
+    class _LegacyArrowSink(BaseSink[int]):
+        sink_name = "legacy_arrow"
+        batch_writable_native = True
+        arrow_passthrough_native = True
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def write_batch(self, records: list[int]) -> None:
+            del records
+
+        async def write_arrow_batch(self, batch: object) -> None:
+            del batch
+
+    sink = _LegacyArrowSink()
+    with pytest.deprecated_call(match="legacy sink data-plane bool flags"):
+        first = sink_capabilities(sink)
+    second = sink_capabilities(sink)
+
+    assert first.native_data_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+    assert second.native_data_planes == first.native_data_planes
+
+
+def test_sink_capabilities_do_not_warn_for_explicit_data_planes() -> None:
+    class _ExplicitArrowSink(BaseSink[int]):
+        sink_name = "explicit_arrow"
+        accepted_data_planes = (
+            DataPlane.PYTHON_ROWS,
+            DataPlane.PYTHON_BATCHES,
+            DataPlane.ARROW_BATCHES,
+        )
+        native_data_planes = accepted_data_planes
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def write_batch(self, records: list[int]) -> None:
+            del records
+
+        async def write_arrow_batch(self, batch: object) -> None:
+            del batch
+
+    sink = _ExplicitArrowSink()
+    with warnings.catch_warnings(record=True) as record:
+        capabilities = sink_capabilities(sink)
+
+    assert capabilities.native_data_planes == sink.native_data_planes
+    assert len(record) == 0
 
 
 @pytest.mark.asyncio

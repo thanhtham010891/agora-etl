@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
+from agora.core.errors import PipelineError
 from agora.core.middleware import Middleware, MiddlewareChain
 from agora.core.runtime import RuntimeLane, build_runtime_plan
-from agora.core.sink import BaseSink, SinkFanOut
+from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
 from agora.core.source import BaseSource, IterableSource
 
 
@@ -24,7 +28,6 @@ class _BufferedPassThrough(Middleware[int, int]):
 
 class _BatchSource(BaseSource[int]):
     source_name = "batch_source"
-    supports_batch_emit = True
 
     async def stream(self):
         for record in [1, 2]:
@@ -32,6 +35,14 @@ class _BatchSource(BaseSource[int]):
 
     async def stream_batches(self):  # type: ignore[override]
         yield [1, 2]
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
 
 
 class _HookSource(BaseSource[int]):
@@ -50,13 +61,24 @@ class _HookSource(BaseSource[int]):
 
 class _BatchSink(BaseSink[int]):
     sink_name = "batch_sink"
-    batch_writable_native = True
+    accepted_data_planes = (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+    )
+    native_data_planes = accepted_data_planes
 
     async def write(self, record: int) -> None:
         del record
 
     async def write_batch(self, records: list[int]) -> None:
         del records
+
+
+class _RowOnlySink(BaseSink[int]):
+    sink_name = "row_only_sink"
+
+    async def write(self, record: int) -> None:
+        del record
 
 
 def test_runtime_plan_selects_linear_lane_by_default() -> None:
@@ -68,6 +90,8 @@ def test_runtime_plan_selects_linear_lane_by_default() -> None:
     )
 
     assert plan.lane == RuntimeLane.LINEAR
+    assert plan.source.emitted_plane == DataPlane.PYTHON_ROWS
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_ROWS
     assert plan.writer.direct_flush_eligible is False
 
 
@@ -124,6 +148,8 @@ def test_runtime_plan_selects_batch_lane_for_batch_source() -> None:
 
     assert plan.lane == RuntimeLane.BATCH
     assert plan.batch_source is True
+    assert plan.source.emitted_plane == DataPlane.PYTHON_BATCHES
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
 
 
 def test_runtime_plan_keeps_direct_flush_when_delivery_hooks_exist() -> None:
@@ -140,6 +166,11 @@ def test_runtime_plan_keeps_direct_flush_when_delivery_hooks_exist() -> None:
 
 class _ArrowNativeSink(BaseSink[int]):
     sink_name = "arrow_sink"
+    accepted_data_planes = (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.ARROW_BATCHES,
+    )
+    native_data_planes = accepted_data_planes
 
     async def write(self, record: int) -> None:
         del record
@@ -152,7 +183,14 @@ class _ArrowBatchSource(_BatchSource):
     """A batch source that emits native arrow RecordBatch objects."""
 
     source_name = "arrow_batch_source"
-    emits_arrow_batches = True
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.ARROW_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=True,
+        )
 
 
 def test_arrow_fast_path_not_selected_for_list_batch_source() -> None:
@@ -168,6 +206,7 @@ def test_arrow_fast_path_not_selected_for_list_batch_source() -> None:
 
     assert plan.lane == RuntimeLane.BATCH
     assert plan.writer.arrow_fast_path is False
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
 
 
 def test_arrow_fast_path_selected_for_arrow_emitting_source() -> None:
@@ -180,6 +219,46 @@ def test_arrow_fast_path_selected_for_arrow_emitting_source() -> None:
 
     assert plan.lane == RuntimeLane.BATCH
     assert plan.writer.arrow_fast_path is True
+    assert plan.source.emitted_plane == DataPlane.ARROW_BATCHES
+    assert plan.writer.input_data_plane == DataPlane.ARROW_BATCHES
+
+
+def test_arrow_fast_path_selected_for_arrow_emitting_source_with_multiple_arrow_sinks() -> None:
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([]),
+        SinkFanOut([_ArrowNativeSink(), _ArrowNativeSink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.lane == RuntimeLane.BATCH
+    assert plan.writer.arrow_fast_path is True
+
+
+def test_arrow_fast_path_selected_when_any_fan_out_sink_is_arrow_native() -> None:
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([]),
+        SinkFanOut([_ArrowNativeSink(), _BatchSink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.lane == RuntimeLane.BATCH
+    assert plan.writer.arrow_fast_path is True
+    assert plan.writer.arrow_chain is True
+
+
+def test_arrow_chain_selected_even_without_arrow_native_sink() -> None:
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([]),
+        SinkFanOut([_BatchSink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.lane == RuntimeLane.BATCH
+    assert plan.writer.arrow_fast_path is False
+    assert plan.writer.arrow_chain is True
 
 
 def test_arrow_chain_selected_when_all_stages_are_arrow_native() -> None:
@@ -202,7 +281,24 @@ def test_arrow_chain_selected_when_all_stages_are_arrow_native() -> None:
     assert plan.writer.arrow_chain is True
 
 
-def test_arrow_chain_not_selected_for_mixed_chain() -> None:
+def test_arrow_process_batch_middleware_keeps_arrow_chain_selected() -> None:
+    from agora.middlewares.process import ArrowProcessBatchMiddleware
+
+    def _identity(batch):
+        return batch
+
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([ArrowProcessBatchMiddleware(fn=_identity, max_workers=1)]),
+        SinkFanOut([_ArrowNativeSink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.writer.arrow_fast_path is True
+    assert plan.writer.arrow_chain is True
+
+
+def test_arrow_chain_validation_rejects_mixed_chain() -> None:
     from agora.core.batch import ArrowBatchMiddleware
     from agora.core.middleware import Middleware
 
@@ -218,12 +314,97 @@ def test_arrow_chain_not_selected_for_mixed_chain() -> None:
         async def process(self, record, ctx):
             return record
 
+    with pytest.raises(PipelineError, match="mixes incompatible data planes"):
+        build_runtime_plan(
+            _ArrowBatchSource(),
+            MiddlewareChain([_IdentityArrowMW(), _RegularMW()]),
+            SinkFanOut([_ArrowNativeSink()]),
+            writer_batch_size=5000,
+        )
+
+
+def test_arrow_chain_validation_rejects_non_arrow_source() -> None:
+    from agora.core.batch import ArrowBatchMiddleware
+
+    class _IdentityArrowMW(ArrowBatchMiddleware):
+        name = "identity_arrow"
+
+        async def process_arrow_batch(self, batch, ctx):
+            return batch
+
+    with pytest.raises(PipelineError, match="Arrow-emitting batch source"):
+        build_runtime_plan(
+            _BatchSource(),
+            MiddlewareChain([_IdentityArrowMW()]),
+            SinkFanOut([_ArrowNativeSink()]),
+            writer_batch_size=5000,
+        )
+
+
+def test_arrow_chain_materializes_at_writer_boundary_when_writer_has_no_arrow_path() -> None:
     plan = build_runtime_plan(
         _ArrowBatchSource(),
-        MiddlewareChain([_IdentityArrowMW(), _RegularMW()]),
-        SinkFanOut([_ArrowNativeSink()]),
+        MiddlewareChain([]),
+        SinkFanOut([_BatchSink()]),
         writer_batch_size=5000,
     )
 
+    assert plan.source.emitted_plane == DataPlane.ARROW_BATCHES
+    assert plan.middleware.output_data_plane == DataPlane.ARROW_BATCHES
+    assert plan.writer.arrow_chain is True
     assert plan.writer.arrow_fast_path is False
-    assert plan.writer.arrow_chain is False
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
+    assert plan.writer.sink_plans[0].selected_data_plane == DataPlane.PYTHON_BATCHES
+
+
+def test_arrow_source_with_python_row_chain_tracks_single_materialization() -> None:
+    class _RegularMW(Middleware[int, int]):
+        name = "regular"
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([_RegularMW()]),
+        SinkFanOut([_BatchSink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.middleware.input_data_plane == DataPlane.ARROW_BATCHES
+    assert plan.middleware.output_data_plane == DataPlane.PYTHON_BATCHES
+    assert plan.middleware.materializes_arrow_to_rows is True
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
+
+
+def test_runtime_plan_tracks_sink_downgrades_for_mixed_arrow_fanout() -> None:
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([]),
+        SinkFanOut([_ArrowNativeSink(), _RowOnlySink()]),
+        writer_batch_size=5000,
+    )
+
+    assert plan.writer.input_data_plane == DataPlane.ARROW_BATCHES
+    assert plan.writer.downgraded_sink_count == 1
+    assert [sink.selected_data_plane for sink in plan.writer.sink_plans] == [
+        DataPlane.ARROW_BATCHES,
+        DataPlane.PYTHON_ROWS,
+    ]
+
+
+def test_router_does_not_advertise_arrow_writer_path_from_arrow_capable_sink() -> None:
+    router = SinkRouter[int]().default(_ArrowNativeSink())  # type: ignore[arg-type]
+
+    plan = build_runtime_plan(
+        _ArrowBatchSource(),
+        MiddlewareChain([]),
+        router,
+        writer_batch_size=5000,
+    )
+
+    assert plan.writer.arrow_chain is True
+    assert plan.writer.arrow_fast_path is False
+    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
+    assert plan.writer.sink_plans[0].selected_data_plane == DataPlane.PYTHON_ROWS

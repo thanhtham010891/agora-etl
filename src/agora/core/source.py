@@ -28,17 +28,20 @@ from __future__ import annotations
 
 import warnings
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
 
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
+
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
     from types import TracebackType
 
     from agora.core.checkpoint import Checkpoint, CheckpointValue
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+_WARNED_LEGACY_SOURCE_TYPES: set[type[object]] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +127,53 @@ def source_delivery_success_callback(
     return None
 
 
+def source_data_plane_spec(source: object) -> SourceDataPlaneSpec:
+    """Return the emitted data plane for *source*."""
+    if isinstance(source, BaseSource):
+        return source.data_plane_spec()
+
+    advertised = getattr(source, "data_plane_spec", None)
+    if callable(advertised):
+        spec = advertised()
+        if not isinstance(spec, SourceDataPlaneSpec):
+            raise TypeError("data_plane_spec() must return SourceDataPlaneSpec")
+        return spec
+
+    return _source_data_plane_spec_from_legacy_flags(source, warn=True)
+
+
+def _source_data_plane_spec_from_legacy_flags(
+    source: object,
+    *,
+    warn: bool,
+) -> SourceDataPlaneSpec:
+    """Compatibility bridge for older source bool flags."""
+    supports_batch_emit = bool(getattr(source, "supports_batch_emit", False))
+    emits_arrow_batches = bool(getattr(source, "emits_arrow_batches", False))
+    if warn and (supports_batch_emit or emits_arrow_batches):
+        source_type = type(source)
+        if source_type not in _WARNED_LEGACY_SOURCE_TYPES:
+            _WARNED_LEGACY_SOURCE_TYPES.add(source_type)
+            warnings.warn(
+                f"{source_type.__name__} uses legacy source data-plane bool flags; "
+                "override data_plane_spec() returning SourceDataPlaneSpec instead. "
+                "Legacy flags remain supported in 0.3.x and are planned for removal in 0.4.0.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+    emitted_plane = DataPlane.PYTHON_ROWS
+    if emits_arrow_batches:
+        emitted_plane = DataPlane.ARROW_BATCHES
+    elif supports_batch_emit:
+        emitted_plane = DataPlane.PYTHON_BATCHES
+    return SourceDataPlaneSpec(
+        source_name=str(getattr(source, "source_name", type(source).__name__)),
+        emitted_plane=emitted_plane,
+        supports_batch_emit=supports_batch_emit,
+        emits_arrow_batches=emits_arrow_batches,
+    )
+
+
 class SourceRecordError(RuntimeError):
     """Record-scoped source failure that the runtime can DLQ precisely."""
 
@@ -166,8 +216,8 @@ class BaseSource(ABC, Generic[T]):
     def stream(self) -> AsyncGenerator[T, None]:
         """Yield records asynchronously.
 
-        The generator must be finite (raises StopAsyncIteration) or
-        honour the ``max_records`` contract imposed by the pipeline runner.
+        The generator must be finite (raises StopAsyncIteration) unless the
+        caller wraps the source in ``source.limit(n)`` for bounded execution.
         """
 
     # ------------------------------------------------------------------ #
@@ -224,6 +274,23 @@ class BaseSource(ABC, Generic[T]):
         """
         return {}
 
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        """Return the source-side data-plane contract used by runtime planning."""
+        return _source_data_plane_spec_from_legacy_flags(self, warn=True)
+
+    @property
+    def emitted_data_plane(self) -> DataPlane:
+        """Convenience alias for the source's emitted plane."""
+        return self.data_plane_spec().emitted_plane
+
+    def limit(self, max_records: int | None) -> BaseSource[T]:
+        """Return a source wrapper that emits at most *max_records* records."""
+        if max_records is None:
+            return self
+        if max_records < 0:
+            raise ValueError(f"max_records must be >= 0, got {max_records}")
+        return LimitedSource(self, max_records=max_records)
+
     # ------------------------------------------------------------------ #
     # Async context manager                                                #
     # ------------------------------------------------------------------ #
@@ -265,3 +332,110 @@ class IterableSource(BaseSource[T]):
     async def stream(self) -> AsyncGenerator[T, None]:
         for record in self._records:
             yield record
+
+
+def _slice_emitted_batch(batch: Any, count: int) -> Any:
+    """Trim one emitted batch to *count* rows while preserving its shape when possible."""
+    if count < 0:
+        raise ValueError(f"count must be >= 0, got {count}")
+    if hasattr(batch, "slice"):
+        return batch.slice(0, count)
+    return batch[:count]
+
+
+class LimitedSource(BaseSource[T]):
+    """Source wrapper that caps total emitted records before the runtime sees them."""
+
+    source_name = "limited_source"
+
+    def __init__(self, source: BaseSource[T], *, max_records: int) -> None:
+        if max_records < 0:
+            raise ValueError(f"max_records must be >= 0, got {max_records}")
+        self._source = source
+        self._max_records = max_records
+        self.source_name = source.source_name
+        self.supports_prefetch = bool(getattr(source, "supports_prefetch", False))
+        upstream_prefetch = int(getattr(source, "prefetch_limit", 0))
+        if upstream_prefetch > 0:
+            self.prefetch_limit = min(upstream_prefetch, max_records)
+        else:
+            self.prefetch_limit = upstream_prefetch
+        self.supports_checkpoint = bool(getattr(source, "supports_checkpoint", False))
+        self.supports_rust_prefetch = bool(getattr(source, "supports_rust_prefetch", False))
+
+    def limit(self, max_records: int | None) -> BaseSource[T]:
+        if max_records is None:
+            return self
+        if max_records < 0:
+            raise ValueError(f"max_records must be >= 0, got {max_records}")
+        return LimitedSource(self._source, max_records=min(self._max_records, max_records))
+
+    async def open(self) -> None:
+        await self._source.open()
+
+    async def close(self) -> None:
+        await self._source.close()
+
+    async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
+        await self._source.prepare_resume(checkpoint)
+
+    def current_checkpoint(self) -> CheckpointValue:
+        return self._source.current_checkpoint()
+
+    def runtime_metrics(self) -> SourceRuntimeMetrics:
+        return self._source.runtime_metrics()
+
+    def runtime_counters(self) -> dict[str, int]:
+        return self._source.runtime_counters()
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        upstream = self._source.data_plane_spec()
+        return replace(upstream, source_name=self.source_name)
+
+    def delivery_success_callback(self) -> Callable[[], Awaitable[None]] | None:
+        if isinstance(self._source, DeliveryHookSource):
+            return self._source.delivery_success_callback()
+        return None
+
+    async def stream(self) -> AsyncGenerator[T, None]:
+        remaining = self._max_records
+        if remaining <= 0:
+            return
+        async for record in self._source.stream():
+            if remaining <= 0:
+                break
+            yield record
+            remaining -= 1
+
+    async def stream_batches(self) -> AsyncGenerator[Any, None]:
+        if self.data_plane_spec().emitted_plane == DataPlane.PYTHON_ROWS:
+            raise RuntimeError(
+                f"Source '{self.source_name}' does not support batch emission; stream_batches() "
+                "is unavailable on this limited wrapper."
+            )
+        remaining = self._max_records
+        if remaining <= 0:
+            return
+        async for batch in self._source.stream_batches():  # type: ignore[attr-defined]
+            if remaining <= 0:
+                break
+            batch_size = len(batch)
+            if batch_size <= remaining:
+                yield batch
+                remaining -= batch_size
+                continue
+            yield _slice_emitted_batch(batch, remaining)
+            break
+
+    def stream_sync_batches(self) -> Iterator[Any]:
+        upstream = getattr(self._source, "stream_sync_batches", None)
+        if not callable(upstream):
+            raise TypeError(f"Source '{self.source_name}' does not expose stream_sync_batches().")
+        remaining = self._max_records
+        if remaining <= 0:
+            return
+        for item in upstream():
+            if remaining <= 0:
+                break
+            yield item
+            remaining -= 1

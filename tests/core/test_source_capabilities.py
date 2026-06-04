@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import warnings
+
+import pytest
+
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import (
     BaseSource,
     SourceRuntimeMetrics,
@@ -58,3 +63,43 @@ def test_source_runtime_metrics_helper_returns_custom_metrics() -> None:
 def test_source_runtime_metrics_helper_falls_back_to_defaults() -> None:
     metrics = source_runtime_metrics(object())
     assert metrics == SourceRuntimeMetrics()
+
+
+def test_source_data_plane_spec_warns_once_for_legacy_bool_flags() -> None:
+    class _LegacyBatchSource(BaseSource[int]):
+        source_name = "legacy_batch"
+        supports_batch_emit = True
+
+        async def stream(self):
+            yield 1
+
+    source = _LegacyBatchSource()
+    with pytest.deprecated_call(match="legacy source data-plane bool flags"):
+        first = source.data_plane_spec()
+    second = source.data_plane_spec()
+
+    assert first.emitted_plane is DataPlane.PYTHON_BATCHES
+    assert second.emitted_plane is DataPlane.PYTHON_BATCHES
+
+
+def test_source_data_plane_spec_does_not_warn_for_explicit_contract() -> None:
+    class _ExplicitBatchSource(BaseSource[int]):
+        source_name = "explicit_batch"
+
+        async def stream(self):
+            yield 1
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.PYTHON_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=False,
+            )
+
+    source = _ExplicitBatchSource()
+    with warnings.catch_warnings(record=True) as record:
+        spec = source.data_plane_spec()
+
+    assert spec.emitted_plane is DataPlane.PYTHON_BATCHES
+    assert len(record) == 0

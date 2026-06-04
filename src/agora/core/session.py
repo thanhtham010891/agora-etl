@@ -25,7 +25,6 @@ class PipelineRunState:
     """Mutable run-scoped state used by the pipeline executor."""
 
     ctx: PipelineContext
-    max_records: int | None
     middlewares_started: bool = False
     writer_opened: bool = False
     dlq_opened: bool = False
@@ -68,7 +67,7 @@ class PipelineLifecycleController:
         self,
         *,
         run_id: str | None,
-        max_records: int | None,
+        source_limit: int | None,
     ) -> PipelineRunState:
         metrics = PipelineMetrics()
         ctx = PipelineContext(
@@ -77,8 +76,8 @@ class PipelineLifecycleController:
             run_id=run_id or str(uuid.uuid4()),
             tracer=self._spec.config.tracer or NoopTracer(),
         )
-        ctx.log.info("pipeline_start", max_records=max_records)
-        return PipelineRunState(ctx=ctx, max_records=max_records)
+        ctx.log.info("pipeline_start", source_limit=source_limit)
+        return PipelineRunState(ctx=ctx)
 
     def make_delivery_coordinator(self) -> DeliveryEngine:
         self._transport = WriterTransport(writer=self._spec.writer)

@@ -23,6 +23,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
 
+from agora.core.data_plane import DataPlane
+from agora.core.source import source_data_plane_spec
+
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
@@ -47,9 +50,9 @@ class BatchableSource(Protocol[T_co]):
     execution lane.  The runtime calls ``stream_batches()`` instead of
     ``stream()`` when this protocol is detected.
 
-    The ``supports_batch_emit`` flag must be ``True`` — the runtime checks
-    it explicitly so that a source that accidentally satisfies the structural
-    protocol is not silently routed to the batch lane.
+    Prefer implementing ``data_plane_spec()`` returning a non-row plane.
+    The older ``supports_batch_emit`` flag remains accepted in 0.3.x as a
+    compatibility bridge.
     """
 
     source_name: str
@@ -71,8 +74,10 @@ class BatchableSource(Protocol[T_co]):
 
 def is_batch_capable_source(source: object) -> TypeGuard[BatchableSource[Any]]:
     """Return True when *source* explicitly supports batch emission."""
-    return isinstance(source, BatchableSource) and bool(
-        getattr(source, "supports_batch_emit", False)
+    return (
+        callable(getattr(source, "stream_batches", None))
+        and callable(getattr(source, "current_checkpoint", None))
+        and source_data_plane_spec(source).emitted_plane != DataPlane.PYTHON_ROWS
     )
 
 
@@ -252,11 +257,12 @@ class ArrowBatchMiddleware(ABC):
         """No-op — prevents AttributeError when used in a mixed chain."""
 
     async def process(self, record: Any, ctx: PipelineContext) -> Any:
-        """Pass-through for per-record path (mixed chain fallback).
+        """Compatibility shim for non-Arrow execution paths.
 
         ArrowBatchMiddleware cannot operate on individual Python records.
-        When placed in a mixed chain, the runtime skips it in process_batch()
-        but process_range() may still call process(). Return the record unchanged.
+        The runtime planner now rejects mixed Arrow/Python-row chains up front,
+        but this pass-through keeps older internal call sites from exploding if
+        they still reach the per-record hook.
         """
         return record
 
@@ -267,7 +273,7 @@ class ArrowBatchMiddleware(ABC):
         chain: Any,
         idx: int,
     ) -> BatchProcessResult | list[Any]:
-        """Double-dispatch hook: Arrow stages are skipped in mixed-list batch chains."""
+        """Compatibility shim for legacy callers outside the validated Arrow lane."""
         return current
 
 
@@ -285,10 +291,13 @@ def is_arrow_batch_middleware(obj: object) -> TypeGuard[ArrowBatchMiddleware]:
 class ArrowNativeSink(Protocol):
     """Protocol for sinks that can consume ``pa.RecordBatch`` directly.
 
-    When both the source and sink are Arrow-native and no middleware
-    transforms the batch, the runtime uses the shortest path:
-    ``RecordBatch → write_arrow_batch()`` with zero Python object
-    allocation per row.
+    When both the source and sink expose this contract and no middleware
+    transforms the batch, the runtime may hand the original ``RecordBatch``
+    to ``write_arrow_batch()`` at the sink boundary.
+
+    Individual sinks may still materialize rows internally after accepting
+    the Arrow batch. That is a sink-local implementation detail, distinct
+    from whether the writer/runtime stayed on the Arrow batch contract.
     """
 
     async def write_arrow_batch(self, batch: Any) -> None:

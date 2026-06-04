@@ -54,6 +54,10 @@ class RuntimeRunStats:
     total_writer_flush_count: int = 0
     total_adaptive_scale_up_count: int = 0
     total_adaptive_scale_down_count: int = 0
+    total_csv_arrow_native_batch_count: int = 0
+    total_csv_arrow_native_row_count: int = 0
+    total_csv_arrow_downgrade_batch_count: int = 0
+    total_csv_arrow_downgrade_row_count: int = 0
     last_runtime: RuntimeMetrics | None = None
 
     def absorb(self, runtime: RuntimeMetrics) -> None:
@@ -69,6 +73,10 @@ class RuntimeRunStats:
         self.total_writer_flush_count += runtime.writer_flush_count
         self.total_adaptive_scale_up_count += runtime.adaptive_backpressure_scale_up_count
         self.total_adaptive_scale_down_count += runtime.adaptive_backpressure_scale_down_count
+        self.total_csv_arrow_native_batch_count += runtime.csv_arrow_native_batch_count
+        self.total_csv_arrow_native_row_count += runtime.csv_arrow_native_row_count
+        self.total_csv_arrow_downgrade_batch_count += runtime.csv_arrow_downgrade_batch_count
+        self.total_csv_arrow_downgrade_row_count += runtime.csv_arrow_downgrade_row_count
         self.last_runtime = runtime.copy()
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +92,10 @@ class RuntimeRunStats:
             "total_writer_flush_count": self.total_writer_flush_count,
             "total_adaptive_scale_up_count": self.total_adaptive_scale_up_count,
             "total_adaptive_scale_down_count": self.total_adaptive_scale_down_count,
+            "total_csv_arrow_native_batch_count": self.total_csv_arrow_native_batch_count,
+            "total_csv_arrow_native_row_count": self.total_csv_arrow_native_row_count,
+            "total_csv_arrow_downgrade_batch_count": self.total_csv_arrow_downgrade_batch_count,
+            "total_csv_arrow_downgrade_row_count": self.total_csv_arrow_downgrade_row_count,
         }
         if self.last_runtime is not None:
             payload["last_run"] = self.last_runtime.to_dict()  # type: ignore[assignment]

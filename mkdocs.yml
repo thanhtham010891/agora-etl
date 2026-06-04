@@ -1,4 +1,4 @@
-site_name: Agora ETL
+site_name: Agora ETL Framework
 site_description: Async-first ETL framework for Python
 site_url: https://agora.my-working.com/
 repo_url: https://github.com/thanhtham010891/agora-etl
@@ -24,9 +24,51 @@ nav:
       - Configuration: configuration.md
       - CLI Reference: cli.md
   - Reference:
-      - Sources: sources.md
-      - Sinks: sinks.md
-      - Middlewares: middlewares.md
+      - Sources:
+          - Overview: source/index.md
+          - IterableSource: source/iterable.md
+          - CsvSource: source/csv.md
+          - JsonLinesSource: source/jsonlines.md
+          - ParquetSource: source/parquet.md
+          - ArrowCsvSource: source/arrow-csv.md
+          - ArrowJsonLinesSource: source/arrow-jsonlines.md
+          - HTTPSource: source/http.md
+          - SQLiteDLQSource: source/sqlite-dlq.md
+          - Custom Source: source/custom.md
+      - Sinks:
+          - Overview: sink/index.md
+          - StdoutSink: sink/stdout.md
+          - LogSink: sink/log.md
+          - JsonLinesSink: sink/jsonlines.md
+          - CsvSink: sink/csv.md
+          - ParquetSink: sink/parquet.md
+          - WebhookSink: sink/webhook.md
+          - SQLiteDLQSink: sink/sqlite-dlq.md
+          - Custom Sink: sink/custom.md
+      - Middlewares:
+          - Overview: middleware/index.md
+          - MapMiddleware: middleware/map.md
+          - FilterMiddleware: middleware/filter.md
+          - BatchMapMiddleware: middleware/batch-map.md
+          - BatchFilterMiddleware: middleware/batch-filter.md
+          - ProcessBatchMiddleware: middleware/process-batch.md
+          - ArrowBatchMiddleware: middleware/arrow-batch.md
+          - ArrowMapMiddleware: middleware/arrow-map.md
+          - ArrowFilterMiddleware: middleware/arrow-filter.md
+          - ArrowProcessBatchMiddleware: middleware/arrow-process-batch.md
+          - RetryMiddleware: middleware/retry.md
+          - ValidateMiddleware: middleware/validate.md
+          - EnrichMiddleware: middleware/enrich.md
+          - DedupMiddleware: middleware/dedup.md
+          - RouteMiddleware: middleware/route.md
+          - SchemaMiddleware: middleware/schema.md
+          - AI Cache Helpers: middleware/ai-cache-helpers.md
+          - AIEnrichMiddleware: middleware/ai-enrich.md
+          - AIClassifyMiddleware: middleware/ai-classify.md
+          - AIExtractMiddleware: middleware/ai-extract.md
+          - AIValidateMiddleware: middleware/ai-validate.md
+          - AITranslateMiddleware: middleware/ai-translate.md
+          - AIBatchMiddleware: middleware/ai-batch.md
       - Schema: schema.md
       - State: state.md
       - Architecture: architecture.md
@@ -41,7 +83,22 @@ nav:
           - Plugin Contract: plugins/contract.md
           - Manifest Contract: plugins/manifest.md
           - Developing Plugins: plugins/developing.md
-  - Change Log: change-log/index.md
+  - Change Log:
+      - Overview: change-log/index.md
+      - Releases:
+          - 0.3.0: change-log/0.3.0.md
+          - 0.2.2: change-log/0.2.2.md
+          - 0.2.1: change-log/0.2.1.md
+          - 0.2.0: change-log/0.2.0.md
+          - 0.1.9: change-log/0.1.9.md
+          - 0.1.8: change-log/0.1.8.md
+          - 0.1.7: change-log/0.1.7.md
+          - 0.1.6: change-log/0.1.6.md
+          - 0.1.5: change-log/0.1.5.md
+          - 0.1.4: change-log/0.1.4.md
+          - 0.1.3: change-log/0.1.3.md
+          - 0.1.2: change-log/0.1.2.md
+          - 0.1.0: change-log/0.1.0.md
 markdown_extensions:
   - admonition
   - tables

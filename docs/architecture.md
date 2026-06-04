@@ -14,7 +14,7 @@ Every pipeline is composed of five parts. Understanding what each one owns makes
 
 **DLQSink** captures failed records. A DLQ record preserves the original payload, the processed payload (if the failure happened at the sink), the pipeline and run IDs, the error type and message, and the source checkpoint at the time of failure. Failed records can be replayed with `agora dlq replay`.
 
-**CheckpointStore** persists the source's position so a pipeline can resume after a restart. The runtime calls `checkpoint_store.save()` every `checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)` is called before streaming begins. Not all sources support checkpointing — see [Sources](sources.md) for which ones do.
+**CheckpointStore** persists the source's position so a pipeline can resume after a restart. The runtime calls `checkpoint_store.save()` every `checkpoint_every` records. On the next run, `source.prepare_resume(checkpoint)` is called before streaming begins. Not all sources support checkpointing — see [Sources](source/index.md) for which ones do.
 
 For the exact hook order of startup, streaming, and shutdown, see
 [Lifecycle](guides/lifecycle.md).
@@ -48,7 +48,7 @@ concurrent, but it does not change the ordering or failure semantics. Output
 order is still source order. A sink failure or cancellation still aborts
 pending buffered work rather than committing later records out of order.
 
-**Batch lane** activates when the source sets `supports_batch_emit = True` (e.g. `CsvSource(emit_batches=True)`, `ArrowCsvSource`, `ParquetSource(use_arrow_batches=True)`). The runtime calls `source.stream_batches()` instead of `stream()` and processes whole batches at once:
+**Batch lane** activates when the source advertises a non-row data plane (e.g. `CsvSource(emit_batches=True)`, `ArrowCsvSource`, `ParquetSource(use_arrow_batches=True)`). The runtime calls `source.stream_batches()` instead of `stream()` and processes whole batches at once:
 
 ```
 source.stream_batches() → chain.process_batch(batch) → writer.write_batch(results)
@@ -56,17 +56,60 @@ source.stream_batches() → chain.process_batch(batch) → writer.write_batch(re
 
 Checkpointing, DLQ routing, and ordering guarantees are all preserved — the checkpoint advances once per batch, after the batch is durably written.
 
-**Arrow fast path** is a sub-case of the batch lane. When the source emits `pa.RecordBatch` objects (`emits_arrow_batches = True`) **and** every middleware in the chain is an `ArrowBatchMiddleware` subclass **and** the sink is Arrow-native (`write_arrow_batch` present), the runtime keeps data columnar end-to-end:
+`ProcessBatchMiddleware` is a special case of the batch lane: the transform
+executes in a dedicated worker process, and when `max_workers > 1` plus
+`max_in_flight_batches > 1`, Agora can keep multiple process batches in flight
+while still committing them back in source order. If a process batch times out,
+Agora recycles that process pool before accepting the next sequential commit so
+later batches do not inherit stuck worker state. In `0.3.x`, this pipelined
+mode is supported only with `ordered=True`.
+
+`ArrowProcessBatchMiddleware` is the Arrow-native sibling of that pattern:
+the source emits `pa.RecordBatch`, the middleware sends the batch across the
+worker boundary as Arrow IPC bytes, and the sink can stay Arrow-native on the
+way out. This keeps the orchestration semantics the same while avoiding
+materializing Python row objects in the process path.
+
+**Arrow fast path** is a sub-case of the batch lane. When the source emits `pa.RecordBatch` objects (`data_plane_spec().emitted_plane == arrow_batches`) **and** every middleware in the chain is Arrow-native **and** at least one sink exposes `write_arrow_batch()`, the runtime keeps data columnar through the chain and into every Arrow-capable sink:
 
 ```
-source.stream_batches()          # yields pa.RecordBatch
-  → chain.process_arrow_batch()  # each stage: RecordBatch → RecordBatch (no to_pylist)
-  → sink.write_arrow_batch()     # zero Python object allocation per row
+source.stream_batches()              # yields pa.RecordBatch
+  → chain.process_arrow_batch()      # each stage: RecordBatch → RecordBatch
+  → sink.write_arrow_batch()         # for Arrow-native sinks
+  → sink.write_batch()/write()       # row fallback only for non-Arrow sinks
 ```
 
-If any stage is a regular `Middleware` or `BatchMiddleware`, the runtime falls
-back to `to_pylist()` before that stage. In practice, that means an Arrow
-source alone is not enough to keep the whole pipeline columnar.
+There are now three distinct Arrow-source cases:
+
+- no Arrow middleware in the chain: the runtime may materialize rows once
+  before the chain and continue as a Python-row pipeline
+- every middleware in the chain is Arrow-native: the Arrow chain stays active
+- the chain mixes Arrow middleware with Python-row/list-batch middleware:
+  planning fails with `PipelineError` because the chain is internally
+  inconsistent
+
+Agora now models those choices with one shared data-plane vocabulary:
+
+- `python_rows` — one record at a time
+- `python_batches` — `list[...]` batches of Python row objects
+- `arrow_batches` — `pyarrow.RecordBatch`
+
+That vocabulary is exposed on the public contracts too:
+
+- `source.data_plane_spec()` / `source.emitted_data_plane`
+- `sink.data_plane_spec()`
+- `from agora import DataPlane, SourceDataPlaneSpec, SinkDataPlaneSpec`
+
+The planner resolves two important boundaries up front:
+
+- the plane emitted by the source
+- the plane that will actually enter the writer after any required materialization
+
+Legacy note: `supports_batch_emit`, `emits_arrow_batches`,
+`batch_writable_native`, and `arrow_passthrough_native` still work in `0.3.x`
+as compatibility shims, but the runtime now prefers explicit data-plane
+contracts and emits `DeprecationWarning` when it has to infer a non-row plane
+from the old booleans.
 
 ## How To Predict The Selected Lane
 
@@ -78,21 +121,27 @@ Use this as the quick mental model:
 | `stream()` only | any stage with `submit()` and `min_concurrency > 1` | any sink | `buffered` | preserves source order while running the buffered stage concurrently |
 | `stream_batches()` via `supports_batch_emit=True` | regular `BatchMiddleware` or no middleware | batch-writable sink | `batch` | avoids per-record runtime orchestration |
 | Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | Arrow-native sink | `batch` + Arrow fast path | `arrow_fast_path_active=true`, `arrow_chain_active=true` |
-| Arrow batch source (`emits_arrow_batches=True`) | mixed Arrow + regular middleware | any sink | `batch` | falls back to `to_pylist()` before the regular stage |
-| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | non-Arrow sink | `batch` | Arrow source still helps read-side throughput, but write path materialises rows |
+| Arrow batch source (`emits_arrow_batches=True`) | no Arrow stages, only Python-row middleware | any sink | `batch` | materialises rows once before the chain |
+| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | mixed fan-out sinks | `batch` + partial Arrow fast path | Arrow sinks get `write_arrow_batch()`, other sinks get row fallback at the sink boundary |
+| Arrow batch source (`emits_arrow_batches=True`) | mixed Arrow + regular middleware | any sink | invalid | planner raises `PipelineError` before the run starts |
 
 To confirm the decision at runtime, inspect:
 
 - `summary.runtime.execution_lane`
+- `summary.runtime.source_data_plane`
+- `summary.runtime.writer_input_data_plane`
 - `summary.runtime.direct_flush_active`
 - `summary.runtime.arrow_fast_path_active`
 - `summary.runtime.arrow_chain_active`
+- `summary.runtime.writer_downgraded_sink_count`
 
 If tracing is enabled, the same decision appears in span attributes:
 
 - `pipeline.run`: `planned_lane`, `direct_flush_eligible`,
-  `arrow_fast_path_eligible`, `arrow_chain_eligible`
-- `source.stream`: `lane`, `batch_source`, `buffered_stage_count`
+  `arrow_fast_path_eligible`, `arrow_chain_eligible`,
+  `source_data_plane`, `writer_input_data_plane`, `downgraded_sink_count`
+- `source.stream`: `lane`, `batch_source`, `buffered_stage_count`,
+  `source_data_plane`, `writer_input_data_plane`
 
 ## Runtime guarantees
 

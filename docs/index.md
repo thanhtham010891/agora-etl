@@ -7,6 +7,7 @@ agora-etl is a Python async ETL framework built around a `Source → Middleware 
 ## Start here
 
 - **Running your first pipeline** → [guides/quickstart.md](guides/quickstart.md)
+- **Backend and integration examples** → [plugins/index.md](plugins/index.md)
 - **Understanding pipeline structure** → [guides/pipelines.md](guides/pipelines.md)
 - **Preparing for production** → [guides/scheduling.md](guides/scheduling.md)
 - **Handling failures and recovery** → [guides/failure-handling.md](guides/failure-handling.md)
@@ -31,9 +32,9 @@ agora-etl is a Python async ETL framework built around a `Source → Middleware 
 
 | Reference | What it covers |
 |---|---|
-| [Sources](sources.md) | Built-in and custom source types |
-| [Sinks](sinks.md) | Built-in and custom sink types |
-| [Middlewares](middlewares.md) | Built-in, AI, and custom middlewares |
+| [Sources](source/index.md) | Built-in and custom source types |
+| [Sinks](sink/index.md) | Built-in and custom sink types |
+| [Middlewares](middleware/index.md) | Built-in, AI, and custom middlewares |
 | [Schema](schema.md) | Schema inference, contracts, and persistence |
 | [State](state.md) | Shared key-value backends and helper stores |
 | [Architecture](architecture.md) | Execution lanes, state, plugin loading, and runtime structure |

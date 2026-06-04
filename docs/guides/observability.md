@@ -25,6 +25,8 @@ pipelines, this now tells you whether the run actually used the Rust path
 (`rust_prefetch_active`) and how often that path had to wait, batch-drain, and
 batch-push records. It also tells you which execution lane actually ran
 (`execution_lane`) and whether direct flush or Arrow fast paths were active.
+For CSV sinks on Arrow runs, it also tells you whether the sink stayed on the
+native Arrow writer or had to downgrade to Python-row CSV writing.
 
 ```python
 async def on_run_complete(record: RunRecord) -> None:
@@ -43,6 +45,23 @@ scheduled = ScheduledPipeline(
     schedule=Schedule.every(hours=1),
     pipeline_id="events_ingest",
     on_run_complete=on_run_complete,
+)
+```
+
+`print(summary)` is also more informative now. When runtime hints are present,
+the string form includes markers such as:
+
+```text
+PipelineRunSummary(
+    consumed=63826,
+    written=63826,
+    dropped=0,
+    errors=0,
+    elapsed=1.0s,
+    lane=batch,
+    arrow_chain=on,
+    arrow_fast_path=on,
+    csv_arrow_downgraded=1b/63826r,
 )
 ```
 
@@ -134,20 +153,48 @@ The same `runtime.last_run` block also exposes execution-shape signals:
 
 - `execution_lane` — `"linear"`, `"buffered"`, or `"batch"` for the lane that
   actually ran
+- `source_data_plane` — `"python_rows"`, `"python_batches"`, or
+  `"arrow_batches"` for the plane emitted by the source
+- `writer_input_data_plane` — the plane that actually crossed into the writer
+  after any materialization at the writer boundary
 - `direct_flush_active` — `true` when the linear lane used the direct batched
   flush path
 - `arrow_fast_path_active` — `true` when a batch source wrote Arrow batches
   straight into an Arrow-native sink
 - `arrow_chain_active` — `true` when both the source/sink fast path and the
   middleware chain stayed Arrow-native end to end
+- `writer_downgraded_sink_count` — how many sinks had to receive a lower-plane
+  representation than the writer input plane
+- `csv_arrow_native_batch_count` — how many CSV Arrow batches were written
+  natively via `pyarrow.csv.write_csv()`
+- `csv_arrow_native_row_count` — how many rows stayed on the CSV Arrow-native
+  writer
+- `csv_arrow_downgrade_batch_count` — how many CSV Arrow batches had to
+  downgrade to Python-row writing
+- `csv_arrow_downgrade_row_count` — how many rows were written through that
+  downgrade path
 
 This makes it easier to tell the difference between a planner capability and a
 runtime path that was truly exercised.
+
+One subtle but important case: `arrow_chain_active=true` and
+`arrow_fast_path_active=true` do not guarantee that `CsvSink` stayed native for
+every batch. A CSV sink can still downgrade internally when `pyarrow.csv`
+rejects the schema or payload, for example:
+
+- nested Arrow types such as `struct` or `list`
+- invalid UTF-8 payloads
+
+That is why the CSV native/downgrade counters matter: they show what really
+happened inside the sink after the planner selected the Arrow lane.
 
 If you also enable tracing, the `pipeline.run` span records the planned shape
 before execution starts:
 
 - `planned_lane`
+- `source_data_plane`
+- `writer_input_data_plane`
+- `downgraded_sink_count`
 - `direct_flush_eligible`
 - `arrow_fast_path_eligible`
 - `arrow_chain_eligible`
@@ -155,9 +202,12 @@ before execution starts:
 After the run completes, that same span is updated with the runtime outcome:
 
 - `execution_lane`
+- `source_data_plane`
+- `writer_input_data_plane`
 - `direct_flush_active`
 - `arrow_fast_path_active`
 - `arrow_chain_active`
+- `writer_downgraded_sink_count`
 - `rust_prefetch_active`
 
 That combination is useful when a pipeline was *eligible* for a fast path but
