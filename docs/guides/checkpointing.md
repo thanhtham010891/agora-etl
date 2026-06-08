@@ -25,6 +25,70 @@ print(is_checkpoint_capable(source))  # True
 
 If you pass a checkpoint store to a pipeline whose source returns `False` here, the pipeline logs a warning and runs without checkpointing — it does not raise.
 
+## Inspecting resume state from the CLI
+
+Once a pipeline has written at least one checkpoint, the CLI can explain what
+that saved value means in operational terms:
+
+```bash
+agora checkpoint inspect nightly_events --store sqlite:/var/lib/myapp/checkpoints.db
+```
+
+The output includes:
+
+- the raw saved value
+- whether the source actually supports resume
+- the resume key (`row_number`, `line_number`, cursor, and so on)
+- the granularity of that key
+- the built-in resume behavior that the next run will use
+
+For automation or incident tooling, add `--json`:
+
+```bash
+agora checkpoint inspect nightly_events \
+  --store sqlite:/var/lib/myapp/checkpoints.db \
+  --json
+```
+
+For large built-in file sources (`CsvSource`, `JsonLinesSource`,
+`ParquetSource`), `agora checkpoint inspect` also warns when the saved offset is
+high enough that restart cost may be noticeable. Those sources currently
+re-read from the beginning and skip forward to the saved position. The warning
+includes the saved offset so operators can estimate how much of the file will
+be scanned again before new output appears.
+
+To clear saved progress explicitly:
+
+```bash
+agora checkpoint reset nightly_events \
+  --store sqlite:/var/lib/myapp/checkpoints.db \
+  --yes
+```
+
+`agora checkpoint reset --json` is available for scripts that need a structured
+confirmation payload.
+
+When a pipeline has failed and there are DLQ records to inspect, use:
+
+```bash
+agora diagnose nightly_events \
+  --checkpoint-store sqlite:/var/lib/myapp/checkpoints.db \
+  --dlq-path /var/lib/myapp/dlq.db
+```
+
+`agora diagnose` shows the same resume contract alongside the latest failure
+context so operators can tell both _where_ the run stopped and _what_ a resume
+will actually do.
+
+For machine-readable incident summaries:
+
+```bash
+agora diagnose nightly_events \
+  --checkpoint-store sqlite:/var/lib/myapp/checkpoints.db \
+  --dlq-path /var/lib/myapp/dlq.db \
+  --json
+```
+
 ## Choosing a store
 
 There are two stores out of the box.

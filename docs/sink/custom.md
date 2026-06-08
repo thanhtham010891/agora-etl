@@ -27,9 +27,9 @@ Every sink always accepts Python rows. Additional native planes are optional and
 advertised through the sink's public data-plane contract:
 
 ```python
-from agora import DataPlane
+from agora import DataPlane, sink_data_plane_spec
 
-spec = MySink().data_plane_spec()
+spec = sink_data_plane_spec(MySink())
 assert spec.accepted_planes == (DataPlane.PYTHON_ROWS,)
 assert spec.native_planes == (DataPlane.PYTHON_ROWS,)
 ```
@@ -95,8 +95,9 @@ When the upstream pipeline is on the Arrow chain:
 - sinks with Arrow support receive `RecordBatch`
 - sinks without Arrow support are downgraded at the sink boundary
 
-For custom sinks, prefer checking `sink.data_plane_spec()` in tests instead of
-asserting only on internal flags.
+For custom sinks, prefer checking `sink_data_plane_spec(sink)` in tests instead
+of asserting only on internal flags. That helper uses the same normalization
+path the runtime planner/writer uses.
 
 Legacy note:
 
@@ -105,11 +106,12 @@ Legacy note:
 
 still work in `0.3.x`, but Agora now emits `DeprecationWarning` when it has to
 infer sink planes from those booleans. Prefer explicit data planes for new
-code.
+code, and prefer `sink_data_plane_spec(sink)` in tests. Legacy bool flags are planned for removal in
+`0.4.0`.
 
 ## Practical advice
 
 - make writes idempotent if retries are possible
 - use native batch writes when the destination supports them
-- test the advertised `data_plane_spec()` for every non-row sink
+- test `sink_data_plane_spec()` for every non-row sink
 - keep shutdown behavior explicit by flushing or closing resources in `close()`

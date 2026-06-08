@@ -44,6 +44,7 @@ class MiddlewareExecutionPlan:
     input_data_plane: DataPlane = DataPlane.PYTHON_ROWS
     output_data_plane: DataPlane = DataPlane.PYTHON_ROWS
     materializes_arrow_to_rows: bool = False
+    materialization_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class WriterSinkPlan:
     native_data_planes: tuple[DataPlane, ...]
     selected_data_plane: DataPlane
     downgraded_from_input: bool = False
+    selection_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,7 @@ class WriterExecutionPlan:
 
     batch_size: int
     input_data_plane: DataPlane = DataPlane.PYTHON_ROWS
+    input_data_plane_reason: str = ""
     direct_flush_eligible: bool = False
     arrow_fast_path: bool = False
     arrow_chain: bool = False
@@ -78,6 +81,7 @@ class RuntimePlan:
     """Immutable execution plan built once before pipeline run starts."""
 
     lane: RuntimeLane
+    lane_reason: str
     source_name: str
     batch_source: bool
     has_delivery_hooks: bool
@@ -212,11 +216,33 @@ def _middleware_execution_plan(
         source_spec.emitted_plane == DataPlane.ARROW_BATCHES
         and output_data_plane != DataPlane.ARROW_BATCHES
     )
+    materialization_reason = None
+    if materializes_arrow_to_rows:
+        materialization_reason = (
+            "source emits arrow_batches, but the middleware chain contains Python-row stages, "
+            "so Arrow batches materialize once before middleware execution"
+        )
     return MiddlewareExecutionPlan(
         stages=stage_modes,
         input_data_plane=source_spec.emitted_plane,
         output_data_plane=output_data_plane,
         materializes_arrow_to_rows=materializes_arrow_to_rows,
+        materialization_reason=materialization_reason,
+    )
+
+
+def _sink_selection_reason(
+    *,
+    input_data_plane: DataPlane,
+    selected_data_plane: DataPlane,
+    native_data_planes: tuple[DataPlane, ...],
+) -> str:
+    if selected_data_plane == input_data_plane:
+        return f"sink accepts {input_data_plane.value} natively"
+    native = ", ".join(plane.value for plane in native_data_planes) or "python_rows"
+    return (
+        f"sink has no native {input_data_plane.value} path; writer downgrades to "
+        f"{selected_data_plane.value} at the sink boundary (native={native})"
     )
 
 
@@ -233,10 +259,51 @@ def _writer_sink_plans(
             sink_name=spec.sink_name,
             accepted_data_planes=spec.accepted_planes,
             native_data_planes=spec.native_planes,
-            selected_data_plane=spec.selected_plane_for(input_data_plane),
+            selected_data_plane=(selected := spec.selected_plane_for(input_data_plane)),
             downgraded_from_input=spec.downgraded_from(input_data_plane),
+            selection_reason=_sink_selection_reason(
+                input_data_plane=input_data_plane,
+                selected_data_plane=selected,
+                native_data_planes=spec.native_planes,
+            ),
         )
         for spec in sink_specs
+    )
+
+
+def _lane_reason(
+    *,
+    batch_source: bool,
+    buffered_stages: tuple[BufferedStageSpec, ...],
+) -> str:
+    if batch_source:
+        return "source advertises batch emission, so the runtime selects the batch lane"
+    if buffered_stages:
+        stage_list = ", ".join(
+            f"{stage.name}(min_concurrency={stage.concurrency})" for stage in buffered_stages
+        )
+        return (
+            "middleware stages request concurrent submit() execution, so the runtime selects "
+            f"the buffered lane: {stage_list}"
+        )
+    return "source streams Python rows and no buffered stage requires submit() concurrency"
+
+
+def _writer_input_data_plane_reason(
+    *,
+    middleware_output_data_plane: DataPlane,
+    arrow_fast_path: bool,
+) -> str:
+    if middleware_output_data_plane != DataPlane.ARROW_BATCHES:
+        return f"writer receives middleware output as {middleware_output_data_plane.value}"
+    if arrow_fast_path:
+        return (
+            "writer keeps arrow_batches because the source/middleware chain stays Arrow-native "
+            "and at least one sink exposes an Arrow batch write path"
+        )
+    return (
+        "writer materializes arrow_batches to python_batches because the writer has no "
+        "Arrow batch write path"
     )
 
 
@@ -261,6 +328,7 @@ def build_runtime_plan(
         lane = RuntimeLane.BUFFERED
     else:
         lane = RuntimeLane.LINEAR
+    lane_reason = _lane_reason(batch_source=batch_source, buffered_stages=buffered_stages)
 
     middleware_plan = _middleware_execution_plan(source_spec, chain, batch_source=batch_source)
     arrow_chain = batch_source and _arrow_chain_selected(source_spec, chain)
@@ -271,6 +339,10 @@ def build_runtime_plan(
     writer_plan = WriterExecutionPlan(
         batch_size=max(writer_batch_size, 1),
         input_data_plane=writer_input_data_plane,
+        input_data_plane_reason=_writer_input_data_plane_reason(
+            middleware_output_data_plane=middleware_plan.output_data_plane,
+            arrow_fast_path=arrow_fast_path,
+        ),
         direct_flush_eligible=_direct_flush_eligible(source, writer, writer_batch_size),
         arrow_fast_path=arrow_fast_path,
         arrow_chain=arrow_chain,
@@ -278,6 +350,7 @@ def build_runtime_plan(
     )
     return RuntimePlan(
         lane=lane,
+        lane_reason=lane_reason,
         source_name=source.source_name,
         batch_source=batch_source,
         has_delivery_hooks=has_delivery_hooks,

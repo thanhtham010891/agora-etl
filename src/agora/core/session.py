@@ -188,28 +188,34 @@ class PipelineLifecycleController:
     async def _open_sinks(self, ctx: PipelineContext) -> tuple[bool, bool]:
         writer_opened = False
         dlq_opened = False
+        writer_open_attempted = False
+        dlq_open_attempted = False
         try:
             bind_context_if_supported(self._spec.writer, ctx)
+            writer_open_attempted = True
             with ctx.trace_span("writer.open", writer=type(self._spec.writer).__name__):
                 await self._spec.writer.open()
             writer_opened = True
             if self._spec.config.dlq is not None:
                 bind_context_if_supported(self._spec.config.dlq, ctx)
+                dlq_open_attempted = True
                 with ctx.trace_span("dlq.open", sink=self._spec.config.dlq.sink_name):
                     await self._spec.config.dlq.open()
                 dlq_opened = True
         except Exception:
-            if dlq_opened and self._spec.config.dlq is not None:
+            if dlq_open_attempted and self._spec.config.dlq is not None:
                 try:
-                    await self._spec.config.dlq.close()
+                    if not bool(getattr(self._spec.config.dlq, "_open_rolled_back", False)):
+                        await self._spec.config.dlq.close()
                 except Exception as exc:
                     ctx.log.exception(
                         "pipeline_dlq_close_error_after_open_failure",
                         error=str(exc),
                     )
-            if writer_opened:
+            if writer_open_attempted:
                 try:
-                    await self._spec.writer.close()
+                    if not bool(getattr(self._spec.writer, "_open_rolled_back", False)):
+                        await self._spec.writer.close()
                 except Exception as exc:
                     ctx.log.exception(
                         "pipeline_writer_close_error_after_open_failure",

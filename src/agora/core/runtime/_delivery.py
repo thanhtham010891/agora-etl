@@ -475,7 +475,8 @@ class DeliveryEngine:
             if write_result.written:
                 ctx.metrics.records_written += 1
             if routed_all or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
-                return ErroredRouted(checkpoint=checkpoint_value, on_success=on_success)
+                ack_hook = on_success if (write_result.written or routed_all) else None
+                return ErroredRouted(checkpoint=checkpoint_value, on_success=ack_hook)
             return ErroredUnrouted(exc=write_result.errors[0])
 
         if not write_result.written:
@@ -582,7 +583,7 @@ class DeliveryEngine:
                 if checkpoint is not None:
                     pending_checkpoint = checkpoint
                     pending_checkpoint_batch_size += 1
-                if on_success is not None:
+                if routed and on_success is not None:
                     delivered_hooks.append(on_success)
             elif unrouted_error is None:
                 if pending_checkpoint is not None:

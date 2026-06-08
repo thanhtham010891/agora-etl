@@ -76,6 +76,8 @@ class RegistryItemInfo:
     version: str | None = None
     agora_api_version: str | None = None
     compatible: bool | None = None
+    entrypoint_group: str | None = None
+    capabilities: tuple[str, ...] = ()
 
 
 def _coerce_manifest(
@@ -123,6 +125,7 @@ def _coerce_manifest(
         "version": getattr(manifest, "version", None) or distribution_version,
         "agora_api_version": agora_api_version,
         "compatible": compatible,
+        "capabilities": tuple(getattr(manifest, "capabilities", ()) or ()),
     }
 
 
@@ -344,6 +347,8 @@ class Registry(Generic[P]):
                     version=metadata.get("version"),
                     agora_api_version=metadata.get("agora_api_version"),
                     compatible=metadata.get("compatible"),
+                    entrypoint_group=metadata.get("entrypoint_group"),
+                    capabilities=tuple(metadata.get("capabilities", ()) or ()),
                 )
             )
         return items
@@ -479,6 +484,8 @@ class Registry(Generic[P]):
                     distribution_name=getattr(distribution, "name", None),
                     distribution_version=getattr(distribution, "version", None),
                 )
+                if metadata is not None:
+                    metadata["entrypoint_group"] = group
                 if metadata is not None and metadata.get("compatible") is False:
                     self._metadata[ep.name] = metadata
                     self._origins[ep.name] = "entrypoint_incompatible"

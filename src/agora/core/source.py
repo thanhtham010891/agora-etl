@@ -130,16 +130,19 @@ def source_delivery_success_callback(
 def source_data_plane_spec(source: object) -> SourceDataPlaneSpec:
     """Return the emitted data plane for *source*."""
     if isinstance(source, BaseSource):
-        return source.data_plane_spec()
+        return _validated_source_data_plane_spec(source.data_plane_spec())
 
     advertised = getattr(source, "data_plane_spec", None)
     if callable(advertised):
-        spec = advertised()
-        if not isinstance(spec, SourceDataPlaneSpec):
-            raise TypeError("data_plane_spec() must return SourceDataPlaneSpec")
-        return spec
+        return _validated_source_data_plane_spec(advertised())
 
     return _source_data_plane_spec_from_legacy_flags(source, warn=True)
+
+
+def _validated_source_data_plane_spec(spec: object) -> SourceDataPlaneSpec:
+    if not isinstance(spec, SourceDataPlaneSpec):
+        raise TypeError("data_plane_spec() must return SourceDataPlaneSpec")
+    return spec
 
 
 def _source_data_plane_spec_from_legacy_flags(

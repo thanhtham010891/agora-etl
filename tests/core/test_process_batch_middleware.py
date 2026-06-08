@@ -525,6 +525,9 @@ async def test_process_batch_submit_batch_returns_concurrent_tasks() -> None:
     ctx = _make_ctx()
     await mw.on_start(ctx)
     try:
+        # Pre-warm the process pool so the concurrency assertion is not
+        # sensitive to first-worker startup variance on slower hosts.
+        assert await mw.process_batch([0], ctx) == [0]
         slow = await mw.submit_batch([1], ctx)
         fast = await mw.submit_batch([2], ctx)
         done, pending = await asyncio.wait({slow, fast}, timeout=1.2)

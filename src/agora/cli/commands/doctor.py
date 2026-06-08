@@ -26,20 +26,27 @@ import os
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from agora.cli._path import ensure_project_on_path
 from agora.cli.commands.base import BaseCommand
 from agora.cli.console import console
+from agora.cli.recovery import recovery_insight_for_source
+from agora.config import resolve_config_document, validate_config_document
+from agora.core.component_factory import config_component_factory
+from agora.core.discovery import public_entrypoint_group_contracts
+from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION, _coerce_manifest
 
 if TYPE_CHECKING:
     import argparse
 
     from agora.cli.context import AgoraContext
+    from agora.config import ResolvedPipelineConfig
 
 _MIN_PYTHON = (3, 10)
 _AGORA_PACKAGE = "agora"
 _PLUGINS_PACKAGE = "agora_plugins"
-_ENTRYPOINT_GROUP = "agora.sources"  # representative group
+_SUPPORTED_DLQ_REPLAY_SINK_TYPES = frozenset({"sqlite_dlq", "postgres_dlq", "redis_dlq"})
 
 
 class Status(Enum):
@@ -70,6 +77,15 @@ class DoctorReport:
     @property
     def warned(self) -> bool:
         return any(r.status == Status.WARN for r in self.results)
+
+
+@dataclass(frozen=True)
+class DoctorConfigContext:
+    """Loaded config file plus optional resolved agora/v1 pipeline selection."""
+
+    config_path: str
+    raw: dict[str, Any]
+    resolved: ResolvedPipelineConfig | None = None
 
 
 # ======================================================================
@@ -130,25 +146,37 @@ def check_plugins_importable() -> CheckResult:
 
 
 def check_entrypoint_plugins() -> CheckResult:
-    """Try to load all entry-point plugins and report failures."""
+    """Try to load public entry-point plugins and report compatibility issues."""
     try:
         from importlib.metadata import entry_points
 
-        groups = [
-            "agora.sources",
-            "agora.sinks",
-            "agora.middlewares",
-        ]
         failed: list[str] = []
+        incompatible: list[str] = []
         loaded = 0
-        for group in groups:
-            eps = entry_points(group=group)
+        manifestless = 0
+        for contract in public_entrypoint_group_contracts():
+            eps = entry_points(group=contract.group)
             for ep in eps:
                 try:
-                    ep.load()
+                    plugin = ep.load()
+                    distribution = getattr(ep, "dist", None)
+                    metadata = _coerce_manifest(
+                        plugin,
+                        distribution_name=getattr(distribution, "name", None),
+                        distribution_version=getattr(distribution, "version", None),
+                    )
+                    if metadata is not None and metadata.get("compatible") is False:
+                        incompatible.append(
+                            f"{ep.name} [{contract.group}] expects "
+                            f"{metadata.get('agora_api_version')!r}, "
+                            f"runtime expects {AGORA_PLUGIN_MANIFEST_VERSION!r}"
+                        )
+                        continue
+                    if metadata is not None and metadata.get("compatible") is None:
+                        manifestless += 1
                     loaded += 1
                 except Exception as exc:
-                    failed.append(f"{ep.name}: {type(exc).__name__}: {exc}")
+                    failed.append(f"{ep.name} [{contract.group}]: {type(exc).__name__}: {exc}")
 
         if failed:
             return CheckResult(
@@ -157,10 +185,25 @@ def check_entrypoint_plugins() -> CheckResult:
                 message=f"{len(failed)} plugin(s) failed to load",
                 detail="\n".join(failed),
             )
+        if incompatible:
+            detail_lines = list(incompatible)
+            if manifestless:
+                detail_lines.append(
+                    f"{manifestless} plugin(s) loaded without MANIFEST compatibility metadata"
+                )
+            return CheckResult(
+                name="Entry-point plugins",
+                status=Status.WARN,
+                message=f"{len(incompatible)} incompatible plugin(s) discovered",
+                detail="\n".join(detail_lines),
+            )
         return CheckResult(
             name="Entry-point plugins",
             status=Status.PASS,
-            message=f"{loaded} plugin(s) loaded cleanly"
+            message=(
+                f"{loaded} plugin(s) loaded cleanly"
+                + (f" ({manifestless} without MANIFEST metadata)" if manifestless else "")
+            )
             if loaded
             else "No entry-point plugins registered",
         )
@@ -173,24 +216,79 @@ def check_entrypoint_plugins() -> CheckResult:
         )
 
 
-def check_config_import_refs(config_path: str) -> CheckResult:
-    """Check that all import refs in the config file can be imported."""
+def check_config_pipeline_resolution(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Validate the config file and resolve one pipeline selection when applicable."""
     try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return CheckResult(
-                name="Config import refs",
-                status=Status.WARN,
-                message="Cannot parse config: tomllib/tomli not available",
-                detail="Install tomli: pip install tomli",
-            )
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="Config selection",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Config selection",
+            status=Status.FAIL,
+            message=f"Cannot resolve config file: {config_path}",
+            detail=str(exc),
+        )
 
+    if ctx.resolved is None:
+        return CheckResult(
+            name="Config selection",
+            status=Status.PASS,
+            message="Generic TOML config loaded",
+            detail="Not an agora/v1 document; pipeline selection checks skipped.",
+        )
+
+    details = [
+        f"pipeline={ctx.resolved.pipeline_name}",
+        f"profile={ctx.resolved.profile_name or 'none'}",
+        f"environment={ctx.resolved.environment_name or 'none'}",
+    ]
+    return CheckResult(
+        name="Config selection",
+        status=Status.PASS,
+        message=f"Resolved agora/v1 pipeline '{ctx.resolved.pipeline_name}'",
+        detail="\n".join(details),
+    )
+
+
+def check_config_import_refs(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Check that import refs in the selected config resolve to real Python objects."""
     try:
-        with open(config_path, "rb") as f:
-            config = tomllib.load(f)
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="Config import refs",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
     except Exception as exc:
         return CheckResult(
             name="Config import refs",
@@ -199,7 +297,9 @@ def check_config_import_refs(config_path: str) -> CheckResult:
             detail=str(exc),
         )
 
-    import_paths = _collect_import_refs(config)
+    config_obj: object = ctx.resolved.pipeline_config if ctx.resolved is not None else ctx.raw
+
+    import_paths = _collect_import_refs(config_obj)
     if not import_paths:
         return CheckResult(
             name="Config import refs",
@@ -209,10 +309,9 @@ def check_config_import_refs(config_path: str) -> CheckResult:
 
     failed: list[str] = []
     for path in import_paths:
-        module_path = path.split(":")[0]
         try:
-            importlib.import_module(module_path)
-        except ImportError as exc:
+            config_component_factory.resolve_value({"import": path})
+        except Exception as exc:
             failed.append(f"{path}: {exc}")
 
     if failed:
@@ -229,23 +328,235 @@ def check_config_import_refs(config_path: str) -> CheckResult:
     )
 
 
-def check_env_vars(config_path: str) -> CheckResult:
-    """Check that env vars referenced in the config are present."""
+def check_config_pipeline_build(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Build the selected agora/v1 pipeline without executing it."""
     try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return CheckResult(
-                name="Environment variables",
-                status=Status.WARN,
-                message="Cannot parse config: tomllib/tomli not available",
-            )
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="Pipeline build",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Pipeline build",
+            status=Status.FAIL,
+            message=f"Cannot read config file: {config_path}",
+            detail=str(exc),
+        )
+
+    if ctx.resolved is None:
+        return CheckResult(
+            name="Pipeline build",
+            status=Status.PASS,
+            message="Skipping pipeline build for generic TOML config",
+        )
 
     try:
-        with open(config_path, "rb") as f:
-            config = tomllib.load(f)
+        from agora.core.container import AgoraContainer
+
+        container = AgoraContainer.from_config(ctx.resolved.pipeline_config)
+        container.build_pipeline()
+    except Exception as exc:
+        return CheckResult(
+            name="Pipeline build",
+            status=Status.FAIL,
+            message="Selected pipeline could not be constructed",
+            detail=str(exc),
+        )
+
+    pipeline_cfg = ctx.resolved.pipeline_config
+    sinks = pipeline_cfg.get("sinks", [])
+    middlewares = pipeline_cfg.get("middlewares", [])
+    return CheckResult(
+        name="Pipeline build",
+        status=Status.PASS,
+        message="Selected pipeline built successfully",
+        detail=(
+            f"source={pipeline_cfg.get('source', {}).get('type', 'unknown')}\n"
+            f"middlewares={len(middlewares)}\n"
+            f"sinks={len(sinks)}"
+        ),
+    )
+
+
+def check_recovery_posture(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Summarize restart and replay posture for the selected agora/v1 pipeline."""
+    try:
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="Recovery posture",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Recovery posture",
+            status=Status.FAIL,
+            message=f"Cannot read config file: {config_path}",
+            detail=str(exc),
+        )
+
+    if ctx.resolved is None:
+        return CheckResult(
+            name="Recovery posture",
+            status=Status.PASS,
+            message="Skipping recovery posture for generic TOML config",
+        )
+
+    pipeline_cfg = ctx.resolved.pipeline_config
+    source_cfg = pipeline_cfg.get("source", {})
+    source_type = source_cfg.get("type") if isinstance(source_cfg, dict) else None
+    insight = recovery_insight_for_source(str(source_type) if source_type is not None else None)
+    dlq_sink_type = _configured_dlq_sink_type(pipeline_cfg)
+
+    if insight is None:
+        return CheckResult(
+            name="Recovery posture",
+            status=Status.WARN,
+            message="Source recovery semantics are unknown",
+            detail="Inspect the source implementation or plugin docs.",
+        )
+
+    detail_lines = [
+        f"resume_key={insight.resume_key}",
+        f"granularity={insight.granularity}",
+        f"resume_cost={insight.resume_cost_model}",
+        f"resume_behavior={insight.resume_behavior}",
+    ]
+    if dlq_sink_type is None:
+        detail_lines.append("dlq=disabled")
+        detail_lines.append("failed records will not be replayable with `agora dlq replay`")
+    else:
+        detail_lines.append(f"dlq={dlq_sink_type}")
+
+    if insight.warning is not None:
+        detail_lines.append(insight.warning.message)
+
+    if insight.support == "yes":
+        return CheckResult(
+            name="Recovery posture",
+            status=Status.PASS,
+            message=f"Source '{source_type}' supports resume",
+            detail="\n".join(detail_lines),
+        )
+    return CheckResult(
+        name="Recovery posture",
+        status=Status.WARN,
+        message=f"Source '{source_type}' has limited recovery support ({insight.support})",
+        detail="\n".join(detail_lines),
+    )
+
+
+def check_dlq_replay_support(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Check whether the selected pipeline's DLQ can be replayed from the CLI."""
+    try:
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="DLQ replay",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="DLQ replay",
+            status=Status.FAIL,
+            message=f"Cannot read config file: {config_path}",
+            detail=str(exc),
+        )
+
+    if ctx.resolved is None:
+        return CheckResult(
+            name="DLQ replay",
+            status=Status.PASS,
+            message="Skipping DLQ replay check for generic TOML config",
+        )
+
+    dlq_sink_type = _configured_dlq_sink_type(ctx.resolved.pipeline_config)
+    if dlq_sink_type is None:
+        return CheckResult(
+            name="DLQ replay",
+            status=Status.WARN,
+            message="DLQ is disabled for the selected pipeline",
+            detail="`agora dlq replay` will have no configured backend for this pipeline.",
+        )
+
+    if dlq_sink_type not in _SUPPORTED_DLQ_REPLAY_SINK_TYPES:
+        supported = ", ".join(sorted(_SUPPORTED_DLQ_REPLAY_SINK_TYPES))
+        return CheckResult(
+            name="DLQ replay",
+            status=Status.FAIL,
+            message=f"DLQ sink '{dlq_sink_type}' does not support `agora dlq replay`",
+            detail=f"Supported replayable DLQ sinks: {supported}",
+        )
+
+    return CheckResult(
+        name="DLQ replay",
+        status=Status.PASS,
+        message=f"DLQ sink '{dlq_sink_type}' supports `agora dlq replay`",
+    )
+
+
+def check_env_vars(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Check that env vars referenced in the selected config are present."""
+    try:
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError:
+        return CheckResult(
+            name="Environment variables",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+        )
     except Exception as exc:
         return CheckResult(
             name="Environment variables",
@@ -254,7 +565,9 @@ def check_env_vars(config_path: str) -> CheckResult:
             detail=str(exc),
         )
 
-    env_refs = _collect_env_refs(config)
+    config_obj: object = ctx.resolved.pipeline_config if ctx.resolved is not None else ctx.raw
+
+    env_refs = _collect_env_refs(config_obj)
     if not env_refs:
         return CheckResult(
             name="Environment variables",
@@ -329,6 +642,60 @@ def _collect_env_refs(obj: object, _seen: set[int] | None = None) -> list[str]:
     return results
 
 
+class _ConfigParseDependencyMissingError(RuntimeError):
+    """Raised when tomllib/tomli is unavailable for config parsing."""
+
+
+def _load_toml_file(config_path: str) -> dict[str, Any]:
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError as exc:
+            raise _ConfigParseDependencyMissingError("Install tomli: pip install tomli") from exc
+
+    with open(config_path, "rb") as f:
+        raw = tomllib.load(f)
+    if not isinstance(raw, dict):
+        raise TypeError(f"Expected top-level TOML table in {config_path!r}")
+    return raw
+
+
+def _load_doctor_config_context(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> DoctorConfigContext:
+    raw = _load_toml_file(config_path)
+    if raw.get("format") != "agora/v1":
+        return DoctorConfigContext(config_path=config_path, raw=raw, resolved=None)
+
+    validate_config_document(raw)
+    resolved = resolve_config_document(
+        raw,
+        pipeline_name=pipeline_name,
+        profile_name=profile_name,
+        environment_name=environment_name or os.getenv("AGORA_ENV"),
+    )
+    return DoctorConfigContext(config_path=config_path, raw=raw, resolved=resolved)
+
+
+def _configured_dlq_sink_type(pipeline_config: dict[str, Any]) -> str | None:
+    dlq_cfg = pipeline_config.get("dlq")
+    if not isinstance(dlq_cfg, dict) or not dlq_cfg.get("enabled", True):
+        return None
+
+    sink_cfg = dlq_cfg.get("sink")
+    if isinstance(sink_cfg, dict):
+        sink_type = sink_cfg.get("type")
+        if isinstance(sink_type, str) and sink_type.strip():
+            return sink_type.strip()
+    return "sqlite_dlq"
+
+
 # ======================================================================
 # Rendering
 # ======================================================================
@@ -372,13 +739,30 @@ class DoctorCommand(BaseCommand):
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
+            "pipeline",
+            nargs="?",
+            default=None,
+            help="Optional named pipeline to select from an agora/v1 config file.",
+        )
+        parser.add_argument(
             "--config",
             default=None,
             metavar="FILE",
             help="Optional TOML config file to check import refs and env vars against.",
         )
+        parser.add_argument(
+            "--profile",
+            default=None,
+            help="Select a config profile overlay from [profiles.<name>].",
+        )
+        parser.add_argument(
+            "--environment",
+            default=None,
+            help="Select a config environment overlay from [environments.<name>].",
+        )
 
     def execute(self, args: argparse.Namespace, ctx: AgoraContext) -> int:
+        ensure_project_on_path(ctx)
         report = DoctorReport()
 
         report.add(check_python_version())
@@ -387,8 +771,54 @@ class DoctorCommand(BaseCommand):
         report.add(check_entrypoint_plugins())
 
         if args.config:
-            report.add(check_config_import_refs(args.config))
-            report.add(check_env_vars(args.config))
+            report.add(
+                check_config_pipeline_resolution(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
+            report.add(
+                check_config_import_refs(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
+            report.add(
+                check_config_pipeline_build(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
+            report.add(
+                check_recovery_posture(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
+            report.add(
+                check_dlq_replay_support(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
+            report.add(
+                check_env_vars(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
 
         _render_report(report)
         return 1 if report.failed else 0
@@ -397,12 +827,17 @@ class DoctorCommand(BaseCommand):
 __all__ = [
     "CheckResult",
     "DoctorCommand",
+    "DoctorConfigContext",
     "DoctorReport",
     "Status",
     "check_agora_importable",
     "check_config_import_refs",
+    "check_config_pipeline_build",
+    "check_config_pipeline_resolution",
+    "check_dlq_replay_support",
     "check_entrypoint_plugins",
     "check_env_vars",
     "check_plugins_importable",
     "check_python_version",
+    "check_recovery_posture",
 ]

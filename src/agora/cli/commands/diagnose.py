@@ -22,10 +22,12 @@ Options
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 from agora.cli.commands.base import BaseCommand, CommandError
 from agora.cli.console import console
+from agora.cli.recovery import recovery_insight_for_source, recovery_insight_to_dict
 
 if TYPE_CHECKING:
     import argparse
@@ -75,6 +77,12 @@ class DiagnoseCommand(BaseCommand):
             metavar="PATH",
             help="Path to SQLite DLQ file (default: .agora_dlq.db).",
         )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            default=False,
+            help="Emit machine-readable JSON output.",
+        )
 
     def execute(self, args: argparse.Namespace, ctx: AgoraContext) -> int:
         return asyncio.run(_run_diagnose(args))
@@ -108,6 +116,7 @@ async def _run_diagnose(args: argparse.Namespace) -> int:
         checkpoint_error=checkpoint_error,
         dlq_records=dlq_records,
         dlq_error=dlq_error,
+        as_json=args.json,
     )
 
 
@@ -138,7 +147,52 @@ def _render_diagnosis(
     checkpoint_error: str | None,
     dlq_records: list[Any],
     dlq_error: str | None,
+    as_json: bool,
 ) -> int:
+    latest_dlq_record = max(dlq_records, key=lambda r: r.created_at) if dlq_records else None
+    source_name = checkpoint.source if checkpoint is not None else None
+    if source_name is None and latest_dlq_record is not None:
+        source_name = latest_dlq_record.source
+    checkpoint_value = checkpoint.value if checkpoint is not None else None
+    insight = recovery_insight_for_source(source_name, checkpoint_value=checkpoint_value)
+    replayable = [r for r in dlq_records if r.max_attempts is None or r.attempt < r.max_attempts]
+    has_issues = (
+        bool(dlq_records)
+        or checkpoint is None
+        or checkpoint_error is not None
+        or dlq_error is not None
+    )
+
+    if as_json:
+        console.out(
+            json.dumps(
+                {
+                    "pipeline_id": pipeline_id,
+                    "status": "attention_needed" if has_issues else "ok",
+                    "checkpoint": _checkpoint_payload(checkpoint, checkpoint_error),
+                    "recovery": recovery_insight_to_dict(insight),
+                    "dlq": _dlq_payload(
+                        pipeline_id,
+                        dlq_records,
+                        replayable,
+                        latest_dlq_record,
+                        dlq_error,
+                    ),
+                    "summary": {
+                        "has_failure_indicators": has_issues,
+                        "replay_command": (
+                            f"agora dlq replay {pipeline_id} --config <config.toml>"
+                            if replayable
+                            else None
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        return 1 if has_issues else 0
+
     console.section(f"Diagnosis — {pipeline_id}")
 
     # ---- Pipeline identity ----
@@ -152,8 +206,6 @@ def _render_diagnosis(
             "Checkpoint", "[dim]none — pipeline has never run or checkpoint was reset[/dim]"
         )
     else:
-        import json
-
         value_str = (
             json.dumps(checkpoint.value, default=str)
             if isinstance(checkpoint.value, dict)
@@ -166,6 +218,17 @@ def _render_diagnosis(
         console.item("Source", checkpoint.source)
         console.item("Checkpoint", value_str)
 
+    if insight is not None:
+        console.blank()
+        console.item("Recovery support", insight.support)
+        console.item("Resume key", insight.resume_key)
+        console.item("Granularity", insight.granularity)
+        console.item("Resume cost", insight.resume_cost_model)
+        console.item("Resume behavior", insight.resume_behavior)
+        if insight.warning is not None:
+            console.blank()
+            console.warn(insight.warning.message)
+
     # ---- DLQ section ----
     console.blank()
     if dlq_error:
@@ -173,14 +236,12 @@ def _render_diagnosis(
     elif not dlq_records:
         console.item("DLQ", "[dim]no replayable records[/dim]")
     else:
-        replayable = [
-            r for r in dlq_records if r.max_attempts is None or r.attempt < r.max_attempts
-        ]
         console.item("DLQ records", str(len(dlq_records)))
         console.item("Replayable", str(len(replayable)))
 
         # Surface the most recent failure detail
-        latest = max(dlq_records, key=lambda r: r.created_at)
+        latest = latest_dlq_record
+        assert latest is not None
         console.blank()
         console.item("Last failure stage", latest.stage)
         console.item("Error type", latest.error_type)
@@ -188,8 +249,6 @@ def _render_diagnosis(
         if latest.middleware:
             console.item("Middleware", latest.middleware)
         if latest.checkpoint is not None:
-            import json
-
             cp_str = (
                 json.dumps(latest.checkpoint, default=str)
                 if isinstance(latest.checkpoint, dict)
@@ -205,13 +264,83 @@ def _render_diagnosis(
 
     # ---- Summary status ----
     console.blank()
-    has_issues = bool(dlq_records) or checkpoint is None
     if has_issues:
         console.warn("Pipeline shows signs of failure. Review the details above.")
         return 1
 
     console.info("No failure indicators found for this pipeline.")
     return 0
+
+
+def _checkpoint_payload(checkpoint: Any, checkpoint_error: str | None) -> dict[str, Any]:
+    if checkpoint_error is not None:
+        return {
+            "status": "error",
+            "error": checkpoint_error,
+        }
+    if checkpoint is None:
+        return {
+            "status": "missing",
+            "message": "Pipeline has never run or checkpoint was reset.",
+        }
+
+    value = checkpoint.value
+    if value is None:
+        value_kind = "none"
+    elif isinstance(value, dict):
+        value_kind = "structured_cursor"
+    else:
+        value_kind = type(value).__name__
+    return {
+        "status": "present",
+        "pipeline_id": checkpoint.pipeline_id,
+        "run_id": checkpoint.run_id,
+        "source": checkpoint.source,
+        "recorded_at": checkpoint.recorded_at.isoformat(),
+        "value": value,
+        "value_kind": value_kind,
+    }
+
+
+def _dlq_payload(
+    pipeline_id: str,
+    records: list[Any],
+    replayable: list[Any],
+    latest_record: Any,
+    dlq_error: str | None,
+) -> dict[str, Any]:
+    if dlq_error is not None:
+        return {
+            "status": "error",
+            "error": dlq_error,
+        }
+    if not records:
+        return {
+            "status": "empty",
+            "record_count": 0,
+            "replayable_count": 0,
+        }
+
+    assert latest_record is not None
+    return {
+        "status": "records_present",
+        "record_count": len(records),
+        "replayable_count": len(replayable),
+        "latest_failure": {
+            "pipeline_id": pipeline_id,
+            "run_id": latest_record.run_id,
+            "stage": latest_record.stage,
+            "source": latest_record.source,
+            "error_type": latest_record.error_type,
+            "error_message": latest_record.error_message,
+            "middleware": latest_record.middleware,
+            "checkpoint": latest_record.checkpoint,
+            "recorded_at": latest_record.created_at.isoformat(),
+        },
+        "replay_command": (
+            f"agora dlq replay {pipeline_id} --config <config.toml>" if replayable else None
+        ),
+    }
 
 
 __all__ = ["DiagnoseCommand"]

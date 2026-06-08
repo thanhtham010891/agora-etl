@@ -26,6 +26,12 @@ from typing import Any
 
 import pytest
 
+from tests.health._harness import body as _body
+from tests.health._harness import send_request as _send_request
+from tests.health._harness import status_line as _status_line
+
+pytestmark = pytest.mark.preservation
+
 # ======================================================================
 # [SEC-1] Health Endpoints — Preservation (no auth_token configured)
 # ======================================================================
@@ -41,46 +47,20 @@ async def test_sec1_health_endpoint_returns_200_when_no_auth_configured() -> Non
 
     Validates: Requirements 3.1
     """
-    from agora.health.server import HealthServer
-
-    # No auth_token — backward-compatible default
-    server = HealthServer(port=0)
-    server._stop_event = asyncio.Event()
-    server._server = await asyncio.start_server(
-        server._handle_connection,
-        host="127.0.0.1",
-        port=0,
+    response = await _send_request(
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
     )
-    port = server._server.sockets[0].getsockname()[1]
+    status_line = _status_line(response)
 
-    try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-        response = await asyncio.wait_for(reader.read(4096), timeout=2.0)
-        writer.close()
-        await writer.wait_closed()
+    # Must return 200 when no auth is configured
+    assert "200" in status_line, (
+        f"[SEC-1] PRESERVATION FAILED: GET /health with no auth_token should return 200, "
+        f"got: {status_line!r}"
+    )
 
-        response_str = response.decode("ascii", errors="replace")
-        status_line = response_str.split("\r\n")[0]
-
-        # Must return 200 when no auth is configured
-        assert "200" in status_line, (
-            f"[SEC-1] PRESERVATION FAILED: GET /health with no auth_token should return 200, "
-            f"got: {status_line!r}"
-        )
-
-        # Body must be valid JSON with health payload
-        body_start = response_str.find("\r\n\r\n")
-        assert body_start != -1, "Response has no body separator"
-        body = response_str[body_start + 4 :]
-        payload = json.loads(body)
-
-        assert "status" in payload, f"Health payload missing 'status' key: {payload}"
-        assert "pipelines" in payload, f"Health payload missing 'pipelines' key: {payload}"
-    finally:
-        server.stop()
-        await asyncio.sleep(0.05)
+    payload = json.loads(_body(response))
+    assert "status" in payload, f"Health payload missing 'status' key: {payload}"
+    assert "pipelines" in payload, f"Health payload missing 'pipelines' key: {payload}"
 
 
 @pytest.mark.asyncio
@@ -92,45 +72,22 @@ async def test_sec1_ready_endpoint_returns_200_when_healthy() -> None:
 
     Validates: Requirements 3.3
     """
-    from agora.health.server import HealthServer
-
-    server = HealthServer(port=0)
-    server._stop_event = asyncio.Event()
-    server._server = await asyncio.start_server(
-        server._handle_connection,
-        host="127.0.0.1",
-        port=0,
+    response = await _send_request(
+        b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n",
     )
-    port = server._server.sockets[0].getsockname()[1]
+    status_line = _status_line(response)
 
-    try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-        response = await asyncio.wait_for(reader.read(4096), timeout=2.0)
-        writer.close()
-        await writer.wait_closed()
+    # With no pipelines registered, status is "idle" → ready=True → 200
+    assert "200" in status_line, (
+        f"[SEC-1] PRESERVATION FAILED: GET /ready with healthy worker should return 200, "
+        f"got: {status_line!r}"
+    )
 
-        response_str = response.decode("ascii", errors="replace")
-        status_line = response_str.split("\r\n")[0]
-
-        # With no pipelines registered, status is "idle" → ready=True → 200
-        assert "200" in status_line, (
-            f"[SEC-1] PRESERVATION FAILED: GET /ready with healthy worker should return 200, "
-            f"got: {status_line!r}"
-        )
-
-        body_start = response_str.find("\r\n\r\n")
-        body = response_str[body_start + 4 :]
-        payload = json.loads(body)
-
-        assert "ready" in payload, f"Ready payload missing 'ready' key: {payload}"
-        assert payload["ready"] is True, (
-            f"[SEC-1] PRESERVATION FAILED: Expected ready=True for healthy worker, got: {payload}"
-        )
-    finally:
-        server.stop()
-        await asyncio.sleep(0.05)
+    payload = json.loads(_body(response))
+    assert "ready" in payload, f"Ready payload missing 'ready' key: {payload}"
+    assert payload["ready"] is True, (
+        f"[SEC-1] PRESERVATION FAILED: Expected ready=True for healthy worker, got: {payload}"
+    )
 
 
 @pytest.mark.asyncio
@@ -142,7 +99,6 @@ async def test_sec1_ready_endpoint_returns_503_when_failing() -> None:
 
     Validates: Requirements 3.4
     """
-    from agora.health.server import HealthServer
     from agora.metrics.collector import MetricsCollector
 
     collector = MetricsCollector()
@@ -152,42 +108,21 @@ async def test_sec1_ready_endpoint_returns_503_when_failing() -> None:
     for _ in range(4):
         await collector.record_run("test_pipe", error=RuntimeError("boom"))
 
-    server = HealthServer(port=0, collector=collector)
-    server._stop_event = asyncio.Event()
-    server._server = await asyncio.start_server(
-        server._handle_connection,
-        host="127.0.0.1",
-        port=0,
+    response = await _send_request(
+        b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        collector=collector,
     )
-    port = server._server.sockets[0].getsockname()[1]
+    status_line = _status_line(response)
 
-    try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-        response = await asyncio.wait_for(reader.read(4096), timeout=2.0)
-        writer.close()
-        await writer.wait_closed()
+    assert "503" in status_line, (
+        f"[SEC-1] PRESERVATION FAILED: GET /ready with failing pipeline should return 503, "
+        f"got: {status_line!r}"
+    )
 
-        response_str = response.decode("ascii", errors="replace")
-        status_line = response_str.split("\r\n")[0]
-
-        assert "503" in status_line, (
-            f"[SEC-1] PRESERVATION FAILED: GET /ready with failing pipeline should return 503, "
-            f"got: {status_line!r}"
-        )
-
-        body_start = response_str.find("\r\n\r\n")
-        body = response_str[body_start + 4 :]
-        payload = json.loads(body)
-
-        assert payload["ready"] is False, (
-            f"[SEC-1] PRESERVATION FAILED: Expected ready=False for failing pipeline, "
-            f"got: {payload}"
-        )
-    finally:
-        server.stop()
-        await asyncio.sleep(0.05)
+    payload = json.loads(_body(response))
+    assert payload["ready"] is False, (
+        f"[SEC-1] PRESERVATION FAILED: Expected ready=False for failing pipeline, got: {payload}"
+    )
 
 
 # ======================================================================

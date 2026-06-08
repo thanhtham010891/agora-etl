@@ -228,3 +228,41 @@ async def test_summary_counts():
 ```
 
 `records_consumed` is what the source emitted. `records_written` is what reached the sink. The difference is what middleware dropped or errored. If these numbers don't add up, something in your middleware chain is silently swallowing records.
+
+## Public contract and preservation suites
+
+The package ships a small set of preservation suites that back the public docs
+contracts:
+
+- [Runtime Guarantees](runtime-guarantees.md)
+- [Recovery Support Matrix](recovery-matrix.md)
+- [Plugin Contract](../plugins/contract.md)
+
+Run the documented public contracts with:
+
+```bash
+make contracts
+```
+
+That target expands to the narrower suites when you need to isolate a failure:
+
+```bash
+make contracts-runtime
+make contracts-plugin
+```
+
+Run the broader baseline compatibility suite with:
+
+```bash
+make contracts-baseline
+```
+
+Run every preservation suite, including the baseline compatibility checks, with:
+
+```bash
+make preservation
+```
+
+For release-quality validation, `make ci` runs lint, type checks, the public
+contract suites, the baseline preservation suite, strict docs, and the
+remaining non-integration tests.

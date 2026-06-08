@@ -41,12 +41,14 @@ def _make_args(
     *,
     store: str = "memory",
     yes: bool = False,
+    json_output: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         subcommand=subcommand,
         pipeline_id=pipeline_id,
         store=store,
         yes=yes,
+        json=json_output,
     )
 
 
@@ -278,6 +280,7 @@ def test_command_setup_parser() -> None:
     assert args.subcommand == "show"
     assert args.pipeline_id == "my_pipe"
     assert args.yes is False
+    assert args.json is False
 
 
 def test_command_reset_parser_accepts_yes() -> None:
@@ -290,3 +293,15 @@ def test_command_reset_parser_accepts_yes() -> None:
     cmd.setup_parser(sub)
     args = sub.parse_args(["reset", "my_pipe", "--yes"])
     assert args.yes is True
+
+
+def test_command_parser_accepts_json() -> None:
+    import argparse
+
+    cmd = CheckpointCommand()
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    sub = subparsers.add_parser("checkpoint")
+    cmd.setup_parser(sub)
+    args = sub.parse_args(["inspect", "my_pipe", "--json"])
+    assert args.json is True

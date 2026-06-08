@@ -186,6 +186,44 @@ async def test_sqlite_checkpoint_store_persists_resume_state(tmp_path: Path) -> 
     assert summary.last_checkpoint.value == {"index": 2}
 
 
+@pytest.mark.asyncio
+async def test_inmemory_checkpoint_store_delete_removes_checkpoint() -> None:
+    from agora.core.checkpoint import Checkpoint
+
+    store = InMemoryCheckpointStore()
+    checkpoint = Checkpoint(
+        pipeline_id="pipe_delete",
+        run_id="run-delete",
+        source="test_source",
+        value={"index": 3},
+    )
+    await store.save("pipe_delete", checkpoint)
+
+    assert await store.delete("pipe_delete") is True
+    assert await store.load("pipe_delete") is None
+    assert await store.delete("pipe_delete") is False
+
+
+@pytest.mark.asyncio
+async def test_sqlite_checkpoint_store_delete_removes_checkpoint(tmp_path: Path) -> None:
+    from agora.core.checkpoint import Checkpoint
+
+    store = SQLiteCheckpointStore(path=tmp_path / "checkpoint-delete.db")
+    checkpoint = Checkpoint(
+        pipeline_id="pipe_delete",
+        run_id="run-delete",
+        source="test_source",
+        value={"index": 3},
+    )
+    try:
+        await store.save("pipe_delete", checkpoint)
+        assert await store.delete("pipe_delete") is True
+        assert await store.load("pipe_delete") is None
+        assert await store.delete("pipe_delete") is False
+    finally:
+        await store.close()
+
+
 class _FailingCheckpointStore:
     async def load(self, key: str):
         return None

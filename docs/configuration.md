@@ -194,6 +194,8 @@ Recommended operator posture:
 - keep imported callables in stable modules instead of ad-hoc scratch files
 - do not let end users upload or edit `agora/v1` configs directly
 - use `--plan` in CI to surface imports before promotion
+- use `agora doctor --config pipelines.toml [pipeline]` to preflight import
+  refs, component construction, and DLQ replay readiness before deployment
 
 ## DLQ and tracing sections
 

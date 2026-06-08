@@ -20,7 +20,9 @@ from agora import (
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.errors import PipelineError
 from agora.core.middleware import Middleware
-from agora.core.runtime import _buffered, _source_adapter
+from agora.core.runtime import _buffered, _lanes, _source_adapter
+from agora.core.runtime._delivery import SourceRecord
+from agora.core.runtime._plan import BufferedStageSpec
 from agora.core.sink import BaseSink
 from agora.core.source import BaseSource
 from agora.sinks.file.csv import CsvSink
@@ -67,6 +69,25 @@ def test_pipeline_filter_shorthand():
     assert isinstance(p._middlewares[0], FilterMiddleware)
 
 
+def test_bound_pipeline_with_sink_preserves_concurrency_and_live_metrics_callback() -> None:
+    async def _callback(ctx) -> None:
+        del ctx
+
+    bound = Pipeline(IterableSource([1])).build(
+        StdoutSink(),
+        config=DeliveryConfig(sink_concurrency=3),
+    )
+    bound.set_live_metrics_callback(_callback)
+
+    replaced = bound.with_sink(StdoutSink())
+
+    assert replaced is not bound
+    assert replaced._config.sink_concurrency == 3
+    assert replaced._live_metrics_callback is _callback
+    assert replaced._writer._concurrent_writes is True
+    assert replaced._writer._max_concurrency == 3
+
+
 def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
     pipeline = (
         Pipeline(make_source(5))
@@ -79,12 +100,18 @@ def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
     assert explain.pipeline_id == "iterable"
     assert explain.source_limit == 2
     assert explain.planned_lane == "linear"
+    assert "no buffered stage requires submit() concurrency" in explain.lane_reason
     assert explain.source_data_plane == DataPlane.PYTHON_ROWS
     assert explain.writer_input_data_plane == DataPlane.PYTHON_ROWS
+    assert (
+        explain.writer_input_data_plane_reason == "writer receives middleware output as python_rows"
+    )
     assert explain.middleware_matrix[0].name == "double"
     assert explain.middleware_matrix[0].data_plane == DataPlane.PYTHON_ROWS
     assert explain.sinks[0].sink_name == "stdout"
+    assert explain.sinks[0].selection_reason == "sink accepts python_rows natively"
     assert explain.sink_downgrade_count == 0
+    assert explain.to_dict()["lane_reason"] == explain.lane_reason
     assert explain.to_dict()["source_limit"] == 2
     assert "PipelineExplain(" in str(explain)
 
@@ -134,11 +161,14 @@ def test_pipeline_explain_reports_arrow_fanout_sink_downgrades() -> None:
     assert explain.writer_input_data_plane == DataPlane.ARROW_BATCHES
     assert explain.arrow_chain_eligible is True
     assert explain.arrow_fast_path_eligible is True
+    assert "keeps arrow_batches" in explain.writer_input_data_plane_reason
     assert explain.sink_downgrade_count == 1
     assert [sink.selected_data_plane for sink in explain.sinks] == [
         DataPlane.ARROW_BATCHES,
         DataPlane.PYTHON_ROWS,
     ]
+    assert explain.sinks[0].selection_reason == "sink accepts arrow_batches natively"
+    assert "writer downgrades to python_rows" in explain.sinks[1].selection_reason
     assert "(downgraded)" in str(explain)
 
 
@@ -176,6 +206,45 @@ def test_pipeline_explain_file_fanout_keeps_arrow_boundary(tmp_path) -> None:
         DataPlane.ARROW_BATCHES,
         DataPlane.ARROW_BATCHES,
     ]
+
+
+def test_pipeline_explain_reports_arrow_materialization_reason_for_row_chain() -> None:
+    class _ArrowBatchSource(BaseSource[int]):
+        source_name = "arrow_batch_source"
+
+        async def stream(self):
+            yield 1
+
+        async def stream_batches(self):  # type: ignore[override]
+            yield []
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.ARROW_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=True,
+            )
+
+    class _RowMW(Middleware[int, int]):
+        name = "row_stage"
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    explain = Pipeline(_ArrowBatchSource()).pipe(_RowMW()).build(StdoutSink()).explain()
+
+    assert explain.middleware_materializes_arrow_to_rows is True
+    assert explain.middleware_materialization_reason is not None
+    assert (
+        "materialize once before middleware execution" in explain.middleware_materialization_reason
+    )
+    assert explain.writer_input_data_plane == DataPlane.PYTHON_BATCHES
+    assert (
+        "writer receives middleware output as python_batches"
+        in explain.writer_input_data_plane_reason
+    )
 
 
 def test_pipeline_explain_fail_fast_on_invalid_mixed_chain() -> None:
@@ -514,6 +583,43 @@ class BlockingBufferedMiddleware(Middleware[int, int]):
         self.stopped = True
 
 
+class PartiallyBlockingBufferedMiddleware(Middleware[int, int]):
+    name = "partially_blocking_buffered"
+
+    def __init__(self) -> None:
+        self.min_concurrency = 2
+        self._started = 0
+        self.all_started = asyncio.Event()
+        self.first_resolved = asyncio.Event()
+        self.cancelled: list[int] = []
+
+    async def process(self, record: int, ctx) -> int | None:
+        del ctx
+        return record
+
+    async def submit(self, record: int, ctx) -> asyncio.Task[int]:
+        del ctx
+        self._started += 1
+        if self._started >= 2:
+            self.all_started.set()
+
+        async def _resolve() -> int:
+            if record == 1:
+                await asyncio.sleep(0)
+                self.first_resolved.set()
+                return record
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                self.cancelled.append(record)
+                raise
+
+        return asyncio.create_task(_resolve())
+
+    async def drain_pending(self, ctx) -> None:
+        del ctx
+
+
 class PrefetchSafeSource(BaseSource[int]):
     source_name = "prefetch_safe"
     supports_prefetch = True
@@ -622,6 +728,51 @@ async def test_safe_prefetch_keeps_runner_bounded_while_preserving_order():
     assert summary.runtime.source_prefetch_limit == 2
     assert summary.runtime.source_prefetch_max_depth <= 2
     assert summary.runtime.source_prefetch_block_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_python_prefetch_adapter_aclose_does_not_hang_when_queue_is_full() -> None:
+    from types import SimpleNamespace
+
+    class _InfinitePrefetchSource(BaseSource[int]):
+        source_name = "infinite_prefetch"
+        supports_prefetch = True
+        prefetch_limit = 2
+
+        async def stream(self):
+            value = 0
+            while True:
+                yield value
+                value += 1
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    adapter = _source_adapter.SourceRuntimeAdapter(
+        source=_InfinitePrefetchSource(),
+        has_buffered_stages=False,
+    )
+    stream = adapter.iter_source_records(ctx)
+
+    first = await anext(stream)
+    assert first.raw == 0
+
+    await asyncio.wait_for(stream.aclose(), timeout=1.0)
 
 
 @pytest.mark.asyncio
@@ -792,6 +943,335 @@ async def test_buffered_rust_prefetch_uses_blocking_wait_and_batch_drain(
 
 
 @pytest.mark.asyncio
+async def test_python_prefetch_does_not_call_current_checkpoint_without_opt_in() -> None:
+    from types import SimpleNamespace
+
+    class _NoCheckpointPrefetchSource(BaseSource[int]):
+        source_name = "no_checkpoint_prefetch"
+        supports_prefetch = True
+        prefetch_limit = 2
+
+        def __init__(self) -> None:
+            self.checkpoint_calls = 0
+
+        def current_checkpoint(self):
+            self.checkpoint_calls += 1
+            return {"unexpected": self.checkpoint_calls}
+
+        async def stream(self):
+            for value in range(4):
+                yield value
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    source = _NoCheckpointPrefetchSource()
+    adapter = _source_adapter.SourceRuntimeAdapter(source=source, has_buffered_stages=False)
+    records = [record async for record in adapter.iter_source_records(ctx)]
+
+    assert [record.raw for record in records] == [0, 1, 2, 3]
+    assert all(record.checkpoint is None for record in records)
+    assert source.checkpoint_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rust_prefetch_does_not_call_current_checkpoint_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    class _FakeRecordBuffer:
+        def __init__(self, capacity: int) -> None:
+            self.capacity = capacity
+            self._items: list[object] = []
+            self._closed = False
+            self._cond = threading.Condition()
+
+        def push(self, item: object) -> bool:
+            with self._cond:
+                if self._closed or len(self._items) >= self.capacity:
+                    return False
+                self._items.append(item)
+                self._cond.notify_all()
+                return True
+
+        def push_batch(self, items: list[object]) -> int:
+            pushed = 0
+            for item in items:
+                if not self.push(item):
+                    return pushed
+                pushed += 1
+            return pushed
+
+        def wait_for_item(self, timeout_ms: int) -> bool:
+            with self._cond:
+                if not self._items and not self._closed:
+                    self._cond.wait(timeout=timeout_ms / 1000)
+                return bool(self._items)
+
+        def pop_batch(self, max_items: int) -> list[object]:
+            with self._cond:
+                n = min(max_items, len(self._items))
+                if n == 0:
+                    return []
+                batch = list(self._items[:n])
+                del self._items[:n]
+                return batch
+
+        def close(self) -> None:
+            with self._cond:
+                self._closed = True
+                self._cond.notify_all()
+
+        def is_done(self) -> bool:
+            with self._cond:
+                return self._closed and not self._items
+
+    class _NoCheckpointRustSource(BaseSource[int]):
+        source_name = "no_checkpoint_rust_prefetch"
+        supports_rust_prefetch = True
+        prefetch_limit = 2
+
+        def __init__(self) -> None:
+            self.checkpoint_calls = 0
+
+        def current_checkpoint(self):
+            self.checkpoint_calls += 1
+            return {"unexpected": self.checkpoint_calls}
+
+        async def stream(self):
+            for value in range(4):
+                yield value
+
+        def stream_sync_batches(self):
+            yield from range(4)
+
+    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
+    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    source = _NoCheckpointRustSource()
+    adapter = _source_adapter.SourceRuntimeAdapter(source=source, has_buffered_stages=True)
+    records = [record async for record in adapter.iter_source_records(ctx)]
+
+    assert [record.raw for record in records] == [0, 1, 2, 3]
+    assert all(record.checkpoint is None for record in records)
+    assert source.checkpoint_calls == 0
+    assert ctx.metrics.runtime.rust_prefetch_active is True
+
+
+@pytest.mark.asyncio
+async def test_python_prefetch_preserves_delivery_success_callbacks() -> None:
+    from types import SimpleNamespace
+
+    acknowledged: list[int] = []
+
+    class _PrefetchHookSource(BaseSource[int]):
+        source_name = "prefetch_hook"
+        supports_prefetch = True
+        prefetch_limit = 2
+
+        def __init__(self) -> None:
+            self._current: int | None = None
+
+        def delivery_success_callback(self):
+            current = self._current
+            if current is None:
+                return None
+
+            async def _ack() -> None:
+                acknowledged.append(current)
+
+            return _ack
+
+        async def stream(self):
+            for value in range(4):
+                self._current = value
+                yield value
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    adapter = _source_adapter.SourceRuntimeAdapter(
+        source=_PrefetchHookSource(),
+        has_buffered_stages=False,
+    )
+    records = [record async for record in adapter.iter_source_records(ctx)]
+
+    for record in records:
+        assert record.on_success is not None
+        await record.on_success()
+
+    assert acknowledged == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_rust_prefetch_preserves_delivery_success_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    acknowledged: list[int] = []
+
+    class _FakeRecordBuffer:
+        def __init__(self, capacity: int) -> None:
+            self.capacity = capacity
+            self._items: list[object] = []
+            self._closed = False
+            self._cond = threading.Condition()
+
+        def push(self, item: object) -> bool:
+            with self._cond:
+                if self._closed or len(self._items) >= self.capacity:
+                    return False
+                self._items.append(item)
+                self._cond.notify_all()
+                return True
+
+        def push_batch(self, items: list[object]) -> int:
+            pushed = 0
+            for item in items:
+                if not self.push(item):
+                    return pushed
+                pushed += 1
+            return pushed
+
+        def wait_for_item(self, timeout_ms: int) -> bool:
+            with self._cond:
+                if not self._items and not self._closed:
+                    self._cond.wait(timeout=timeout_ms / 1000)
+                return bool(self._items)
+
+        def pop_batch(self, max_items: int) -> list[object]:
+            with self._cond:
+                n = min(max_items, len(self._items))
+                if n == 0:
+                    return []
+                batch = list(self._items[:n])
+                del self._items[:n]
+                return batch
+
+        def close(self) -> None:
+            with self._cond:
+                self._closed = True
+                self._cond.notify_all()
+
+        def is_done(self) -> bool:
+            with self._cond:
+                return self._closed and not self._items
+
+    class _RustPrefetchHookSource(BaseSource[int]):
+        source_name = "rust_prefetch_hook"
+        supports_rust_prefetch = True
+        prefetch_limit = 2
+
+        def __init__(self) -> None:
+            self._current: int | None = None
+
+        def delivery_success_callback(self):
+            current = self._current
+            if current is None:
+                return None
+
+            async def _ack() -> None:
+                acknowledged.append(current)
+
+            return _ack
+
+        async def stream(self):
+            for value in range(4):
+                self._current = value
+                yield value
+
+        def stream_sync_batches(self):
+            for value in range(4):
+                self._current = value
+                yield value
+
+    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
+    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(
+            runtime=SimpleNamespace(
+                source_prefetch_enabled=False,
+                source_prefetch_limit=0,
+                source_prefetch_block_count=0,
+                source_prefetch_max_depth=0,
+                rust_prefetch_active=False,
+                rust_prefetch_wait_count=0,
+                rust_prefetch_batch_drain_count=0,
+                rust_prefetch_push_batch_count=0,
+                source_record_error_count=0,
+                source_record_drop_count=0,
+            )
+        ),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    adapter = _source_adapter.SourceRuntimeAdapter(
+        source=_RustPrefetchHookSource(),
+        has_buffered_stages=True,
+    )
+    records = [record async for record in adapter.iter_source_records(ctx)]
+
+    for record in records:
+        assert record.on_success is not None
+        await record.on_success()
+
+    assert acknowledged == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio
 async def test_source_delivery_success_hook_runs_after_successful_write() -> None:
     acknowledged: list[int] = []
     sink = CollectSink()
@@ -848,6 +1328,46 @@ async def test_buffered_pipeline_cancellation_cancels_pending_tasks_and_preserve
     assert sorted(middleware.cancelled) == [1, 2, 3, 4]
     assert middleware.stopped is True
     assert events == ["sink.open", "sink.flush", "sink.close"]
+
+
+@pytest.mark.asyncio
+async def test_buffered_pipeline_cancellation_closes_pending_write_owner_task() -> None:
+    middleware = PartiallyBlockingBufferedMiddleware()
+    pipeline_task = asyncio.create_task(
+        Pipeline(IterableSource([1, 2]), id="buffered_owner_cleanup")
+        .pipe(middleware)
+        .build(
+            BatchCollectSink(),
+            config=DeliveryConfig(batch_size=100, batch_flush_interval_ms=1000),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(middleware.all_started.wait(), timeout=1.0)
+    await asyncio.wait_for(middleware.first_resolved.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+
+    owner_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name() == "buffered_owner_cleanup-pending-write-owner"
+    ]
+    assert owner_tasks, "pending write owner should be active before cancellation"
+
+    pipeline_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline_task
+
+    await asyncio.sleep(0)
+    leaked_owner_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name() == "buffered_owner_cleanup-pending-write-owner"
+    ]
+    assert leaked_owner_tasks == []
+    assert middleware.cancelled == [2]
 
 
 @pytest.mark.asyncio
@@ -1042,6 +1562,85 @@ async def test_buffered_stage_runtime_metrics_capture_in_flight_pressure():
     assert summary.runtime.buffered_stage_max_in_flight == 2
     # Ready buffered tasks are now drained in groups instead of one-by-one.
     assert summary.runtime.buffered_stage_drain_count == 2
+
+
+@pytest.mark.asyncio
+async def test_buffered_stage_failure_metrics_not_double_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    class _TraceSpan:
+        def __call__(self, *args, **kwargs):
+            del args, kwargs
+            return self
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    class _FailingBufferedMiddleware(Middleware[int, int]):
+        name = "failing_buffered"
+        min_concurrency = 2
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+        async def submit(self, record: int, ctx) -> asyncio.Future[int]:
+            del record, ctx
+            future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+            future.set_exception(RuntimeError("boom"))
+            return future
+
+    metrics = SimpleNamespace(
+        records_in=0,
+        records_out=0,
+        records_dropped=0,
+        records_errored=0,
+        total_time_ms=0.0,
+    )
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(middleware=lambda _name: metrics),
+        trace_span=_TraceSpan(),
+    )
+
+    async def _unexpected_process_range(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("process_range should not run after buffered middleware failure")
+
+    strategy = _lanes.BufferedLaneStrategy(
+        coordinator=SimpleNamespace(chain=SimpleNamespace(process_range=_unexpected_process_range))
+    )
+    stage = BufferedStageSpec(
+        index=0,
+        middleware=_FailingBufferedMiddleware(),
+        name="failing_buffered",
+        concurrency=2,
+    )
+    monotonic_values = iter([100.0, 100.25])
+
+    def _fake_monotonic() -> float:
+        return next(monotonic_values, 100.25)
+
+    monkeypatch.setattr(_lanes.time, "monotonic", _fake_monotonic)
+
+    result = await strategy.process_record_through_buffered_stages(
+        SourceRecord(raw=1),
+        ctx,
+        (stage,),
+        1,
+    )
+
+    assert result.failure is not None
+    assert metrics.records_in == 1
+    assert metrics.records_out == 0
+    assert metrics.records_dropped == 0
+    assert metrics.records_errored == 1
+    assert metrics.total_time_ms == pytest.approx(250.0)
 
 
 @pytest.mark.asyncio
@@ -1277,6 +1876,73 @@ async def test_sink_open_failure_still_stops_started_middlewares() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fan_out_partial_open_failure_rolls_back_opened_sink_before_middleware_stop() -> None:
+    events: list[str] = []
+
+    class TrackingMiddleware(Middleware[int, int]):
+        name = "tracking"
+
+        async def on_start(self, ctx) -> None:
+            del ctx
+            events.append("middleware.start")
+
+        async def on_stop(self, ctx) -> None:
+            del ctx
+            events.append("middleware.stop")
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+    class OpenedSink:
+        sink_name = "opened"
+
+        async def open(self) -> None:
+            events.append("opened.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"opened.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("opened.flush")
+
+        async def close(self) -> None:
+            events.append("opened.close")
+
+    class FailingOpenSink:
+        sink_name = "failing_open"
+
+        async def open(self) -> None:
+            events.append("failing.open")
+            raise RuntimeError("fanout open broke")
+
+        async def write(self, record: int) -> None:
+            events.append(f"failing.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("failing.flush")
+
+        async def close(self) -> None:
+            events.append("failing.close")
+
+    with pytest.raises(RuntimeError, match="fanout open broke"):
+        await (
+            Pipeline(IterableSource([1]))
+            .pipe(TrackingMiddleware())
+            .fan_out([OpenedSink(), FailingOpenSink()])  # type: ignore[list-item]
+            .run()
+        )
+
+    assert events == [
+        "middleware.start",
+        "opened.open",
+        "failing.open",
+        "opened.close",
+        "middleware.stop",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_middleware_start_failure_rolls_back_started_middlewares() -> None:
     events: list[str] = []
 
@@ -1370,7 +2036,200 @@ async def test_dlq_open_failure_closes_started_writer() -> None:
             .run()
         )
 
-    assert events == ["writer.open", "dlq.open", "writer.close"]
+    assert events == ["writer.open", "dlq.open", "dlq.close", "writer.close"]
+
+
+@pytest.mark.asyncio
+async def test_partial_dlq_open_failure_closes_dlq_and_writer() -> None:
+    events: list[str] = []
+
+    class TrackingWriterSink:
+        sink_name = "writer"
+
+        async def open(self) -> None:
+            events.append("writer.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"writer.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("writer.flush")
+
+        async def close(self) -> None:
+            events.append("writer.close")
+
+    class PartiallyOpenedDLQSink:
+        sink_name = "dlq"
+
+        async def open(self) -> None:
+            events.append("dlq.open")
+            raise RuntimeError("dlq partial open broke")
+
+        async def write(self, record) -> None:
+            events.append(f"dlq.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("dlq.flush")
+
+        async def close(self) -> None:
+            events.append("dlq.close")
+
+    with pytest.raises(RuntimeError, match="dlq partial open broke"):
+        await (
+            Pipeline(IterableSource([1]))
+            .build(
+                TrackingWriterSink(),
+                config=DeliveryConfig(dlq=PartiallyOpenedDLQSink()),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert events == ["writer.open", "dlq.open", "dlq.close", "writer.close"]
+
+
+@pytest.mark.asyncio
+async def test_source_close_failure_propagates_on_clean_run() -> None:
+    events: list[str] = []
+
+    class FailingCloseSource(BaseSource[int]):
+        source_name = "failing_close_source"
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def close(self) -> None:
+            events.append("source.close")
+            raise RuntimeError("source close broke")
+
+        async def stream(self):
+            yield 1
+
+    class TrackingSink:
+        sink_name = "tracking_sink"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+
+    with pytest.raises(RuntimeError, match="source close broke"):
+        await Pipeline(FailingCloseSource()).build(TrackingSink()).run()  # type: ignore[arg-type]
+
+    assert events == [
+        "sink.open",
+        "source.open",
+        "sink.write:1",
+        "source.close",
+        "sink.flush",
+        "sink.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_close_failure_does_not_mask_stream_error() -> None:
+    events: list[str] = []
+
+    class FailingSource(BaseSource[int]):
+        source_name = "failing_source"
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def close(self) -> None:
+            events.append("source.close")
+            raise RuntimeError("source close broke")
+
+        async def stream(self):
+            yield 1
+            raise RuntimeError("source stream broke")
+
+    class TrackingSink:
+        sink_name = "tracking_sink"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+
+    with pytest.raises(RuntimeError, match="source stream broke"):
+        await Pipeline(FailingSource()).build(TrackingSink()).run()  # type: ignore[arg-type]
+
+    assert events == [
+        "sink.open",
+        "source.open",
+        "sink.write:1",
+        "source.close",
+        "sink.flush",
+        "sink.close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_close_failure_does_not_mask_cancellation() -> None:
+    events: list[str] = []
+    source_started = asyncio.Event()
+
+    class BlockingSource(BaseSource[int]):
+        source_name = "blocking_source"
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def close(self) -> None:
+            events.append("source.close")
+            raise RuntimeError("source close broke")
+
+        async def stream(self):
+            source_started.set()
+            await asyncio.Event().wait()
+            yield 1
+
+    class TrackingSink:
+        sink_name = "tracking_sink"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+
+    task = asyncio.create_task(
+        Pipeline(BlockingSource()).build(TrackingSink()).run()  # type: ignore[arg-type]
+    )
+
+    await asyncio.wait_for(source_started.wait(), timeout=1.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert events == [
+        "sink.open",
+        "source.open",
+        "source.close",
+        "sink.flush",
+        "sink.close",
+    ]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,9 @@ from typing import Any
 
 import pytest
 
+from tests.health._harness import send_request as _send_request
+from tests.health._harness import status_line as _status_line
+
 # ======================================================================
 # [SEC-1] Health Endpoints Without Authentication
 # ======================================================================
@@ -44,7 +47,7 @@ async def test_sec1_health_endpoint_returns_401_without_auth_token() -> None:
     # Bug condition: HealthServer configured with auth_token
     # HealthServer.__init__() does NOT accept auth_token parameter — this is the bug
     try:
-        server = HealthServer(port=0, auth_token="secret-token")
+        HealthServer(port=0, auth_token="secret-token")
     except TypeError as exc:
         # This is the bug: __init__() doesn't accept auth_token
         pytest.fail(
@@ -52,38 +55,19 @@ async def test_sec1_health_endpoint_returns_401_without_auth_token() -> None:
             f"parameter. Cannot configure authentication. Error: {exc}"
         )
 
-    # If we get here, the server was created. Now test that unauthenticated request → 401.
-    # Start the server on a random port
-    server._stop_event = asyncio.Event()
-    server._server = await asyncio.start_server(
-        server._handle_connection,
-        host="127.0.0.1",
-        port=0,
+    response = await _send_request(
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        auth_token="secret-token",
     )
-    port = server._server.sockets[0].getsockname()[1]
+    status_line = _status_line(response)
 
-    try:
-        # Send GET /health WITHOUT Authorization header
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        await writer.drain()
-        response = await asyncio.wait_for(reader.read(4096), timeout=2.0)
-        writer.close()
-        await writer.wait_closed()
-
-        response_str = response.decode("ascii", errors="replace")
-        status_line = response_str.split("\r\n")[0]
-
-        # EXPECTED: 401 Unauthorized
-        # OBSERVED (buggy): 200 OK
-        assert "401" in status_line, (
-            f"[SEC-1] BUG CONFIRMED: Expected HTTP 401 for unauthenticated request to "
-            f"/health when auth_token is configured, but got: {status_line!r}. "
-            f"Full response: {response_str[:200]!r}"
-        )
-    finally:
-        server.stop()
-        await asyncio.sleep(0.05)
+    # EXPECTED: 401 Unauthorized
+    # OBSERVED (buggy): 200 OK
+    assert "401" in status_line, (
+        f"[SEC-1] BUG CONFIRMED: Expected HTTP 401 for unauthenticated request to "
+        f"/health when auth_token is configured, but got: {status_line!r}. "
+        f"Full response: {response[:200]!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -99,44 +83,25 @@ async def test_sec1_metrics_endpoint_returns_401_with_wrong_bearer_token() -> No
 
     # Bug condition: HealthServer configured with auth_token
     try:
-        server = HealthServer(port=0, auth_token="correct-token")
+        HealthServer(port=0, auth_token="correct-token")
     except TypeError as exc:
         pytest.fail(
             f"[SEC-1] BUG CONFIRMED: HealthServer.__init__() does not accept auth_token "
             f"parameter. Error: {exc}"
         )
 
-    server._stop_event = asyncio.Event()
-    server._server = await asyncio.start_server(
-        server._handle_connection,
-        host="127.0.0.1",
-        port=0,
+    response = await _send_request(
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-token\r\n\r\n",
+        auth_token="correct-token",
     )
-    port = server._server.sockets[0].getsockname()[1]
+    status_line = _status_line(response)
 
-    try:
-        # Send GET /metrics WITH wrong Bearer token
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(
-            b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-token\r\n\r\n"
-        )
-        await writer.drain()
-        response = await asyncio.wait_for(reader.read(4096), timeout=2.0)
-        writer.close()
-        await writer.wait_closed()
-
-        response_str = response.decode("ascii", errors="replace")
-        status_line = response_str.split("\r\n")[0]
-
-        # EXPECTED: 401 Unauthorized
-        # OBSERVED (buggy): 200 OK
-        assert "401" in status_line, (
-            f"[SEC-1] BUG CONFIRMED: Expected HTTP 401 for wrong Bearer token on /metrics, "
-            f"but got: {status_line!r}. Full response: {response_str[:200]!r}"
-        )
-    finally:
-        server.stop()
-        await asyncio.sleep(0.05)
+    # EXPECTED: 401 Unauthorized
+    # OBSERVED (buggy): 200 OK
+    assert "401" in status_line, (
+        f"[SEC-1] BUG CONFIRMED: Expected HTTP 401 for wrong Bearer token on /metrics, "
+        f"but got: {status_line!r}. Full response: {response[:200]!r}"
+    )
 
 
 # ======================================================================

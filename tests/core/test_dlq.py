@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import nullcontext
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,8 +17,10 @@ from agora import (
 )
 from agora.core.dlq import DLQRecord, SQLiteDLQSink, SQLiteDLQSource
 from agora.core.middleware import Middleware
+from agora.core.runtime._delivery import DeliveryEngine, RunState, make_checkpoint_state
+from agora.core.runtime._writer_transport import WriterTransport
 from agora.core.source import BaseSource
-from agora.core.types import DLQFailurePolicy, SinkFailurePolicy
+from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy, SinkFailurePolicy
 
 
 class _CollectDLQSink:
@@ -233,6 +237,130 @@ async def test_pipeline_can_log_and_continue_on_sink_write_error_without_dlq() -
 
     assert summary.records_written == 0
     assert summary.records_errored == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_log_and_continue_sink_error_without_dlq_does_not_acknowledge_source() -> None:
+    acknowledged: list[dict] = []
+
+    class _BoomBatchSink:
+        sink_name = "boom_batch_sink"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: dict) -> None:
+            raise AssertionError(f"single-record write should not be used: {record}")
+
+        async def write_batch(self, records: list[dict]) -> None:
+            del records
+            raise RuntimeError("batch sink broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    summary = await (
+        Pipeline(_AckTrackingSource([{"id": 1}, {"id": 2}], acknowledged))
+        .build(
+            _BoomBatchSink(),
+            config=DeliveryConfig(
+                batch_size=2, sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 0
+    assert summary.records_errored == 2
+    assert acknowledged == []
+
+
+@pytest.mark.asyncio
+async def test_direct_flush_log_and_continue_transport_error_without_dlq_does_not_acknowledge() -> (
+    None
+):
+    acknowledged: list[str] = []
+
+    class _ExplodingWriter:
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record) -> None:
+            del record
+            raise AssertionError("single-record path should not be used")
+
+        async def write_batch(self, records):
+            del records
+            raise RuntimeError("transport batch broke")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    ctx = SimpleNamespace(
+        pipeline_id="orders",
+        run_id="run-1",
+        metrics=SimpleNamespace(
+            records_written=0,
+            records_errored=0,
+            records_dropped=0,
+            runtime=SimpleNamespace(
+                dlq_failure_count=0,
+                checkpoint_failure_count=0,
+                checkpoint_save_time_ms=0.0,
+                checkpoint_save_count=0,
+                checkpoint_save_max_batch_size=0,
+            ),
+            last_checkpoint=None,
+        ),
+        log=SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+        trace_span=lambda *args, **kwargs: nullcontext(),
+    )
+
+    engine = DeliveryEngine(
+        transport=WriterTransport(writer=_ExplodingWriter()),  # type: ignore[arg-type]
+        source_name="ack_tracking",
+        current_checkpoint=lambda: {"id": 2},
+        dlq_sink=None,
+        dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
+        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+        checkpoint_store=None,
+        checkpoint_failure_policy=CheckpointFailurePolicy.FAIL_CLOSED,
+        checkpoint_key="orders",
+        checkpoint_every=1,
+    )
+    state = RunState(
+        ctx=ctx,
+        checkpoint_state=make_checkpoint_state(),
+        pending_writes=[],
+    )
+
+    async def _ack1() -> None:
+        acknowledged.append("a")
+
+    async def _ack2() -> None:
+        acknowledged.append("b")
+
+    await engine.flush_batch_direct(
+        state,
+        processed_list=[{"id": 1}, {"id": 2}],
+        raw_list=[{"id": 1}, {"id": 2}],
+        checkpoint_list=[{"id": 1}, {"id": 2}],
+        on_success_list=[_ack1, _ack2],
+    )
+
+    assert ctx.metrics.records_written == 0
+    assert ctx.metrics.records_errored == 2
+    assert acknowledged == []
 
 
 @pytest.mark.asyncio

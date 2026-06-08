@@ -32,6 +32,60 @@ from agora.core.checkpoint import is_checkpoint_capable
 print(is_checkpoint_capable(my_source))  # True or False
 ```
 
+## CLI visibility
+
+The runtime contract above is also surfaced directly in the CLI so operators do
+not have to infer resume behavior from source names alone.
+
+Use:
+
+```bash
+agora checkpoint inspect <pipeline_id> --store sqlite:/path/to/checkpoints.db
+```
+
+This prints the saved checkpoint plus:
+
+- recovery support status
+- resume key
+- granularity
+- resume behavior
+- resume cost model
+
+For built-in file sources, the command also warns when the saved row or line
+offset is high enough that resume cost may be noticeable because restart still
+re-reads from the beginning and skips forward sequentially. The warning carries
+the saved offset so operators can estimate how much data will be re-scanned.
+
+Add `--json` when this needs to feed automation or dashboards:
+
+```bash
+agora checkpoint inspect <pipeline_id> \
+  --store sqlite:/path/to/checkpoints.db \
+  --json
+```
+
+To remove the saved resume position entirely:
+
+```bash
+agora checkpoint reset <pipeline_id> --store sqlite:/path/to/checkpoints.db --yes
+```
+
+Use:
+
+```bash
+agora diagnose <pipeline_id> \
+  --checkpoint-store sqlite:/path/to/checkpoints.db \
+  --dlq-path /path/to/dlq.db
+```
+
+This shows the same recovery contract next to the latest checkpoint or failure
+record. If the checkpoint is missing but the DLQ still has records, `diagnose`
+falls back to the latest DLQ source name so the operator still gets a recovery
+hint instead of a blank section.
+
+`agora diagnose --json` returns the same contract as structured JSON, including
+checkpoint state, recovery hints, DLQ summary, and replay guidance.
+
 ## Per-source contracts
 
 ### JsonLinesSource

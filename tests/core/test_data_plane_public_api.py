@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from agora import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
+from agora import (
+    DataPlane,
+    SinkDataPlaneSpec,
+    SourceDataPlaneSpec,
+    sink_data_plane_spec,
+    source_data_plane_spec,
+)
 from agora.core import (
     DataPlane as CoreDataPlane,
 )
@@ -10,6 +16,8 @@ from agora.core import (
 from agora.core import (
     SourceDataPlaneSpec as CoreSourceDataPlaneSpec,
 )
+from agora.core import sink_data_plane_spec as core_sink_data_plane_spec
+from agora.core import source_data_plane_spec as core_source_data_plane_spec
 from agora.core.sink import BaseSink
 from agora.core.source import BaseSource
 
@@ -53,6 +61,8 @@ def test_data_plane_types_are_exported_from_public_namespaces() -> None:
     assert DataPlane is CoreDataPlane
     assert SourceDataPlaneSpec is CoreSourceDataPlaneSpec
     assert SinkDataPlaneSpec is CoreSinkDataPlaneSpec
+    assert source_data_plane_spec is core_source_data_plane_spec
+    assert sink_data_plane_spec is core_sink_data_plane_spec
 
 
 def test_source_data_plane_contract_uses_public_spec_type() -> None:
@@ -64,8 +74,31 @@ def test_source_data_plane_contract_uses_public_spec_type() -> None:
     assert spec.emits_arrow_batches is True
 
 
+def test_public_source_data_plane_helper_matches_runtime_validation() -> None:
+    spec = source_data_plane_spec(_ArrowSource())
+
+    assert isinstance(spec, SourceDataPlaneSpec)
+    assert spec.emitted_plane is DataPlane.ARROW_BATCHES
+
+
 def test_sink_data_plane_contract_uses_public_spec_type() -> None:
     spec = _ArrowSink().data_plane_spec()
+
+    assert isinstance(spec, SinkDataPlaneSpec)
+    assert spec.accepted_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+    assert spec.native_planes == (
+        DataPlane.PYTHON_ROWS,
+        DataPlane.PYTHON_BATCHES,
+        DataPlane.ARROW_BATCHES,
+    )
+
+
+def test_public_sink_data_plane_helper_matches_runtime_normalization() -> None:
+    spec = sink_data_plane_spec(_ArrowSink())
 
     assert isinstance(spec, SinkDataPlaneSpec)
     assert spec.accepted_planes == (

@@ -864,3 +864,39 @@ async def test_arrow_chain_middleware_failure_routes_to_dlq() -> None:
 
     assert len(sink.batches) == 0
     assert summary.records_consumed == 2
+    assert summary.records_written == 0
+    assert summary.records_errored == 2
+    assert len(dlq.records) == 2
+    assert [record.record["id"] for record in dlq.records] == [1, 2]
+    assert all(record.stage == "batch_middleware" for record in dlq.records)
+    assert all(record.middleware == "failing_arrow" for record in dlq.records)
+
+
+async def test_arrow_chain_sink_failure_routes_to_dlq() -> None:
+    pytest.importorskip("pyarrow")
+
+    from agora import ArrowMapMiddleware, DeliveryConfig
+
+    class _FailingArrowSink(_ArrowNativeSink):
+        async def write_arrow_batch(self, batch: Any) -> None:
+            del batch
+            raise RuntimeError("arrow sink broke")
+
+    src = _ArrowBatchSource([{"id": 1}, {"id": 2}])
+    sink = _FailingArrowSink()
+    dlq = _DLQCollectSink()
+
+    summary = await (
+        Pipeline(src)
+        .pipe(ArrowMapMiddleware(lambda b: b))
+        .build(sink, config=DeliveryConfig(dlq=dlq, sink_failure_policy="log_and_continue"))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert len(sink.batches) == 0
+    assert summary.records_consumed == 2
+    assert summary.records_written == 0
+    assert summary.records_errored == 2
+    assert len(dlq.records) == 2
+    assert [record.record["id"] for record in dlq.records] == [1, 2]
+    assert all(record.stage == "sink_write" for record in dlq.records)

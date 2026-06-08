@@ -34,10 +34,18 @@ print(plan.to_dict())
 `PipelineExplain` surfaces the same planner decisions the runtime will use:
 
 - `planned_lane`
+- `lane_reason`
 - `source_data_plane`
 - `middleware_matrix`
+- `middleware_materialization_reason`
 - `writer_input_data_plane`
+- `writer_input_data_plane_reason`
 - per-sink selected plane and downgrade markers
+
+Use those reason fields when a pipeline shape is surprising. They tell
+whether the runtime chose the lane because the source was batch-capable, because
+a middleware requested concurrent `submit()` execution, or because Arrow had to
+materialize / downgrade before the writer or a sink boundary.
 
 ## Middleware chain compatibility
 
@@ -289,4 +297,6 @@ dry_run = bound.with_sink(StdoutSink())
 summary = await dry_run.run(max_records=10)
 ```
 
-The source, middlewares, checkpointing, and DLQ configuration are all preserved — only the destination changes.
+The source, middlewares, checkpointing, DLQ configuration, and writer-side
+runtime settings such as `sink_concurrency` are all preserved — only the
+destination changes.

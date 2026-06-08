@@ -252,6 +252,18 @@ def writer_target_data_plane_specs(writer: object) -> tuple[SinkDataPlaneSpec, .
     return ()
 
 
+async def _close_opened_sinks(sinks: list[BaseSink[Any]]) -> None:
+    first_error: Exception | None = None
+    for sink in reversed(sinks):
+        try:
+            await sink.close()
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
 # ======================================================================
 # BaseSink
 # ======================================================================
@@ -376,6 +388,7 @@ class SinkFanOut(Generic[T]):
         self._sinks = sinks
         self._concurrent_writes = concurrent_writes
         self._max_concurrency = max_concurrency
+        self._open_rolled_back = False
         # Cache per-sink capabilities — never changes after construction.
         self._sink_capabilities = [sink_capabilities(s) for s in sinks]
         self._sink_batch_writable = [
@@ -485,13 +498,37 @@ class SinkFanOut(Generic[T]):
 
     async def open(self) -> None:
         """Open all sinks (called before first write)."""
+        self._open_rolled_back = False
+        opened: list[BaseSink[T]] = []
         if not self._concurrent_writes:
-            for sink in self._sinks:
-                await sink.open()
+            try:
+                for sink in self._sinks:
+                    await sink.open()
+                    opened.append(sink)
+            except Exception:
+                self._open_rolled_back = True
+                await _close_opened_sinks(opened)
+                raise
             return
 
         results = await self._run_sink_calls([(sink, sink.open()) for sink in self._sinks])
-        self._raise_first_exception(results)
+        errors = [result for result in results if isinstance(result, Exception)]
+        if not errors:
+            return
+        opened.extend(
+            sink
+            for sink, result in zip(self._sinks, results, strict=True)
+            if not isinstance(result, Exception)
+        )
+        close_error: Exception | None = None
+        try:
+            self._open_rolled_back = True
+            await _close_opened_sinks(opened)
+        except Exception as exc:
+            close_error = exc
+        if close_error is not None:
+            raise errors[0] from close_error
+        raise errors[0]
 
     async def write(self, record: T) -> WriteResult:
         """Write *record* to all sinks.  Returns ``WriteResult``."""
@@ -750,6 +787,20 @@ class SinkRouter(Generic[T]):
     def __init__(self) -> None:
         self._routes: list[SinkRoute[T]] = []
         self._default: BaseSink[T] | None = None
+        self._open_rolled_back = False
+
+    def _unique_sinks(self) -> list[BaseSink[T]]:
+        seen: set[int] = set()
+        ordered: list[BaseSink[T]] = []
+        for route in self._routes:
+            sink_id = id(route.sink)
+            if sink_id in seen:
+                continue
+            seen.add(sink_id)
+            ordered.append(route.sink)
+        if self._default is not None and id(self._default) not in seen:
+            ordered.append(self._default)
+        return ordered
 
     def route(self, predicate: Any, sink: BaseSink[T]) -> SinkRouter[T]:
         """Add a conditional route."""
@@ -763,10 +814,16 @@ class SinkRouter(Generic[T]):
 
     async def open(self) -> None:
         """Open all routed sinks."""
-        for route in self._routes:
-            await route.sink.open()
-        if self._default is not None:
-            await self._default.open()
+        self._open_rolled_back = False
+        opened: list[BaseSink[T]] = []
+        try:
+            for sink in self._unique_sinks():
+                await sink.open()
+                opened.append(sink)
+        except Exception:
+            self._open_rolled_back = True
+            await _close_opened_sinks(opened)
+            raise
 
     async def write(self, record: T) -> WriteResult:
         """Route *record* to first matching sink.  Returns ``WriteResult``."""
@@ -862,20 +919,14 @@ class SinkRouter(Generic[T]):
 
     async def flush(self) -> None:
         """Flush all routed sinks."""
-        for route in self._routes:
-            await route.sink.flush()
-        if self._default is not None:
-            await self._default.flush()
+        for sink in self._unique_sinks():
+            await sink.flush()
 
     async def close(self) -> None:
         """Close all routed sinks."""
-        for route in self._routes:
-            await route.sink.close()
-        if self._default is not None:
-            await self._default.close()
+        for sink in self._unique_sinks():
+            await sink.close()
 
     def bind_context(self, ctx: Any) -> None:
-        for route in self._routes:
-            bind_context_if_supported(route.sink, ctx)
-        if self._default is not None:
-            bind_context_if_supported(self._default, ctx)
+        for sink in self._unique_sinks():
+            bind_context_if_supported(sink, ctx)

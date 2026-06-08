@@ -22,11 +22,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agora.core.discovery import public_entrypoint_group_contracts
 from agora.core.registry import (
     AGORA_PLUGIN_MANIFEST_VERSION,
     Registry,
     RegistryItemInfo,
 )
+
+pytestmark = pytest.mark.contract
 
 # ======================================================================
 # [CONTRACT-02] Stable registries exist and expose load_entrypoints
@@ -97,6 +100,31 @@ def test_c03_provisional_registry_exists(module_path: str, attr: str) -> None:
     assert isinstance(registry, Registry), (
         f"[CONTRACT-03] {module_path}.{attr} must be a Registry instance"
     )
+
+
+def test_c03b_public_entrypoint_group_contracts_match_docs() -> None:
+    """[CONTRACT-03B] The public entry-point group helper must reflect the
+    same stable/provisional groups declared in docs/plugins/contract.md.
+
+    Validates: docs/plugins/contract.md — "Entry-point groups"
+    """
+    contracts = {
+        (contract.group, contract.registry_attr, contract.stability)
+        for contract in public_entrypoint_group_contracts()
+    }
+
+    assert contracts == {
+        ("agora.sources", "source_registry", "stable"),
+        ("agora.sinks", "sink_registry", "stable"),
+        ("agora.middlewares", "middleware_registry", "stable"),
+        ("agora.runner", "runner_registry", "stable"),
+        ("agora.middlewares.dedup.stores", "dedup_store_registry", "stable"),
+        ("agora.middlewares.dedup.strategies", "dedup_strategy_registry", "stable"),
+        ("agora.ai.providers", "ai_provider_registry", "provisional"),
+        ("agora.ai.caches", "ai_cache_registry", "provisional"),
+        ("agora.metrics.exporters", "metrics_exporter_registry", "provisional"),
+        ("agora.state.backends", "state_backend_registry", "provisional"),
+    }
 
 
 # ======================================================================

@@ -85,9 +85,22 @@ agora plugins list --kind sink
 agora plugins list --json
 ```
 
-`agora plugins list` is a diagnostics view, not a package installer. Incompatible
-entry-point plugins may appear with an incompatible status so you can see why
-Agora did not load them.
+`agora plugins list` is a diagnostics view, not a package installer. It now
+covers every public plugin registry, including runners, dedup stores/strategies,
+AI providers/caches, metrics exporters, and state backends.
+
+Useful filters include:
+
+```bash
+agora plugins list --kind runner
+agora plugins list --kind dedup_store
+agora plugins list --kind state_backend
+```
+
+Incompatible entry-point plugins may appear with an incompatible status so
+operators can see why Agora did not load them. `--json` includes the public
+contract metadata for each row: category, entry-point group, registry name,
+stability, compatibility, and manifest version.
 
 ## agora config
 
@@ -126,6 +139,66 @@ Replay modes:
 - `--mode sink` re-drives only the sink writer path using the processed payload
 
 `--mode sink` only supports DLQ records captured at stage `sink_write`.
+
+## agora checkpoint
+
+Inspect or clear persisted checkpoint state:
+
+```bash
+agora checkpoint show nightly_events
+agora checkpoint inspect nightly_events --store sqlite:/var/lib/myapp/checkpoints.db
+agora checkpoint inspect nightly_events --store sqlite:/var/lib/myapp/checkpoints.db --json
+agora checkpoint reset nightly_events --store sqlite:/var/lib/myapp/checkpoints.db --yes
+```
+
+`inspect` explains:
+
+- raw checkpoint value
+- resume key and granularity
+- resume cost model
+- warnings for expensive high-offset file resumes
+
+`reset --yes` clears the saved resume position so the next run starts from the
+beginning. `reset --json` is available for scripts.
+
+## agora diagnose
+
+Summarize the last visible failure and recovery posture:
+
+```bash
+agora diagnose nightly_events
+agora diagnose nightly_events --checkpoint-store sqlite:/var/lib/myapp/checkpoints.db
+agora diagnose nightly_events --checkpoint-store sqlite:/var/lib/myapp/checkpoints.db --dlq-path /var/lib/myapp/dlq.db
+agora diagnose nightly_events --checkpoint-store sqlite:/var/lib/myapp/checkpoints.db --dlq-path /var/lib/myapp/dlq.db --json
+```
+
+`agora diagnose` combines:
+
+- latest checkpoint state
+- recovery contract for the source
+- DLQ replayability
+- most recent visible failure details
+
+## agora doctor
+
+Run pre-flight diagnostics for the current install or for one declarative
+pipeline selection:
+
+```bash
+agora doctor
+agora doctor --config pipelines.toml
+agora doctor orders --config pipelines.toml --environment prod
+```
+
+When `--config` points at an `agora/v1` document, `agora doctor` now uses the
+same project import path conventions as `agora run` and checks:
+
+- pipeline selection / overlay resolution
+- declarative import refs
+- component construction
+- recovery posture for the selected source
+- whether the configured DLQ backend supports `agora dlq replay`
+- public entry-point plugin compatibility, including incompatible MANIFEST versions
 
 ## agora version
 

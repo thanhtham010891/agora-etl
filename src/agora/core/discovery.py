@@ -30,29 +30,107 @@ into the corresponding registries.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import logstruct
 
 logger = logstruct.getLogger(__name__)
 
+
+@dataclass(frozen=True, slots=True)
+class EntryPointGroupContract:
+    """Public metadata for one plugin entry-point group."""
+
+    kind: str
+    group: str
+    module_path: str
+    registry_attr: str
+    stability: str
+
+
+PUBLIC_ENTRYPOINT_GROUPS: tuple[EntryPointGroupContract, ...] = (
+    EntryPointGroupContract(
+        kind="source",
+        group="agora.sources",
+        module_path="agora.sources",
+        registry_attr="source_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="sink",
+        group="agora.sinks",
+        module_path="agora.sinks",
+        registry_attr="sink_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="middleware",
+        group="agora.middlewares",
+        module_path="agora.middlewares",
+        registry_attr="middleware_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="runner",
+        group="agora.runner",
+        module_path="agora.runner",
+        registry_attr="runner_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="dedup_store",
+        group="agora.middlewares.dedup.stores",
+        module_path="agora.middlewares.dedup.stores",
+        registry_attr="dedup_store_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="dedup_strategy",
+        group="agora.middlewares.dedup.strategies",
+        module_path="agora.middlewares.dedup.strategies",
+        registry_attr="dedup_strategy_registry",
+        stability="stable",
+    ),
+    EntryPointGroupContract(
+        kind="ai_provider",
+        group="agora.ai.providers",
+        module_path="agora.ai",
+        registry_attr="ai_provider_registry",
+        stability="provisional",
+    ),
+    EntryPointGroupContract(
+        kind="ai_cache",
+        group="agora.ai.caches",
+        module_path="agora.ai.cache",
+        registry_attr="ai_cache_registry",
+        stability="provisional",
+    ),
+    EntryPointGroupContract(
+        kind="metrics_exporter",
+        group="agora.metrics.exporters",
+        module_path="agora.metrics.exporters",
+        registry_attr="metrics_exporter_registry",
+        stability="provisional",
+    ),
+    EntryPointGroupContract(
+        kind="state_backend",
+        group="agora.state.backends",
+        module_path="agora.state.registry",
+        registry_attr="state_backend_registry",
+        stability="provisional",
+    ),
+)
+
 # Mapping of entry-point group → (module_path, registry_attr)
 _ENTRYPOINT_GROUPS: dict[str, tuple[str, str]] = {
-    "agora.sources": ("agora.sources", "source_registry"),
-    "agora.sinks": ("agora.sinks", "sink_registry"),
-    "agora.middlewares": ("agora.middlewares", "middleware_registry"),
-    "agora.ai.providers": ("agora.ai", "ai_provider_registry"),
-    "agora.ai.caches": ("agora.ai.cache", "ai_cache_registry"),
-    "agora.metrics.exporters": ("agora.metrics.exporters", "metrics_exporter_registry"),
-    "agora.middlewares.dedup.stores": (
-        "agora.middlewares.dedup.stores",
-        "dedup_store_registry",
-    ),
-    "agora.middlewares.dedup.strategies": (
-        "agora.middlewares.dedup.strategies",
-        "dedup_strategy_registry",
-    ),
-    "agora.state.backends": ("agora.state.registry", "state_backend_registry"),
-    "agora.runner": ("agora.runner", "runner_registry"),
+    contract.group: (contract.module_path, contract.registry_attr)
+    for contract in PUBLIC_ENTRYPOINT_GROUPS
 }
+
+
+def public_entrypoint_group_contracts() -> tuple[EntryPointGroupContract, ...]:
+    """Return the declared public plugin entry-point groups."""
+    return PUBLIC_ENTRYPOINT_GROUPS
 
 
 def _load_group(group: str) -> int:

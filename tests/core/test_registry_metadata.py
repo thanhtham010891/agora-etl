@@ -21,6 +21,14 @@ class _Manifest:
     capabilities: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _FakeContract:
+    kind: str
+    group: str
+    registry_attr: str
+    stability: str
+
+
 class _FakeEntryPoint:
     def __init__(self, name: str, plugin: object, *, dist_name: str, dist_version: str) -> None:
         self.name = name
@@ -87,6 +95,8 @@ def test_registry_load_entrypoints_records_manifest_metadata(
     assert item.package == "fake_plugin_ok-dist"
     assert item.version == "1.2.3"
     assert item.compatible is True
+    assert item.entrypoint_group == "agora.sinks"
+    assert item.capabilities == ("sink:test",)
 
 
 def test_registry_manifest_version_is_current() -> None:
@@ -125,6 +135,8 @@ def test_registry_skips_incompatible_manifest_entrypoints(
     assert item.version == "1.2.3"
     assert item.agora_api_version == "9.9"
     assert item.compatible is False
+    assert item.entrypoint_group == "agora.sinks"
+    assert item.capabilities == ("sink:test",)
 
 
 def test_registry_load_entrypoints_without_manifest_keeps_distribution_metadata(
@@ -159,6 +171,8 @@ def test_registry_load_entrypoints_without_manifest_keeps_distribution_metadata(
     assert item.package == "manifestless-plugin"
     assert item.version == "0.5.0"
     assert item.compatible is None
+    assert item.entrypoint_group == "agora.sinks"
+    assert item.capabilities == ()
 
 
 def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
@@ -170,11 +184,22 @@ def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
     registry.register("redis_stream", RedisStreamSource)
     registry._origins["redis_stream"] = "entrypoint"
 
-    rows = _registry_rows(registry, "source")
+    rows = _registry_rows(
+        registry,
+        _FakeContract(
+            kind="source",
+            group="agora.sources",
+            registry_attr="source_registry",
+            stability="stable",
+        ),
+    )
 
     assert rows[0]["origin"] == "entrypoint"
     assert rows[0]["extra"] == "agora-etl-plugins[redis]"
     assert rows[0]["manifest"] == ""
+    assert rows[0]["group"] == "agora.sources"
+    assert rows[0]["registry"] == "source_registry"
+    assert rows[0]["stability"] == "stable"
 
 
 def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
@@ -188,12 +213,21 @@ def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
     registry._origins["bad_sink"] = "entrypoint_incompatible"
     registry._registration_types["bad_sink"] = "unavailable"
 
-    rows = _registry_rows(registry, "sink")
+    rows = _registry_rows(
+        registry,
+        _FakeContract(
+            kind="sink",
+            group="agora.sinks",
+            registry_attr="sink_registry",
+            stability="stable",
+        ),
+    )
 
     assert rows[0]["origin"] == "entrypoint_incompatible"
     assert rows[0]["compatibility"] == "incompatible"
     assert rows[0]["manifest"] == "9.9"
     assert rows[0]["extra"] == "agora-etl[all]"
+    assert rows[0]["group"] == "agora.sinks"
 
 
 def test_registry_manifest_lookup_walks_up_to_parent_package(
@@ -242,6 +276,8 @@ def test_registry_manifest_lookup_walks_up_to_parent_package(
     assert item.version == "0.3.0"
     assert item.agora_api_version == AGORA_PLUGIN_MANIFEST_VERSION
     assert item.compatible is True
+    assert item.entrypoint_group == "agora.sources"
+    assert item.capabilities == ("source:kafka", "sink:kafka")
 
 
 def test_registry_rows_are_sorted_by_key() -> None:
@@ -256,6 +292,14 @@ def test_registry_rows_are_sorted_by_key() -> None:
     registry.register("zeta", ZSink)
     registry.register("alpha", ASink)
 
-    rows = _registry_rows(registry, "sink")
+    rows = _registry_rows(
+        registry,
+        _FakeContract(
+            kind="sink",
+            group="agora.sinks",
+            registry_attr="sink_registry",
+            stability="stable",
+        ),
+    )
 
     assert [row["key"] for row in rows] == ["alpha", "zeta"]

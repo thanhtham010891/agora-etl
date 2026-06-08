@@ -11,12 +11,14 @@ Usage::
         .filter(lambda r: r.confidence > 0.8)
         .build(
             PostgresSink(dsn=dsn),
-            dlq=SQLiteDLQSink(path=".dlq.db"),
-            checkpoint=store,
-            checkpoint_every=50,
-            batch_size=100,
-            sink_concurrency=4,
-            backpressure=Backpressure.adaptive(max_buffer_size=500),
+            config=DeliveryConfig(
+                dlq=SQLiteDLQSink(path=".dlq.db"),
+                checkpoint=store,
+                checkpoint_every=50,
+                batch_size=100,
+                sink_concurrency=4,
+                backpressure=Backpressure.adaptive(max_buffer_size=500),
+            ),
         )
         .run(max_records=10_000)
     )
@@ -196,13 +198,19 @@ class BoundPipeline(Generic[T]):
 
     def with_sink(self, *sinks: BaseSink[Any]) -> BoundPipeline[Any]:
         """Replace sinks (used for dry-run mode)."""
-        return BoundPipeline(
+        writer: SinkFanOut[Any] = SinkFanOut(list(sinks))
+        if self._config.sink_concurrency is not None:
+            writer = writer.with_concurrency(self._config.sink_concurrency)
+
+        bound: BoundPipeline[Any] = BoundPipeline(
             source=self._source,
             chain=self._chain,
-            writer=SinkFanOut(list(sinks)),
+            writer=writer,
             pipeline_id=self._pipeline_id,
             config=self._config,
         )
+        bound._live_metrics_callback = self._live_metrics_callback
+        return bound
 
     def set_live_metrics_callback(
         self,

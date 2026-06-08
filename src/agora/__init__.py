@@ -81,8 +81,14 @@ from agora.core.pipeline import BoundPipeline, Pipeline
 from agora.core.plugin import Configurable, Lifecycle, Plugin
 from agora.core.registry import Registry
 from agora.core.retry import RetryPolicy, retry_async
-from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
-from agora.core.source import BaseSource, IterableSource, SourceRecordError, SourceRuntimeMetrics
+from agora.core.sink import BaseSink, SinkFanOut, SinkRouter, sink_data_plane_spec
+from agora.core.source import (
+    BaseSource,
+    IterableSource,
+    SourceRecordError,
+    SourceRuntimeMetrics,
+    source_data_plane_spec,
+)
 from agora.core.tracing import InMemoryTracer, NoopTracer, OpenTelemetryTracer
 from agora.core.types import (
     Backpressure,
@@ -191,5 +197,7 @@ __all__ = [
     "is_arrow_native_sink",
     "is_batch_capable_source",
     "retry_async",
+    "sink_data_plane_spec",
+    "source_data_plane_spec",
     "state_backend_registry",
 ]

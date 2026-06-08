@@ -90,8 +90,10 @@ def test_runtime_plan_selects_linear_lane_by_default() -> None:
     )
 
     assert plan.lane == RuntimeLane.LINEAR
+    assert "no buffered stage requires submit() concurrency" in plan.lane_reason
     assert plan.source.emitted_plane == DataPlane.PYTHON_ROWS
     assert plan.writer.input_data_plane == DataPlane.PYTHON_ROWS
+    assert plan.writer.input_data_plane_reason == "writer receives middleware output as python_rows"
     assert plan.writer.direct_flush_eligible is False
 
 
@@ -104,6 +106,7 @@ def test_runtime_plan_selects_buffered_lane_when_submit_stage_exists() -> None:
     )
 
     assert plan.lane == RuntimeLane.BUFFERED
+    assert "buffered_test(min_concurrency=2)" in plan.lane_reason
     assert len(plan.buffered_stages) == 1
     assert plan.buffered_stages[0].name == "buffered_test"
 
@@ -147,6 +150,7 @@ def test_runtime_plan_selects_batch_lane_for_batch_source() -> None:
     )
 
     assert plan.lane == RuntimeLane.BATCH
+    assert "source advertises batch emission" in plan.lane_reason
     assert plan.batch_source is True
     assert plan.source.emitted_plane == DataPlane.PYTHON_BATCHES
     assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
@@ -221,6 +225,7 @@ def test_arrow_fast_path_selected_for_arrow_emitting_source() -> None:
     assert plan.writer.arrow_fast_path is True
     assert plan.source.emitted_plane == DataPlane.ARROW_BATCHES
     assert plan.writer.input_data_plane == DataPlane.ARROW_BATCHES
+    assert "keeps arrow_batches" in plan.writer.input_data_plane_reason
 
 
 def test_arrow_fast_path_selected_for_arrow_emitting_source_with_multiple_arrow_sinks() -> None:
@@ -355,6 +360,8 @@ def test_arrow_chain_materializes_at_writer_boundary_when_writer_has_no_arrow_pa
     assert plan.writer.arrow_fast_path is False
     assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
     assert plan.writer.sink_plans[0].selected_data_plane == DataPlane.PYTHON_BATCHES
+    assert "materializes arrow_batches to python_batches" in plan.writer.input_data_plane_reason
+    assert plan.writer.sink_plans[0].selection_reason == "sink accepts python_batches natively"
 
 
 def test_arrow_source_with_python_row_chain_tracks_single_materialization() -> None:
@@ -375,6 +382,8 @@ def test_arrow_source_with_python_row_chain_tracks_single_materialization() -> N
     assert plan.middleware.input_data_plane == DataPlane.ARROW_BATCHES
     assert plan.middleware.output_data_plane == DataPlane.PYTHON_BATCHES
     assert plan.middleware.materializes_arrow_to_rows is True
+    assert plan.middleware.materialization_reason is not None
+    assert "materialize once before middleware execution" in plan.middleware.materialization_reason
     assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
 
 
@@ -392,6 +401,8 @@ def test_runtime_plan_tracks_sink_downgrades_for_mixed_arrow_fanout() -> None:
         DataPlane.ARROW_BATCHES,
         DataPlane.PYTHON_ROWS,
     ]
+    assert plan.writer.sink_plans[0].selection_reason == "sink accepts arrow_batches natively"
+    assert "writer downgrades to python_rows" in plan.writer.sink_plans[1].selection_reason
 
 
 def test_router_does_not_advertise_arrow_writer_path_from_arrow_capable_sink() -> None:

@@ -14,7 +14,12 @@ from agora.core.constants import (
     RUST_PREFETCH_WAIT_TIMEOUT_MS,
 )
 from agora.core.runtime._delivery import SourceQueueError, SourceRecord
-from agora.core.source import DeliveryHookSource, prefetch_limit_for, source_runtime_metrics
+from agora.core.source import (
+    DeliveryHookSource,
+    prefetch_limit_for,
+    source_delivery_success_callback,
+    source_runtime_metrics,
+)
 
 try:
     from agora_rs import MetricsAccumulator, RecordBuffer
@@ -68,6 +73,19 @@ class SourceRuntimeAdapter:
         ctx.metrics.runtime.source_record_error_count = metrics.record_error_count
         ctx.metrics.runtime.source_record_drop_count = metrics.record_drop_count
 
+    def _make_source_record(
+        self,
+        record: Any,
+        *,
+        checkpoint_capable: bool,
+        has_delivery_hook: bool,
+    ) -> SourceRecord:
+        return SourceRecord(
+            raw=record,
+            checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
+            on_success=source_delivery_success_callback(self.source) if has_delivery_hook else None,
+        )
+
     async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
         prefetch_limit = prefetch_limit_for(self.source)
         checkpoint_capable = is_checkpoint_capable(self.source)
@@ -99,12 +117,10 @@ class SourceRuntimeAdapter:
         if prefetch_limit <= 0:
             if checkpoint_capable or has_delivery_hook:
                 async for record in self.source.stream():
-                    yield SourceRecord(
-                        raw=record,
-                        checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
-                        on_success=cast("Any", self.source).delivery_success_callback()
-                        if has_delivery_hook
-                        else None,
+                    yield self._make_source_record(
+                        record,
+                        checkpoint_capable=checkpoint_capable,
+                        has_delivery_hook=has_delivery_hook,
                     )
             else:
                 async for record in self.source.stream():
@@ -135,7 +151,8 @@ class SourceRuntimeAdapter:
 
         buf = RecordBuffer(prefetch_limit)
         _stream_sync = getattr(self.source, "stream_sync_batches", None)
-        _has_delivery_hook = isinstance(self.source, DeliveryHookSource)
+        checkpoint_capable = is_checkpoint_capable(self.source)
+        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
         error_holder: list[Exception] = []
 
         def _producer() -> None:
@@ -154,12 +171,10 @@ class SourceRuntimeAdapter:
             try:
                 if _stream_sync is not None:
                     for record in _stream_sync():
-                        sr = SourceRecord(
-                            raw=record,
-                            checkpoint=self.source.current_checkpoint(),
-                            on_success=cast("Any", self.source).delivery_success_callback()
-                            if _has_delivery_hook
-                            else None,
+                        sr = self._make_source_record(
+                            record,
+                            checkpoint_capable=checkpoint_capable,
+                            has_delivery_hook=has_delivery_hook,
                         )
                         pending_batch.append(sr)
                         if len(pending_batch) >= prefetch_limit and not _flush_pending_batch():
@@ -217,7 +232,8 @@ class SourceRuntimeAdapter:
         prefetch_limit: int,
     ) -> AsyncGenerator[SourceRecord, None]:
         source_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=prefetch_limit)
-        _has_delivery_hook = isinstance(self.source, DeliveryHookSource)
+        checkpoint_capable = is_checkpoint_capable(self.source)
+        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
 
         async def _pump_source() -> None:
             try:
@@ -225,12 +241,10 @@ class SourceRuntimeAdapter:
                     if source_queue.full():
                         ctx.metrics.runtime.source_prefetch_block_count += 1
                     await source_queue.put(
-                        SourceRecord(
-                            raw=record,
-                            checkpoint=self.source.current_checkpoint(),
-                            on_success=cast("Any", self.source).delivery_success_callback()
-                            if _has_delivery_hook
-                            else None,
+                        self._make_source_record(
+                            record,
+                            checkpoint_capable=checkpoint_capable,
+                            has_delivery_hook=has_delivery_hook,
                         )
                     )
                     ctx.metrics.runtime.source_prefetch_max_depth = max(

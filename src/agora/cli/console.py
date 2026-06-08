@@ -302,12 +302,12 @@ class _Console:
     # agora plugins                                                        #
     # ------------------------------------------------------------------ #
 
-    def plugins_table(self, data: dict[str, list[dict[str, str]]]) -> None:
+    def plugins_table(self, data: dict[str, list[dict[str, Any]]]) -> None:
         """Render all plugins in a single unified Rich table.
 
-        ``data`` format: ``{kind: [{key, type, origin, extra, package, version, manifest, compatibility}]}``
+        ``data`` format: ``{kind: [{key, category, stability, type, origin, extra, package, version, manifest, compatibility}]}``
 
-        Columns: Key | Category | Status | Package | Version | Manifest | Install
+        Columns: Key | Category | Contract | Status | Package | Version | Manifest | Install
         """
         from rich.text import Text
 
@@ -315,6 +315,13 @@ class _Console:
             "source": ("cyan", "source"),
             "sink": ("magenta", "sink"),
             "middleware": ("yellow", "middleware"),
+            "runner": ("green", "runner"),
+            "dedup_store": ("blue", "dedup store"),
+            "dedup_strategy": ("bright_blue", "dedup strategy"),
+            "ai_provider": ("bright_magenta", "ai provider"),
+            "ai_cache": ("bright_cyan", "ai cache"),
+            "metrics_exporter": ("bright_yellow", "metrics exporter"),
+            "state_backend": ("white", "state backend"),
         }
         status_styles: dict[tuple[str, str], tuple[str, str]] = {
             ("instance", "manual"): ("bold green", "● built-in"),
@@ -338,14 +345,26 @@ class _Console:
         )
         table.add_column("Key", style="bold white", no_wrap=True, min_width=14)
         table.add_column("Category", no_wrap=True, min_width=10)
+        table.add_column("Contract", no_wrap=True, min_width=11)
         table.add_column("Status", no_wrap=True, min_width=12)
         table.add_column("Package", style="dim", no_wrap=True, min_width=16)
         table.add_column("Version", style="dim", no_wrap=True, min_width=8)
         table.add_column("Manifest", no_wrap=True, min_width=10)
         table.add_column("Install", style="dim", no_wrap=True, min_width=24)
 
-        kind_order = {"source": 0, "sink": 1, "middleware": 2}
-        flattened_rows: list[tuple[str, dict[str, str]]] = [
+        kind_order = {
+            "source": 0,
+            "sink": 1,
+            "middleware": 2,
+            "runner": 3,
+            "dedup_store": 4,
+            "dedup_strategy": 5,
+            "ai_provider": 6,
+            "ai_cache": 7,
+            "metrics_exporter": 8,
+            "state_backend": 9,
+        }
+        flattened_rows: list[tuple[str, dict[str, Any]]] = [
             (kind, row) for kind, rows in data.items() for row in rows
         ]
 
@@ -360,9 +379,12 @@ class _Console:
             status_key = (row.get("type", "instance"), row.get("origin", "manual"))
             s_style, s_label = status_styles.get(status_key, ("white", row["type"]))
             compatibility = row.get("compatibility", "n/a")
+            stability = row.get("stability", "")
+            stability_style = "bold green" if stability == "stable" else "yellow"
             table.add_row(
                 row["key"],
                 Text(k_label, style=f"bold {k_color}"),
+                Text(stability or "n/a", style=stability_style),
                 Text(s_label, style=s_style),
                 row.get("package", ""),
                 row.get("version", ""),

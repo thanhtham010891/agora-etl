@@ -117,6 +117,45 @@ Batch and Arrow paths may change how data is grouped or represented in memory,
 but they do not change the core guarantees around ordering, checkpoint gating,
 or fail-closed delivery defaults.
 
+### Prefetch and background source work do not weaken record semantics
+
+Prefetch, background producer threads, and bounded source queues may change
+where source work happens, but they do not change the public contract for the
+records themselves.
+
+That means:
+
+- prefetched records still arrive at the sink in source order
+- prefetch does not authorize duplicate record delivery
+- a source failure still surfaces as the terminal run error after any earlier
+  already-buffered records are handled in order
+- built-in batch sources that use background producers, such as Parquet Arrow
+  batch streaming, must not duplicate rows when queue pressure and producer
+  timing interact
+
+### Lane semantics matrix
+
+The runtime has more than one execution lane, but the core guarantees do not
+fragment by lane. The matrix below is the public contract:
+
+| Guarantee | Linear | Buffered | Batch | Arrow batch chain |
+|---|---|---|---|---|
+| Source order is preserved at the sink boundary | Yes | Yes | Yes | Yes |
+| Checkpoint advancement waits for a handled outcome | Yes | Yes | Yes | Yes |
+| `FAIL_CLOSED` sink delivery is the default | Yes | Yes | Yes | Yes |
+| Successful DLQ routing keeps the run moving under the active policy | Yes | Yes | Yes | Yes |
+| Cancellation/shutdown does not commit later items ahead of earlier ones | Yes | Yes | Yes | Yes |
+
+Notes:
+
+- Arrow execution is still part of the batch lane. Its special property is the
+  in-memory representation, not weaker delivery semantics.
+- Buffered execution may resolve work concurrently, but commit still follows
+  source order.
+- Batch and Arrow paths may route middleware failures with lane-specific stage
+  metadata such as `batch_middleware`, but checkpoint and delivery rules remain
+  aligned to handled outcomes.
+
 ### Process-isolated batch middleware keeps the same commit contract
 
 `ProcessBatchMiddleware` runs the batch transform in a separate worker process,
@@ -171,6 +210,21 @@ When the runtime writes a batch:
 
 That means a successful record in the same write batch as a failed record can
 still be committed and checkpointed under the active policy.
+
+### Source delivery hooks follow durable sink-side handling
+
+If a source implements `delivery_success_callback()`, Agora treats that callback
+as a post-delivery hook, not a mere "record was seen" hook.
+
+For sink-side outcomes, this means:
+
+- the callback runs after a successful sink write
+- the callback runs after a sink failure that was successfully routed to the DLQ
+- the callback does not run for a sink failure that only continues because of
+  `SinkFailurePolicy.LOG_AND_CONTINUE` without a DLQ route
+
+This keeps source acknowledgements aligned to durable downstream handling rather
+than policy-only continuation.
 
 ## Guaranteed checkpoint behavior
 
@@ -251,6 +305,15 @@ When DLQ routing is enabled, Agora writes a `DLQRecord` containing:
 - original record
 - processed record when relevant
 - middleware or sink metadata when available
+
+Source-side failures follow the same structured-DLQ contract when the runtime
+can identify the failure boundary precisely:
+
+- source stream failures use `stage="source_stream"`
+- record-scoped source failures use `stage="source_record"`
+
+In both cases, DLQ routing does not replace the original source exception as
+the terminal reason for the run.
 
 ### DLQ failure policy is independent and explicit
 

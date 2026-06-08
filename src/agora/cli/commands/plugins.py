@@ -1,7 +1,6 @@
 """agora/cli/commands/plugins.py — ``agora plugins list``
 
-Lists all built-in and third-party plugin registrations for:
-  sources, sinks, middlewares.
+Lists all public built-in and third-party plugin registrations.
 
 Usage::
 
@@ -9,29 +8,34 @@ Usage::
     agora plugins list --kind source
     agora plugins list --kind sink
     agora plugins list --kind middleware
+    agora plugins list --kind runner
     agora plugins list --json
 """
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING, Any
 
 from agora.cli.commands.base import BaseCommand
 from agora.cli.console import console
+from agora.core.discovery import EntryPointGroupContract, public_entrypoint_group_contracts
 
 if TYPE_CHECKING:
     import argparse
 
     from agora.cli.context import AgoraContext
 
-_ALL_KINDS = ("source", "sink", "middleware")
+_PLUGIN_CONTRACTS = public_entrypoint_group_contracts()
+_CONTRACTS_BY_KIND = {contract.kind: contract for contract in _PLUGIN_CONTRACTS}
+_ALL_KINDS = tuple(contract.kind for contract in _PLUGIN_CONTRACTS)
 
 
 class PluginsCommand(BaseCommand):
-    """List all registered sources, sinks, and middlewares."""
+    """List all public plugin registries and their discovered items."""
 
     name = "plugins"
-    description = "List all registered sources, sinks, and middlewares."
+    description = "List all public plugin registries and their discovered items."
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
@@ -75,30 +79,27 @@ class PluginsCommand(BaseCommand):
 # ------------------------------------------------------------------ #
 
 
-def _collect(kinds: list[str]) -> dict[str, list[dict[str, str]]]:
-    """Return {kind: [{key, type, extra}]} for the requested kinds."""
-    result: dict[str, list[dict[str, str]]] = {}
-
-    if "source" in kinds:
-        from agora.sources import source_registry
-
-        result["source"] = _registry_rows(source_registry, "source")
-
-    if "sink" in kinds:
-        from agora.sinks import sink_registry
-
-        result["sink"] = _registry_rows(sink_registry, "sink")
-
-    if "middleware" in kinds:
-        from agora.middlewares import middleware_registry
-
-        result["middleware"] = _registry_rows(middleware_registry, "middleware")
+def _collect(kinds: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Return {kind: [{...row metadata...}]} for the requested kinds."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for kind in kinds:
+        contract = _CONTRACTS_BY_KIND[kind]
+        module = importlib.import_module(contract.module_path)
+        registry = getattr(module, contract.registry_attr)
+        result[kind] = _registry_rows(registry, contract)
 
     return result
 
 
-def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
+def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> list[dict[str, Any]]:
     """Convert a Registry to a list of row dicts."""
+    if isinstance(contract, str):
+        category = contract
+        contract_info = _CONTRACTS_BY_KIND.get(category)
+    else:
+        contract_info = contract
+        category = contract.kind
+
     describe_items = getattr(registry, "describe_items", None)
     if callable(describe_items):
         rows = []
@@ -111,12 +112,21 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
             rows.append(
                 {
                     "key": item.key,
+                    "category": category,
+                    "group": (
+                        item.entrypoint_group or contract_info.group
+                        if contract_info is not None
+                        else ""
+                    ),
+                    "registry": contract_info.registry_attr if contract_info is not None else "",
+                    "stability": contract_info.stability if contract_info is not None else "",
                     "type": item.type,
                     "origin": item.origin,
                     "package": item.package or "",
                     "version": item.version or "",
                     "manifest": item.agora_api_version or "",
                     "compatibility": compatibility,
+                    "capabilities": list(item.capabilities),
                     "extra": _extra_hint(item.key, item.type, category, item.origin),
                 }
             )
@@ -127,12 +137,17 @@ def _registry_rows(registry: Any, category: str) -> list[dict[str, str]]:
         rows.append(
             {
                 "key": key,
+                "category": category,
+                "group": contract_info.group if contract_info is not None else "",
+                "registry": contract_info.registry_attr if contract_info is not None else "",
+                "stability": contract_info.stability if contract_info is not None else "",
                 "type": kind,
                 "origin": "manual",
                 "package": "",
                 "version": "",
                 "manifest": "",
                 "compatibility": "n/a",
+                "capabilities": [],
                 "extra": _extra_hint(key, kind, category, "manual"),
             }
         )
@@ -183,6 +198,35 @@ _EXTRA_HINTS: dict[str, dict[str, str]] = {
         "ai_extract": "AI provider plugin",
         "ai_validate": "AI provider plugin",
         "ai_translate": "AI provider plugin",
+    },
+    "runner": {
+        "scheduled": "agora-etl",
+        "worker_pool": "agora-etl",
+    },
+    "dedup_store": {
+        "memory": "agora-etl",
+        "sqlite": "agora-etl",
+        "embedding": "agora-etl",
+    },
+    "dedup_strategy": {
+        "exact": "agora-etl",
+        "fuzzy": "agora-etl",
+    },
+    "ai_provider": {
+        "gemini": "provider plugin",
+        "openai": "provider plugin",
+    },
+    "ai_cache": {
+        "memory": "agora-etl",
+        "sqlite": "agora-etl",
+        "backend": "agora-etl",
+    },
+    "metrics_exporter": {
+        "prometheus": "agora-etl",
+    },
+    "state_backend": {
+        "memory": "agora-etl",
+        "sqlite": "agora-etl",
     },
 }
 

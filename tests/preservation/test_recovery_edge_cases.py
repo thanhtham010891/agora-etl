@@ -39,6 +39,8 @@ from agora.core.source import BaseSource
 from agora.core.types import CheckpointFailurePolicy
 from agora.state.backend import MemoryBackend
 
+pytestmark = pytest.mark.contract
+
 # ======================================================================
 # Test fixtures
 # ======================================================================

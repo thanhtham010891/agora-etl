@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -319,6 +320,8 @@ class BufferedLaneStrategy:
         pending_tasks: dict[int, tuple[Any, SourceRecord]],
     ) -> None:
         state.pending_writes.clear()
+        with contextlib.suppress(BaseException):
+            await self.coordinator.delivery.close_pending_write_owner(state)
         await self._cancel_pending_tasks(pending_tasks)
 
     async def _cancel_pending_tasks(
@@ -366,7 +369,6 @@ class BufferedLaneStrategy:
                     current = await future
             except Exception as exc:
                 m_metrics.records_errored += 1
-                m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
                 return ProcessedSourceRecord(
                     source_record=source_record,
                     result=None,
@@ -377,8 +379,8 @@ class BufferedLaneStrategy:
                         exception=exc,
                     ),
                 )
-
-            m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
+            finally:
+                m_metrics.total_time_ms += (time.monotonic() - t0) * 1000
             if current is None:
                 m_metrics.records_dropped += 1
                 return ProcessedSourceRecord(source_record=source_record, result=None)
@@ -488,6 +490,7 @@ class BatchLaneStrategy:
                 await self._finalize_arrow_batch_result(
                     state,
                     arrow_result,
+                    raw_batch=batch,
                     checkpoint_value=checkpoint_value,
                     batch_size=batch_size,
                     arrow_writer=arrow_writer,
@@ -533,6 +536,7 @@ class BatchLaneStrategy:
         state: RunState,
         batch_result: Any,
         *,
+        raw_batch: Any,
         checkpoint_value: Any,
         batch_size: int,
         arrow_writer: Any,
@@ -541,18 +545,38 @@ class BatchLaneStrategy:
         c = self.coordinator
         metrics = state.ctx.metrics
 
+        async def _raw_rows() -> list[Any]:
+            return await asyncio.to_thread(raw_batch.to_pylist)
+
+        async def _processed_rows(batch: Any) -> list[Any]:
+            return await asyncio.to_thread(batch.to_pylist)
+
         if batch_result.failure is not None:
             metrics.records_errored += batch_size
-            if c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+            routed = True
+            if c.delivery.dlq_sink is not None:
+                for raw_record in await _raw_rows():
+                    ok = await c.delivery.write_to_dlq(
+                        ctx=state.ctx,
+                        stage="batch_middleware",
+                        exc=batch_result.failure.exception,
+                        record=raw_record,
+                        original_record=raw_record,
+                        middleware=batch_result.failure.middleware,
+                        checkpoint=checkpoint_value,
+                    )
+                    routed = routed and ok
+            if routed or c.delivery.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                state.ctx.log.exception(
+                    "arrow_batch_middleware_error",
+                    batch_size=batch_size,
+                    error=str(batch_result.failure.exception),
+                )
+                await c.delivery.save_batch_checkpoint(state, checkpoint_value, batch_size)
+            elif c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
                 raise RecordDeliveryError(
                     batch_result.failure.exception
                 ) from batch_result.failure.exception
-            state.ctx.log.exception(
-                "arrow_batch_middleware_error",
-                batch_size=batch_size,
-                error=str(batch_result.failure.exception),
-            )
-            await c.delivery.save_batch_checkpoint(state, checkpoint_value, batch_size)
             hot.flush(metrics)
             return
 
@@ -582,13 +606,29 @@ class BatchLaneStrategy:
                 hot.flush(metrics)
         except Exception as exc:
             metrics.records_errored += written_size
-            if c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+            routed = True
+            if c.delivery.dlq_sink is not None:
+                raw_rows = await _raw_rows()
+                processed_rows = await _processed_rows(out_batch)
+                for raw_record, processed_record in zip(raw_rows, processed_rows, strict=True):
+                    ok = await c.delivery.write_to_dlq(
+                        ctx=state.ctx,
+                        stage="sink_write",
+                        exc=exc,
+                        record=raw_record,
+                        original_record=raw_record,
+                        processed_record=processed_record,
+                        checkpoint=checkpoint_value,
+                    )
+                    routed = routed and ok
+            if routed or c.delivery.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                state.ctx.log.exception(
+                    "arrow_batch_write_error",
+                    batch_size=written_size,
+                    error=str(exc),
+                )
+            elif c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
                 raise RecordDeliveryError(exc) from exc
-            state.ctx.log.exception(
-                "arrow_batch_write_error",
-                batch_size=written_size,
-                error=str(exc),
-            )
 
         await c.delivery.save_batch_checkpoint(state, checkpoint_value, batch_size)
         hot.flush(metrics)
@@ -709,7 +749,7 @@ class BatchLaneStrategy:
         stage_limit = max(1, stage_limit)
         ctx.metrics.runtime.process_batch_stage_limit = stage_limit
 
-        pending_batches: dict[int, tuple[Any, int, Any]] = {}
+        pending_batches: dict[int, tuple[Any, Any, int, Any]] = {}
         next_sequence = 0
         next_commit = 0
         source_error: BaseException | None = None
@@ -725,6 +765,7 @@ class BatchLaneStrategy:
                     await self._finalize_arrow_batch_result(
                         state,
                         prefix_result,
+                        raw_batch=batch,
                         checkpoint_value=checkpoint_value,
                         batch_size=batch_size,
                         arrow_writer=arrow_writer,
@@ -736,6 +777,7 @@ class BatchLaneStrategy:
                         await self._finalize_arrow_batch_result(
                             state,
                             prefix_result,
+                            raw_batch=batch,
                             checkpoint_value=checkpoint_value,
                             batch_size=batch_size,
                             arrow_writer=arrow_writer,
@@ -744,6 +786,7 @@ class BatchLaneStrategy:
                     else:
                         pending_batches[next_sequence] = (
                             await stage.middleware.submit_batch(prefix_batch, ctx),
+                            batch,
                             batch_size,
                             checkpoint_value,
                         )
@@ -897,7 +940,7 @@ class BatchLaneStrategy:
     async def _drain_ready_pipelined_arrow_batches(
         self,
         state: RunState,
-        pending_batches: dict[int, tuple[Any, int, Any]],
+        pending_batches: dict[int, tuple[Any, Any, int, Any]],
         next_commit: int,
         stage: Any,
         arrow_writer: Any,
@@ -907,13 +950,14 @@ class BatchLaneStrategy:
             entry = pending_batches.get(next_commit)
             if entry is None:
                 return next_commit
-            future, batch_size, checkpoint_value = entry
+            future, raw_batch, batch_size, checkpoint_value = entry
             if not future.done():
                 return next_commit
             pending_batches.pop(next_commit)
             await self._resolve_pipelined_arrow_batch(
                 state,
                 future,
+                raw_batch,
                 batch_size,
                 checkpoint_value,
                 stage,
@@ -925,7 +969,7 @@ class BatchLaneStrategy:
     async def _commit_next_pipelined_arrow_batch(
         self,
         state: RunState,
-        pending_batches: dict[int, tuple[Any, int, Any]],
+        pending_batches: dict[int, tuple[Any, Any, int, Any]],
         next_commit: int,
         stage: Any,
         arrow_writer: Any,
@@ -934,11 +978,12 @@ class BatchLaneStrategy:
         entry = pending_batches.get(next_commit)
         if entry is None:
             return next_commit
-        future, batch_size, checkpoint_value = entry
+        future, raw_batch, batch_size, checkpoint_value = entry
         pending_batches.pop(next_commit)
         await self._resolve_pipelined_arrow_batch(
             state,
             future,
+            raw_batch,
             batch_size,
             checkpoint_value,
             stage,
@@ -951,6 +996,7 @@ class BatchLaneStrategy:
         self,
         state: RunState,
         future: Any,
+        raw_batch: Any,
         batch_size: int,
         checkpoint_value: Any,
         stage: Any,
@@ -977,6 +1023,7 @@ class BatchLaneStrategy:
         await self._finalize_arrow_batch_result(
             state,
             batch_result,
+            raw_batch=raw_batch,
             checkpoint_value=checkpoint_value,
             batch_size=batch_size,
             arrow_writer=arrow_writer,
@@ -986,11 +1033,11 @@ class BatchLaneStrategy:
     async def _cancel_pending_batch_tasks(
         self,
         state: RunState,
-        pending_batches: dict[int, tuple[Any, Any, Any]],
+        pending_batches: dict[int, tuple[Any, ...]],
         *,
         stage: Any,
     ) -> None:
-        tasks = [future for future, _payload, _checkpoint in pending_batches.values()]
+        tasks = [entry[0] for entry in pending_batches.values()]
         pending_batches.clear()
         abort = getattr(stage.middleware, "abort_in_flight_batches", None)
         if abort is not None:

@@ -97,7 +97,17 @@ For Arrow-native sources:
 - return `DataPlane.ARROW_BATCHES` from `data_plane_spec()`
 - yield `pyarrow.RecordBatch` from `stream_batches()`
 
-You can introspect the advertised contract with:
+Use the runtime-facing helper in tests want the exact same
+validation path the planner uses:
+
+```python
+from agora import source_data_plane_spec
+
+spec = source_data_plane_spec(MyBatchSource())
+assert spec.emitted_plane is DataPlane.PYTHON_BATCHES
+```
+
+You can also introspect the advertised contract directly with:
 
 - `source.data_plane_spec().emitted_plane`
 - `source.emitted_data_plane`
@@ -105,7 +115,7 @@ You can introspect the advertised contract with:
 The public data-plane vocabulary is importable directly from `agora`:
 
 ```python
-from agora import DataPlane, SourceDataPlaneSpec
+from agora import DataPlane, SourceDataPlaneSpec, source_data_plane_spec
 ```
 
 Legacy note:
@@ -114,7 +124,9 @@ Legacy note:
 - `emits_arrow_batches`
 
 still work in `0.3.x`, but they now emit `DeprecationWarning` when Agora uses
-them to infer the source plane. Prefer `data_plane_spec()` for new code.
+them to infer the source plane. Prefer `data_plane_spec()` for new code, and
+prefer `source_data_plane_spec(source)` in tests want runtime
+equivalent validation. Legacy bool flags are planned for removal in `0.4.0`.
 
 Once a source emits Arrow batches, the middleware chain must stay internally
 consistent:

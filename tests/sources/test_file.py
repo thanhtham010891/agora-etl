@@ -476,6 +476,124 @@ class TestParquetSource:
         assert len(seen_ids) == row_count
         assert seen_ids == list(range(row_count))
 
+    async def test_stream_batches_surfaces_producer_error_when_error_enqueue_times_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pa = pytest.importorskip("pyarrow")
+        import pyarrow.dataset as ds
+
+        import agora.sources.file.parquet as parquet_module
+
+        path = tmp_path / "records.parquet"
+        batch = pa.record_batch([pa.array([1, 2])], names=["id"])
+
+        class _FakeScanner:
+            def to_batches(self):
+                yield batch
+                raise RuntimeError("producer boom")
+
+        class _FakeDataset:
+            def scanner(self, batch_size: int):
+                del batch_size
+                return _FakeScanner()
+
+        monkeypatch.setattr(ds, "dataset", lambda *args, **kwargs: _FakeDataset())
+
+        real_run_coroutine_threadsafe = parquet_module.asyncio.run_coroutine_threadsafe
+
+        class _TimeoutFuture:
+            def result(self, timeout: float | None = None) -> None:
+                del timeout
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                return True
+
+        def _patched_run_coroutine_threadsafe(coro, loop):
+            frame = getattr(coro, "cr_frame", None)
+            item = frame.f_locals.get("item") if frame is not None else None
+            if isinstance(item, Exception) or item is parquet_module._BATCH_QUEUE_DONE:
+                coro.close()
+                return _TimeoutFuture()
+            return real_run_coroutine_threadsafe(coro, loop)
+
+        monkeypatch.setattr(
+            parquet_module.asyncio,
+            "run_coroutine_threadsafe",
+            _patched_run_coroutine_threadsafe,
+        )
+
+        source = ParquetSource(path=path, row_mapper=lambda row: row, use_arrow_batches=True)
+        source.prefetch_limit = 1
+
+        stream = source.stream_batches()
+        first = await anext(stream)
+        assert first.column("id").to_pylist() == [1, 2]
+
+        with pytest.raises(RuntimeError, match="producer boom"):
+            await anext(stream)
+
+    async def test_stream_batches_does_not_swallow_producer_error_via_done_drain_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pa = pytest.importorskip("pyarrow")
+        import pyarrow.dataset as ds
+
+        import agora.sources.file.parquet as parquet_module
+
+        path = tmp_path / "records.parquet"
+        batch = pa.record_batch([pa.array([1, 2])], names=["id"])
+
+        class _FakeScanner:
+            def to_batches(self):
+                yield batch
+                raise RuntimeError("producer boom")
+
+        class _FakeDataset:
+            def scanner(self, batch_size: int):
+                del batch_size
+                return _FakeScanner()
+
+        monkeypatch.setattr(ds, "dataset", lambda *args, **kwargs: _FakeDataset())
+
+        real_run_coroutine_threadsafe = parquet_module.asyncio.run_coroutine_threadsafe
+
+        class _TimeoutFuture:
+            def result(self, timeout: float | None = None) -> None:
+                del timeout
+                raise TimeoutError
+
+            def cancel(self) -> bool:
+                return True
+
+        def _patched_run_coroutine_threadsafe(coro, loop):
+            frame = getattr(coro, "cr_frame", None)
+            item = frame.f_locals.get("item") if frame is not None else None
+            if isinstance(item, Exception):
+                coro.close()
+                return _TimeoutFuture()
+            return real_run_coroutine_threadsafe(coro, loop)
+
+        monkeypatch.setattr(
+            parquet_module.asyncio,
+            "run_coroutine_threadsafe",
+            _patched_run_coroutine_threadsafe,
+        )
+
+        source = ParquetSource(path=path, row_mapper=lambda row: row, use_arrow_batches=True)
+        source.prefetch_limit = 2
+
+        seen_ids: list[int] = []
+        with pytest.raises(RuntimeError, match="producer boom"):
+            async for out_batch in source.stream_batches():
+                seen_ids.extend(out_batch.column("id").to_pylist())
+
+        assert seen_ids == [1, 2]
+
 
 # ======================================================================
 # Tier A — batch-emit (emit_batches=True) for CSV / JSONL

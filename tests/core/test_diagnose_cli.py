@@ -36,11 +36,13 @@ def _make_args(
     *,
     checkpoint_store: str = "memory",
     dlq_path: str = "/nonexistent/path/.agora_dlq.db",
+    json_output: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         pipeline_id=pipeline_id,
         checkpoint_store=checkpoint_store,
         dlq_path=dlq_path,
+        json=json_output,
     )
 
 
@@ -268,6 +270,7 @@ def test_command_setup_parser() -> None:
 
     args = sub.parse_args(["my_pipeline"])
     assert args.pipeline_id == "my_pipeline"
+    assert args.json is False
 
 
 def test_command_setup_parser_with_options() -> None:
@@ -289,3 +292,14 @@ def test_command_setup_parser_with_options() -> None:
     assert args.pipeline_id == "my_pipeline"
     assert args.checkpoint_store == "sqlite:/tmp/test.db"
     assert args.dlq_path == "/tmp/test_dlq.db"
+
+
+def test_command_setup_parser_accepts_json() -> None:
+    cmd = DiagnoseCommand()
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    sub = subparsers.add_parser("diagnose")
+    cmd.setup_parser(sub)
+
+    args = sub.parse_args(["my_pipeline", "--json"])
+    assert args.json is True

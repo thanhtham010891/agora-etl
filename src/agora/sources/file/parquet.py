@@ -201,6 +201,7 @@ class ParquetSource(FileSource[T], Generic[T]):
         stop_event = threading.Event()
         done_event = threading.Event()
         resume_row = self._resume_row_number
+        producer_errors: list[Exception] = []
 
         def _producer() -> None:
             try:
@@ -226,16 +227,18 @@ class ParquetSource(FileSource[T], Generic[T]):
                         row_number = resume_row
 
                     row_number += len(batch)
+                    put_future = asyncio.run_coroutine_threadsafe(queue.put(batch), loop)
 
                     while not stop_event.is_set():
                         try:
-                            asyncio.run_coroutine_threadsafe(queue.put(batch), loop).result(
-                                timeout=0.05
-                            )
+                            put_future.result(timeout=0.05)
                             break
                         except TimeoutError:
                             continue
+                    else:
+                        put_future.cancel()
             except Exception as exc:
+                producer_errors.append(exc)
                 if not stop_event.is_set():
                     with contextlib.suppress(Exception):
                         asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result(timeout=1.0)
@@ -253,6 +256,7 @@ class ParquetSource(FileSource[T], Generic[T]):
         producer.start()
 
         try:
+            saw_done = False
             while True:
                 # Check done_event to avoid blocking forever if producer finished
                 if done_event.is_set() and queue.empty():
@@ -275,14 +279,20 @@ class ParquetSource(FileSource[T], Generic[T]):
                     except asyncio.QueueEmpty:
                         break
                     if extra is _BATCH_QUEUE_DONE:
-                        return
+                        saw_done = True
+                        break
                     if isinstance(extra, Exception):
                         raise extra
                     self._last_row_number += len(extra)
                     yield extra
+                if saw_done:
+                    break
         finally:
             stop_event.set()
             producer.join(timeout=5.0)
+
+        if producer_errors:
+            raise producer_errors[0]
 
     async def read_records(self) -> AsyncIterator[T]:
         try:

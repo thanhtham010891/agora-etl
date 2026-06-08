@@ -10,6 +10,7 @@ from agora.core.source import (
     SourceRuntimeMetrics,
     is_prefetch_capable,
     prefetch_limit_for,
+    source_data_plane_spec,
     source_runtime_metrics,
 )
 
@@ -103,3 +104,17 @@ def test_source_data_plane_spec_does_not_warn_for_explicit_contract() -> None:
 
     assert spec.emitted_plane is DataPlane.PYTHON_BATCHES
     assert len(record) == 0
+
+
+def test_source_data_plane_spec_rejects_invalid_base_source_contract() -> None:
+    class _InvalidSpecSource(BaseSource[int]):
+        source_name = "invalid_spec"
+
+        async def stream(self):
+            yield 1
+
+        def data_plane_spec(self):  # type: ignore[override]
+            return "python_rows"
+
+    with pytest.raises(TypeError, match="data_plane_spec\\(\\) must return SourceDataPlaneSpec"):
+        source_data_plane_spec(_InvalidSpecSource())

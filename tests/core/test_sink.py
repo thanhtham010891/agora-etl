@@ -495,6 +495,103 @@ async def test_sink_fan_out_can_run_lifecycle_concurrently(phase: str) -> None:
     await asyncio.wait_for(lifecycle_task, timeout=1.0)
 
 
+@pytest.mark.asyncio
+async def test_sink_fan_out_open_rolls_back_already_opened_sinks_on_failure() -> None:
+    events: list[str] = []
+
+    class _OpenedSink:
+        sink_name = "opened"
+
+        async def open(self) -> None:
+            events.append("opened.open")
+
+        async def write(self, record: str) -> None:
+            del record
+
+        async def flush(self) -> None:
+            events.append("opened.flush")
+
+        async def close(self) -> None:
+            events.append("opened.close")
+
+    class _FailingSink:
+        sink_name = "failing"
+
+        async def open(self) -> None:
+            events.append("failing.open")
+            raise RuntimeError("fanout open failed")
+
+        async def write(self, record: str) -> None:
+            del record
+
+        async def flush(self) -> None:
+            events.append("failing.flush")
+
+        async def close(self) -> None:
+            events.append("failing.close")
+
+    fan_out = SinkFanOut([_OpenedSink(), _FailingSink()])  # type: ignore[list-item]
+
+    with pytest.raises(RuntimeError, match="fanout open failed"):
+        await fan_out.open()
+
+    assert events == ["opened.open", "failing.open", "opened.close"]
+
+
+@pytest.mark.asyncio
+async def test_sink_router_dedupes_shared_sink_lifecycle_and_rolls_back_on_failure() -> None:
+    events: list[str] = []
+
+    class _SharedSink:
+        sink_name = "shared"
+
+        async def open(self) -> None:
+            events.append("shared.open")
+
+        async def write(self, record: str) -> None:
+            del record
+
+        async def flush(self) -> None:
+            events.append("shared.flush")
+
+        async def close(self) -> None:
+            events.append("shared.close")
+
+        def bind_context(self, ctx: object) -> None:
+            del ctx
+            events.append("shared.bind")
+
+    class _FailingSink:
+        sink_name = "failing"
+
+        async def open(self) -> None:
+            events.append("failing.open")
+            raise RuntimeError("router open failed")
+
+        async def write(self, record: str) -> None:
+            del record
+
+        async def flush(self) -> None:
+            events.append("failing.flush")
+
+        async def close(self) -> None:
+            events.append("failing.close")
+
+    shared = _SharedSink()
+    router = (
+        SinkRouter[str]()
+        .route(lambda record: record.startswith("a"), shared)
+        .route(lambda record: record.startswith("b"), shared)
+        .default(_FailingSink())
+    )
+
+    router.bind_context(object())
+    with pytest.raises(RuntimeError, match="router open failed"):
+        await router.open()
+
+    assert events == ["shared.bind", "shared.open", "failing.open", "shared.close"]
+
+
 def test_with_sink_concurrency_requires_fan_out_pipeline() -> None:
     class _CollectSink:
         sink_name = "collect"

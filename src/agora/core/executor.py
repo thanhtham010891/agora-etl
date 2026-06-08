@@ -82,8 +82,12 @@ class PipelineExecutor:
         source: BaseSource[Any],
     ) -> None:
         checkpoint_state = make_checkpoint_state()
+        source_opened = False
+        stream_error: BaseException | None = None
 
-        async with source:
+        try:
+            await source.open()
+            source_opened = True
             with state.ctx.trace_span(
                 "source.stream",
                 source=source.source_name,
@@ -101,6 +105,22 @@ class PipelineExecutor:
                     state.ctx,
                     checkpoint_state,
                 )
+        except BaseException as exc:
+            stream_error = exc
+        finally:
+            if source_opened:
+                try:
+                    await source.close()
+                except Exception as exc:
+                    if stream_error is None:
+                        raise
+                    state.ctx.log.exception(
+                        "pipeline_source_close_error_suppressed",
+                        error=str(exc),
+                    )
+
+        if stream_error is not None:
+            raise stream_error
 
     async def _handle_run_error(
         self,

@@ -66,6 +66,7 @@ When a plugin declares a `MANIFEST` with an `agora_api_version` that does not ma
 - The plugin is **not** registered in the active registry.
 - It is still recorded in diagnostics with `compatible=False`.
 - `agora plugins list` shows it as incompatible so operators can see why it was excluded.
+- `agora doctor` reports it as a compatibility warning instead of pretending the install is clean.
 - The pipeline continues to start — incompatible plugins do not abort discovery.
 
 When a plugin has no `MANIFEST`:
@@ -75,6 +76,38 @@ When a plugin has no `MANIFEST`:
 - No warning is emitted.
 
 See [Manifest Contract](manifest.md) for the full compatibility model.
+
+## Operational diagnostics
+
+Agora exposes the same plugin contract in CLI diagnostics so plugin authors and
+operators do not have to reverse-engineer discovery behavior from logs.
+
+### `agora plugins list`
+
+`agora plugins list` covers every public entry-point group on this page, not
+just sources/sinks/middlewares.
+
+The JSON form (`agora plugins list --json`) includes:
+
+- `category`
+- `group`
+- `registry`
+- `stability`
+- `origin`
+- `compatibility`
+- `manifest`
+- `capabilities`
+
+This output is intended to be stable enough for local diagnostics and contract
+tests in plugin packages.
+
+### `agora doctor`
+
+`agora doctor` checks the same public entry-point groups and distinguishes:
+
+- plugin load failures: reported as `FAIL`
+- incompatible MANIFEST versions: reported as `WARN`
+- manifestless plugins: loaded normally, but counted separately in diagnostics
 
 ## Stable base classes and protocols
 
@@ -88,6 +121,28 @@ Implement `BaseSource[T]` from `agora.core.source`. Required:
 Optional lifecycle hooks: `open()`, `close()`, `prepare_resume()`, `current_checkpoint()`.
 
 For checkpointable sources, also set `supports_checkpoint = True`. See [Recovery Support Matrix](../guides/recovery-matrix.md).
+
+### Data-plane contract for sources and sinks
+
+If a plugin source emits anything other than Python rows, or a plugin sink
+accepts anything beyond Python rows, advertise that explicitly:
+
+- sources: override `data_plane_spec()` and return `SourceDataPlaneSpec`
+- sinks: declare `accepted_data_planes` / `native_data_planes`, or override
+  `sink_capabilities()` with explicit planes
+
+For plugin tests, prefer the public helpers:
+
+```python
+from agora import sink_data_plane_spec, source_data_plane_spec
+
+source_spec = source_data_plane_spec(MySource())
+sink_spec = sink_data_plane_spec(MySink())
+```
+
+Those helpers use the same normalization and validation path the runtime uses.
+Legacy bool flags still work in `0.3.x`, but they are compatibility shims only
+and emit `DeprecationWarning` when Agora has to infer the contract from them.
 
 ### Sinks — `agora.sinks`
 

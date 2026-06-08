@@ -4,6 +4,7 @@ Release notes are versioned as separate documents so the top-level changelog can
 
 ## Releases
 
+- [0.3.1](0.3.1.md) — runtime contract hardening, recovery CLI UX, and stronger doctor/preflight diagnostics
 - [0.3.0](0.3.0.md) — process-isolated batch execution, timeout recovery, and release criteria for stable 0.3.x rollout
 - [0.2.2](0.2.2.md) — live worker observability, timed batch flushes, Kafka consumer example hardening
 - [0.2.1](0.2.1.md) — correctness hardening, 2x delivery throughput, Arrow-native CsvSink/JsonLinesSink

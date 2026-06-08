@@ -122,6 +122,15 @@ class BackendCheckpointStore(CheckpointStore):
         }
         await asyncio.to_thread(self._backend.set, self._full_key(key), payload)
 
+    async def delete(self, key: str) -> bool:
+        """Delete the stored checkpoint for *key* when present."""
+        full_key = self._full_key(key)
+        existing = await asyncio.to_thread(self._backend.get, full_key)
+        if existing is None:
+            return False
+        await asyncio.to_thread(self._backend.delete, full_key)
+        return True
+
     async def close(self) -> None:
         await asyncio.to_thread(self._backend.close)
 
