@@ -2,7 +2,7 @@
 tests/preservation/test_recovery_edge_cases.py
 ==============================================
 Recovery edge-case coverage for the contracts declared in
-``packages/agora/docs/guides/recovery-matrix.md``.
+``docs/guides/recovery-matrix.md``.
 
 These tests cover failure boundaries that are easy to break silently:
 

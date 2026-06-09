@@ -2,6 +2,21 @@
 
 _When to read this: your pipelines are running in production and you need to know whether they're healthy, how fast they're processing, and where time is being spent._
 
+## Public observability surfaces
+
+Observability is now intentionally split across a few public layers:
+
+- `PipelineRunSummary` and `PipelineMetrics` live in `agora` /
+  `agora.core.metrics`
+- run-scoped context and log/trace helpers live in `agora.core.context`
+- tracers live in `agora` / `agora.core.tracing`
+- cumulative process-level metrics live in `agora.metrics.collector`
+- health/readiness endpoints live in `agora.health`
+
+That means most application code can stay on root imports such as
+`from agora import InMemoryTracer`, while framework-level integrations can use
+the narrower domain facades directly.
+
 ## PipelineRunSummary: what each run tells you
 
 Every pipeline run returns a `PipelineRunSummary`. When running under `ScheduledPipeline`, you get this via the `on_run_complete` callback. When running a pipeline directly, it's the return value of `pipeline.run()`.
@@ -96,6 +111,10 @@ if stats is not None:
 `metrics.overall_status` gives the worst status across all pipelines. This is what the `/health` endpoint reports at the top level.
 
 You rarely need to call `MetricsCollector` directly in production — the health endpoints expose everything. It's most useful in tests and in `on_run_complete` callbacks for custom alerting logic.
+
+If you need exporter integrations, treat `agora.metrics.exporters` as the edge
+layer above the collector. The collector owns in-process stats; exporters turn
+that state into Prometheus or other monitoring outputs.
 
 ## HealthServer: the three endpoints
 
@@ -310,7 +329,9 @@ These are the signals worth wiring into your alerting system.
 
 `status == "degraded"` sustained for more than two consecutive runs — occasional failures are normal; sustained degradation is not. Alert with lower urgency.
 
-`last_error` is non-null after a run — the last run failed. Log this to your error tracker (Sentry, Datadog, etc.) with the pipeline ID and error string.
+`last_error` is non-null after a run — the last run failed. In the built-in
+health payload this string is intentionally redacted/truncated for safety, so
+use structured pipeline logs for full forensic detail.
 
 `records_errored > 0` — records went to the DLQ or were lost. If you have a DLQ, check it. If you don't, these records are gone.
 

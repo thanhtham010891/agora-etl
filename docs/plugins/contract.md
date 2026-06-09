@@ -1,6 +1,6 @@
 # Plugin Contract
 
-_When to read this: you are building a third-party plugin package and need to know which extension points are safe to build on, and what the compatibility expectations are through the `0.1.x → 0.2.x` transition._
+_When to read this: you are building a third-party plugin package and need to know which extension points are safe to build on, and what the compatibility expectations are in the current `0.3.x` public contract._
 
 This page is the single source of truth for the plugin author contract. It is the plugin-layer equivalent of [Runtime Guarantees](../guides/runtime-guarantees.md).
 
@@ -10,7 +10,7 @@ Each entry-point group carries one of three labels:
 
 | Label | Meaning |
 |---|---|
-| `stable` | Semantic preserved through `0.1.x → 0.2.x`. Changes require a major-version bump and a migration note. |
+| `stable` | Semantic preserved through the current major line. Changes require a major-version bump and a migration note. |
 | `provisional` | May change at a minor bump with a migration note in the change log. Build on these, but watch the change log. |
 | `internal` | Not part of the public contract. May change at any time without notice. |
 
@@ -56,7 +56,8 @@ A plugin package that registers under any `stable` or `provisional` group must:
 
 1. Register under the correct entry-point group in `pyproject.toml`.
 2. Implement the required base class or protocol for that group.
-3. Not import from `agora.core._internal.*` — those are internal and may change at any time.
+3. Import from documented public facades such as `agora`, `agora.core`, or
+   `agora.core.<domain>`, not underscore-prefixed support modules.
 4. Optionally declare a `MANIFEST` at the package root for compatibility diagnostics (see [Manifest Contract](manifest.md)).
 
 ## What the runtime does with incompatible plugins
@@ -68,6 +69,14 @@ When a plugin declares a `MANIFEST` with an `agora_api_version` that does not ma
 - `agora plugins list` shows it as incompatible so operators can see why it was excluded.
 - `agora doctor` reports it as a compatibility warning instead of pretending the install is clean.
 - The pipeline continues to start — incompatible plugins do not abort discovery.
+
+When a plugin declares an entry-point key that collides with an existing
+built-in/public key for that group:
+
+- The plugin is **not** allowed to override the existing registration.
+- Agora keeps the built-in/public key active.
+- `agora doctor` reports the collision as a warning so operators can fix the install instead of relying on import order.
+- `agora plugins list` keeps a diagnostics row for the skipped plugin so the active key and the rejected collision are both visible.
 
 When a plugin has no `MANIFEST`:
 
@@ -97,6 +106,7 @@ The JSON form (`agora plugins list --json`) includes:
 - `compatibility`
 - `manifest`
 - `capabilities`
+- `error` for broken entry-points or collision diagnostics that did not become active registrations
 
 This output is intended to be stable enough for local diagnostics and contract
 tests in plugin packages.
@@ -107,9 +117,35 @@ tests in plugin packages.
 
 - plugin load failures: reported as `FAIL`
 - incompatible MANIFEST versions: reported as `WARN`
+- entry-point key collisions with built-ins/public keys: reported as `WARN`
 - manifestless plugins: loaded normally, but counted separately in diagnostics
 
 ## Stable base classes and protocols
+
+## Preferred import boundaries for plugin authors
+
+For most plugins, the safe import layers are:
+
+- `agora` when the root facade already exports the contract you need
+- `agora.core` for shared framework contracts
+- `agora.core.source`, `agora.core.sink`, `agora.core.middleware`,
+  `agora.core.checkpoint`, `agora.core.context`, `agora.core.metrics`, and
+  `agora.core.tracing` for domain-specific contracts
+- `agora.runner` for runner coordination contracts
+- `agora.state` for state backend contracts
+
+For provisional plugin groups, the following module-level contracts are also
+part of the public boundary:
+
+- `agora.ai.cache`
+- `agora.ai.providers.base`
+- `agora.core.registry` for MANIFEST compatibility binding
+- `agora.core.retry` for shared retry helpers
+- `agora.metrics.exporters`
+- `agora.middlewares.dedup.stores.base`
+
+Prefer those facades over file-level modules. They are what the architecture
+and public API tests freeze intentionally.
 
 ### Sources — `agora.sources`
 
@@ -153,6 +189,16 @@ Implement `BaseSink[T]` from `agora.core.sink`. Required:
 
 Optional: `open()`, `close()`, `flush()`, `write_batch()`.
 
+If a sink implements native batch writing, `write_batch()` may either:
+
+- behave like `BaseSink.write_batch()` and return `None` on success
+- return `list[WriteResult]` with one outcome per input record when the sink
+  can report partial per-record success/failure
+
+That second form is now part of the public batch-delivery contract and is what
+the runtime uses to preserve per-record DLQ and checkpoint behavior inside one
+batch flush.
+
 ### Middlewares — `agora.middlewares`
 
 Implement `Middleware[T, U]` from `agora.core.middleware`. Required:
@@ -160,7 +206,8 @@ Implement `Middleware[T, U]` from `agora.core.middleware`. Required:
 - `name: str` — class attribute
 - `process(record: T, ctx: PipelineContext) -> U | None` — async
 
-Optional: `start(ctx)`, `stop(ctx)`. Return `None` to drop the record.
+Optional: `on_start(ctx)`, `on_stop(ctx)`, `on_error(record, exc, ctx)`. Return
+`None` to drop the record.
 
 ### Runner — `agora.runner`
 
@@ -186,9 +233,19 @@ Implement `DedupStrategy[T, K]` from `agora.middlewares.dedup.strategies.base`. 
 
 These module paths are internal and not part of the public contract:
 
-- `agora.core._internal.*`
-- `agora.sources._internal.*`
-- `agora.core.runtime.*` (use `agora.core.executor` and `agora.core.pipeline` instead)
+- underscore-prefixed support modules under `agora.core` and
+  `agora.core.<domain>` such as:
+  - `agora.core.runtime._*`
+  - `agora.core.sink._*`
+  - `agora.core.context._*`
+  - `agora.core.metrics._*`
+- underscore-prefixed support modules under `agora.sources`, `agora.sinks`,
+  and `agora.middlewares`
+- internal helper files that are not re-exported from a documented facade
+
+`agora.core.runtime` itself is an advanced public facade, but it is still not
+the default plugin boundary. Reach for it only when building runtime-adjacent
+tooling that genuinely needs coordination-level types.
 
 Importing from internal paths may break at any minor release without notice.
 

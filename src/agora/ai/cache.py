@@ -263,3 +263,13 @@ def _backend_cache_factory(
 
 ai_cache_registry.register_factory("backend", _backend_cache_factory)  # type: ignore[arg-type]
 ai_cache_registry.load_entrypoints("agora.ai.caches")
+
+__all__ = [
+    "LLM_CACHE_DEFAULT_TTL_S",
+    "InMemoryLLMCache",
+    "LLMCache",
+    "SQLiteLLMCache",
+    "StateBackendLLMCache",
+    "ai_cache_registry",
+    "build_llm_cache",
+]

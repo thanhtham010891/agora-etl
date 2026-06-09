@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 
@@ -78,6 +80,31 @@ async def test_http_source_does_not_retry_non_transient_status() -> None:
         await source._request("GET", "https://example.test/items")
 
     assert source._client.calls == 1  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_http_source_throttles_each_retry_attempt() -> None:
+    source = _TestHTTPSource(
+        retry_policy=RetryPolicy[httpx.Response](
+            max_attempts=2,
+            initial_backoff_s=0.0,
+            retry_exceptions=(httpx.HTTPStatusError, httpx.RequestError),
+            retry_if=source_retryable_http_error,
+        )
+    )
+    source._client = _FakeHTTPClient(  # type: ignore[assignment]
+        [
+            _status_error(503),
+            httpx.Response(200, request=httpx.Request("GET", "https://example.test/items")),
+        ]
+    )
+    throttle = AsyncMock()
+    source._throttle = throttle  # type: ignore[method-assign]
+
+    response = await source._request("GET", "https://example.test/items")
+
+    assert response.status_code == 200
+    assert throttle.await_count == 2
 
 
 def source_retryable_http_error(exc: Exception) -> bool:

@@ -97,8 +97,8 @@ For Arrow-native sources:
 - return `DataPlane.ARROW_BATCHES` from `data_plane_spec()`
 - yield `pyarrow.RecordBatch` from `stream_batches()`
 
-Use the runtime-facing helper in tests want the exact same
-validation path the planner uses:
+Use the runtime-facing helper in tests when the exact same validation path as
+the planner matters:
 
 ```python
 from agora import source_data_plane_spec
@@ -125,8 +125,8 @@ Legacy note:
 
 still work in `0.3.x`, but they now emit `DeprecationWarning` when Agora uses
 them to infer the source plane. Prefer `data_plane_spec()` for new code, and
-prefer `source_data_plane_spec(source)` in tests want runtime
-equivalent validation. Legacy bool flags are planned for removal in `0.4.0`.
+prefer `source_data_plane_spec(source)` in tests when runtime-equivalent
+validation matters. Legacy bool flags are planned for removal in `0.4.0`.
 
 Once a source emits Arrow batches, the middleware chain must stay internally
 consistent:

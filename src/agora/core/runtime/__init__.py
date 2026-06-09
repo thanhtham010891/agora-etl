@@ -8,12 +8,11 @@ Submodules:
 - _buffered        — ExecutionCoordinator and shared source/runtime helpers
 """
 
-import warnings
-
 from agora.core.runtime._buffered import (
     AdaptiveBackpressureController,
     ExecutionCoordinator,
 )
+from agora.core.runtime._compat import resolve_runtime_deprecated_export
 from agora.core.runtime._delivery import (
     CheckpointedOutcome,
     CheckpointState,
@@ -34,6 +33,7 @@ from agora.core.runtime._delivery import (
 from agora.core.runtime._hot_metrics import HotPathMetrics
 from agora.core.runtime._plan import BufferedStageSpec, RuntimeLane, RuntimePlan, build_runtime_plan
 from agora.core.runtime._source_adapter import SOURCE_QUEUE_DONE, SourceRuntimeAdapter
+from agora.core.runtime._writer_transport import WriterTransport
 
 __all__ = [
     "SOURCE_QUEUE_DONE",
@@ -66,11 +66,8 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    if name == "RecordDeliveryCoordinator":
-        warnings.warn(
-            "RecordDeliveryCoordinator is deprecated; use DeliveryEngine instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return DeliveryEngine
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return resolve_runtime_deprecated_export(
+        name,
+        delivery_engine=DeliveryEngine,
+        module_name=__name__,
+    )

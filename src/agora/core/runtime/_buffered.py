@@ -5,110 +5,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from agora.core.middleware import MiddlewareFailure
-from agora.core.runtime._delivery import (
-    CheckpointState,
-    DeliveryEngine,
-    ProcessedSourceRecord,
-    RunState,
-    SourceRecord,
-)
+from agora.core.runtime._buffered_backpressure import AdaptiveBackpressureController
+from agora.core.runtime._buffered_resolver import dispatch_resolved_buffered_record
+from agora.core.runtime._buffered_rust import RUST_AVAILABLE as _RUST_AVAILABLE
+from agora.core.runtime._buffered_rust import LinearBatchBuffer
 from agora.core.runtime._lanes import BatchLaneStrategy, BufferedLaneStrategy, LinearLaneStrategy
 from agora.core.runtime._plan import RuntimeLane, RuntimePlan
 from agora.core.runtime._source_adapter import SourceRuntimeAdapter
 
-try:
-    from agora_rs import LinearBatchBuffer
-
-    try:
-        _test = LinearBatchBuffer(1, 1)
-        del _test
-        _RUST_AVAILABLE = True
-    except Exception:
-        _RUST_AVAILABLE = False
-except ImportError:
-    _RUST_AVAILABLE = False
-
-    class LinearBatchBuffer:  # type: ignore[no-redef]
-        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
-
-        def __init__(self, batch_size: int, metrics_flush_interval: int) -> None:
-            raise ImportError("agora-etl-rs is not installed.")
+__all__ = [
+    "_RUST_AVAILABLE",
+    "AdaptiveBackpressureController",
+    "ExecutionCoordinator",
+    "LinearBatchBuffer",
+]
 
 
 if TYPE_CHECKING:
     from agora.core.context import PipelineContext
     from agora.core.middleware import MiddlewareChain
+    from agora.core.runtime._delivery import CheckpointState, DeliveryEngine, RunState, SourceRecord
     from agora.core.source import BaseSource
     from agora.core.types import Backpressure
-
-
-@dataclass(slots=True)
-class AdaptiveBackpressureController:
-    """Tune buffered-stage in-flight limits from writer/checkpoint pressure."""
-
-    current_limit: int
-    min_limit: int
-    max_limit: int
-    scale_up_step: int
-    scale_down_step: int
-    writer_slow_ms: float
-    checkpoint_slow_ms: float
-    last_writer_flush_count: int = 0
-    last_writer_flush_time_ms: float = 0.0
-    last_checkpoint_save_count: int = 0
-    last_checkpoint_save_time_ms: float = 0.0
-
-    def observe(self, runtime_metrics: Any, pending_count: int) -> int:
-        writer_flush_count = runtime_metrics.writer_flush_count
-        checkpoint_save_count = runtime_metrics.checkpoint_save_count
-        writer_flush_delta = writer_flush_count - self.last_writer_flush_count
-        checkpoint_save_delta = checkpoint_save_count - self.last_checkpoint_save_count
-        writer_time_delta = runtime_metrics.writer_flush_time_ms - self.last_writer_flush_time_ms
-        checkpoint_time_delta = (
-            runtime_metrics.checkpoint_save_time_ms - self.last_checkpoint_save_time_ms
-        )
-
-        self.last_writer_flush_count = writer_flush_count
-        self.last_writer_flush_time_ms = runtime_metrics.writer_flush_time_ms
-        self.last_checkpoint_save_count = checkpoint_save_count
-        self.last_checkpoint_save_time_ms = runtime_metrics.checkpoint_save_time_ms
-
-        saw_pressure_signal = writer_flush_delta > 0 or checkpoint_save_delta > 0
-        if not saw_pressure_signal:
-            return self.current_limit
-
-        writer_flush_avg = writer_time_delta / writer_flush_delta if writer_flush_delta > 0 else 0.0
-        checkpoint_save_avg = (
-            checkpoint_time_delta / checkpoint_save_delta if checkpoint_save_delta > 0 else 0.0
-        )
-
-        writer_is_slow = writer_flush_delta > 0 and writer_flush_avg >= self.writer_slow_ms
-        checkpoint_is_slow = (
-            checkpoint_save_delta > 0 and checkpoint_save_avg >= self.checkpoint_slow_ms
-        )
-        if writer_is_slow or checkpoint_is_slow:
-            next_limit = max(self.min_limit, self.current_limit - self.scale_down_step)
-            if next_limit < self.current_limit:
-                self.current_limit = next_limit
-                runtime_metrics.adaptive_backpressure_scale_down_count += 1
-            return self.current_limit
-
-        writer_fast_threshold = self.writer_slow_ms / 4 if self.writer_slow_ms > 0 else 0.0
-        checkpoint_fast_threshold = (
-            self.checkpoint_slow_ms / 4 if self.checkpoint_slow_ms > 0 else 0.0
-        )
-        writer_is_fast = writer_flush_delta == 0 or writer_flush_avg <= writer_fast_threshold
-        checkpoint_is_fast = (
-            checkpoint_save_delta == 0 or checkpoint_save_avg <= checkpoint_fast_threshold
-        )
-        backlog_saturated = pending_count >= self.current_limit
-        if backlog_saturated and writer_is_fast and checkpoint_is_fast:
-            next_limit = min(self.max_limit, self.current_limit + self.scale_up_step)
-            if next_limit > self.current_limit:
-                self.current_limit = next_limit
-                runtime_metrics.adaptive_backpressure_scale_up_count += 1
-        return self.current_limit
 
 
 @dataclass(slots=True)
@@ -172,54 +90,15 @@ class ExecutionCoordinator:
         buffered_name: str,
         source_record: SourceRecord,
     ) -> None:
-        try:
-            processed_record = await future
-        except Exception as exc:
-            state.ctx.log.exception("pipeline_buffered_stage_error", middleware=buffered_name)
-            processed_record = ProcessedSourceRecord(
-                source_record=source_record,
-                result=None,
-                failure=MiddlewareFailure(
-                    stage="buffered_middleware",
-                    record=source_record.raw,
-                    middleware=buffered_name,
-                    exception=exc,
-                ),
-            )
-
-        if not isinstance(processed_record, ProcessedSourceRecord):
-            buffered_result = processed_record
-            if buffered_result is None:
-                await self.delivery.dispatch_processed_result(
-                    state,
-                    None,
-                    source_record.raw,
-                    source_record.checkpoint,
-                    self.writer_batch_size,
-                    on_success=source_record.on_success,
-                )
-                return
-
-            final_result = await self.chain.process_range(
-                split_index + 1,
-                self.chain.middleware_count(),
-                buffered_result,
-                state.ctx,
-            )
-            processed_record = ProcessedSourceRecord(
-                source_record=source_record,
-                result=final_result.value,
-                failure=final_result.failure,
-            )
-
-        await self.delivery.dispatch_processed_result(
-            state,
-            processed_record.result,
-            processed_record.source_record.raw,
-            processed_record.source_record.checkpoint,
-            self.writer_batch_size,
-            failure=processed_record.failure,
-            on_success=processed_record.source_record.on_success,
+        await dispatch_resolved_buffered_record(
+            chain=self.chain,
+            delivery=self.delivery,
+            writer_batch_size=self.writer_batch_size,
+            state=state,
+            future=future,
+            split_index=split_index,
+            buffered_name=buffered_name,
+            source_record=source_record,
         )
 
     def sync_source_runtime_metrics(self, ctx: PipelineContext) -> None:

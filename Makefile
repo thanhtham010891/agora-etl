@@ -21,7 +21,7 @@ help:  ## Show available targets
 setup:  ## Create .venv and install all dependencies (first-time setup)
 	python3.11 -m venv $(VENV)
 	$(PIP) install --upgrade pip
-	$(PIP) install -e ".[file,dev]"
+	$(PIP) install -e ".[file,dev,benchmark]"
 
 install:  ## Install/sync dependencies into existing .venv
 	$(PIP) install -e ".[file,dev]"

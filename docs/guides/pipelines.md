@@ -20,6 +20,17 @@ dev_pipeline  = base.build(PostgresSink(dsn=dev_dsn))
 
 The chain is: `source → middlewares → writer (sink/fan-out/router)`. Nothing runs until you call `.run()`.
 
+The orchestration split behind that fluent API is now:
+
+- `Pipeline` as the immutable builder
+- `BoundPipeline` as the execution-facing facade returned by `.build()`,
+  `.fan_out()`, or `.route()`
+- executor/session/runtime support layers beneath that facade
+
+Application code normally stops at the builder and bound-pipeline layers. The
+lower layers exist so Agora can keep refactoring execution machinery without
+moving the user-facing composition API around.
+
 When you want to inspect the resolved execution shape before running, call
 `.explain()` on a built pipeline:
 
@@ -46,6 +57,10 @@ Use those reason fields when a pipeline shape is surprising. They tell
 whether the runtime chose the lane because the source was batch-capable, because
 a middleware requested concurrent `submit()` execution, or because Arrow had to
 materialize / downgrade before the writer or a sink boundary.
+
+`PipelineExplain` is the public observability-facing facade for planning. It is
+the supported way to inspect orchestration decisions; do not reach into
+`agora.core.runtime._*` support modules for that.
 
 ## Middleware chain compatibility
 

@@ -95,8 +95,8 @@ print(AGORA_PLUGIN_MANIFEST_VERSION)
 
 Older plugin packages may import `AGORA_API_VERSION` from `agora.core.registry`. This is a backward-compatible alias for `AGORA_PLUGIN_MANIFEST_VERSION` — both resolve to the same value.
 
-`AGORA_API_VERSION` is a backward-compatible alias. New plugins should use
-`AGORA_PLUGIN_MANIFEST_VERSION` directly.
+`AGORA_API_VERSION` is a backward-compatible alias. New plugins should import
+`AGORA_PLUGIN_MANIFEST_VERSION` from `agora.core.registry`.
 
 ```python
 # Old — backward-compatible alias

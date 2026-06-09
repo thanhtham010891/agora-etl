@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agora-etl"
-version = "0.3.1"
+version = "0.3.2"
 description = "Agora — async-first ETL framework for Python."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -62,12 +62,11 @@ dev = [
     "mkdocs>=1.6,<2",
 ]
 benchmark = [
-    "agora-etl[file]",
     "uvloop>=0.21,<1",
     "pyinstrument>=5.0,<6",
 ]
 all = [
-    "agora-etl[file]",
+    "agora-etl[file,benchmark]",
 ]
 
 [project.scripts]
@@ -82,35 +81,10 @@ agora = "agora.cli.main:main"
 #   [project.entry-points."agora.sources"]
 #   my_source = "my_package.sources:MySource"
 #
-# agora discovers these at runtime via:
-#   source_registry.load_entrypoints("agora.sources")
+# Built-ins stay registered in core code. These public groups are reserved for
+# external plugin distributions so `agora doctor` and runtime discovery do not
+# treat built-ins as conflicting installed plugins.
 # ======================================================================
-
-[project.entry-points."agora.sources"]
-# Built-in sources (self-registration for symmetry / testing)
-http = "agora.sources.http.http:HTTPSource"
-jsonl = "agora.sources.file.jsonlines:JsonLinesSource"
-parquet = "agora.sources.file.parquet:ParquetSource"
-csv = "agora.sources.file.csv:CsvSource"
-
-[project.entry-points."agora.sinks"]
-stdout = "agora.sinks.io.stdout:StdoutSink"
-jsonl = "agora.sinks.file.jsonlines:JsonLinesSink"
-csv = "agora.sinks.file.csv:CsvSink"
-parquet = "agora.sinks.file.parquet:ParquetSink"
-log = "agora.sinks.io.log:LogSink"
-webhook = "agora.sinks.http.webhook:WebhookSink"
-
-[project.entry-points."agora.middlewares"]
-validate = "agora.middlewares.validate:ValidateMiddleware"
-enrich = "agora.middlewares.enrich:EnrichMiddleware"
-# AI-powered middlewares (require agora-etl AI extras)
-ai_enrich = "agora.middlewares.ai.enrich:AIEnrichMiddleware"
-ai_classify = "agora.middlewares.ai.classify:AIClassifyMiddleware"
-ai_extract = "agora.middlewares.ai.extract:AIExtractMiddleware"
-ai_validate = "agora.middlewares.ai.validate:AIValidateMiddleware"
-ai_translate = "agora.middlewares.ai.translate:AITranslateMiddleware"
-ai_batch = "agora.middlewares.ai.batch:AIBatchMiddleware"
 
 [project.entry-points."agora.ai.providers"]
 # Intentionally empty — provider plugins register here
@@ -121,17 +95,6 @@ ai_batch = "agora.middlewares.ai.batch:AIBatchMiddleware"
 
 [project.entry-points."agora.metrics.exporters"]
 # Intentionally empty — metrics exporter plugins register here
-
-[project.entry-points."agora.runner"]
-scheduled = "agora.runner.scheduled:ScheduledPipeline"
-worker_pool = "agora.runner.worker:WorkerPool"
-
-[project.entry-points."agora.middlewares.dedup.stores"]
-memory = "agora.middlewares.dedup.stores.memory:InMemoryStore"
-
-[project.entry-points."agora.middlewares.dedup.strategies"]
-exact = "agora.middlewares.dedup.strategies.exact:ExactMatchStrategy"
-fuzzy = "agora.middlewares.dedup.strategies.fuzzy:FuzzyMatchStrategy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agora"]

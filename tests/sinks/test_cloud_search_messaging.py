@@ -133,7 +133,7 @@ async def test_webhook_no_retry_on_400() -> None:
 
 
 async def test_webhook_raises_after_max_retries() -> None:
-    """Always 503 raises RuntimeError after max_retries."""
+    """Always 503 raises RuntimeError after the initial attempt plus retries."""
     from unittest.mock import patch
 
     import httpx
@@ -158,7 +158,27 @@ async def test_webhook_raises_after_max_retries() -> None:
     ):
         await sink.write({"id": 1})
 
-    assert mock_client.post.call_count == 2
+    assert mock_client.post.call_count == 3
+
+
+async def test_webhook_zero_retries_still_attempts_once() -> None:
+    """max_retries=0 still performs the initial request once."""
+    import httpx
+
+    sink = WebhookSink(
+        url="https://example.com/webhook",
+        max_retries=0,
+    )
+
+    mock_client = MagicMock()
+    request = httpx.Request("POST", "https://example.com/webhook")
+    mock_client.post = AsyncMock(side_effect=httpx.RequestError("boom", request=request))
+    sink._client = mock_client  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="failed after 0 retries"):
+        await sink.write({"id": 1})
+
+    assert mock_client.post.call_count == 1
 
 
 async def test_webhook_payload_fn_called() -> None:

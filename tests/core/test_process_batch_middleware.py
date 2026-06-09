@@ -22,7 +22,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agora.core.runtime._process import ProcessBatchError, ProcessPoolRunner
+from agora.core.runtime._process import (
+    ProcessBatchError,
+    ProcessPoolRunner,
+    ProcessPoolUnavailableError,
+)
 from agora.core.runtime._process_codec import ArrowBatchCodec, BatchCodecError, PythonObjectCodec
 from agora.middlewares.process import ArrowProcessBatchMiddleware, ProcessBatchMiddleware
 
@@ -344,6 +348,21 @@ async def test_runner_uses_codec_worker_wrapper() -> None:
         runner.close()
 
 
+def test_runner_open_surfaces_process_pool_unavailable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr("agora.core.runtime._process.ProcessPoolExecutor", _boom)
+
+    runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
+
+    with pytest.raises(ProcessPoolUnavailableError, match="Process pool unavailable"):
+        runner.open()
+
+
 # ======================================================================
 # ProcessBatchMiddleware integration tests
 # ======================================================================
@@ -631,6 +650,25 @@ async def test_middleware_pool_closed_after_worker_failure() -> None:
     # on_stop must not raise despite the prior failure.
     await mw.on_stop(ctx)
     assert mw._runner is None
+
+
+@pytest.mark.asyncio
+async def test_middleware_on_start_surfaces_process_pool_unavailable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr("agora.core.runtime._process.ProcessPoolExecutor", _boom)
+
+    mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
+        fn=_double, max_workers=1, name="unavailable_pool"
+    )
+    ctx = _make_ctx()
+
+    with pytest.raises(ProcessPoolUnavailableError, match="unavailable_pool"):
+        await mw.on_start(ctx)
 
 
 # ======================================================================

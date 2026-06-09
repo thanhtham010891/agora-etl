@@ -3,7 +3,8 @@ agora/cli/commands/doctor.py
 ==============================
 ``agora doctor`` — pre-flight health check for an Agora installation.
 
-Checks (all read-only, safe to run in CI):
+Checks (preflight only; they do not execute pipelines, but they may still
+import and construct trusted project/plugin code):
 1. Python version compatibility
 2. agora-etl importability
 3. agora-etl-plugins importability (optional)
@@ -152,18 +153,45 @@ def check_entrypoint_plugins() -> CheckResult:
 
         failed: list[str] = []
         incompatible: list[str] = []
+        conflicts: list[str] = []
         loaded = 0
         manifestless = 0
         for contract in public_entrypoint_group_contracts():
+            module = importlib.import_module(contract.module_path)
+            registry = getattr(module, contract.registry_attr)
+            reserved_keys = {
+                key
+                for key, origin in getattr(registry, "_origins", {}).items()
+                if origin == "manual"
+            }
+            seen_entrypoints: dict[str, tuple[str | None, str | None]] = {}
             eps = entry_points(group=contract.group)
             for ep in eps:
+                distribution = getattr(ep, "dist", None)
+                distribution_name = getattr(distribution, "name", None)
+                distribution_version = getattr(distribution, "version", None)
+
+                if ep.name in reserved_keys:
+                    conflicts.append(
+                        f"{ep.name} [{contract.group}] conflicts with an existing built-in/public key"
+                    )
+                    continue
+
+                existing_dist = seen_entrypoints.get(ep.name)
+                if existing_dist is not None:
+                    if existing_dist != (distribution_name, distribution_version):
+                        conflicts.append(
+                            f"{ep.name} [{contract.group}] is declared by multiple installed plugins"
+                        )
+                    continue
+
+                seen_entrypoints[ep.name] = (distribution_name, distribution_version)
                 try:
                     plugin = ep.load()
-                    distribution = getattr(ep, "dist", None)
                     metadata = _coerce_manifest(
                         plugin,
-                        distribution_name=getattr(distribution, "name", None),
-                        distribution_version=getattr(distribution, "version", None),
+                        distribution_name=distribution_name,
+                        distribution_version=distribution_version,
                     )
                     if metadata is not None and metadata.get("compatible") is False:
                         incompatible.append(
@@ -183,18 +211,24 @@ def check_entrypoint_plugins() -> CheckResult:
                 name="Entry-point plugins",
                 status=Status.FAIL,
                 message=f"{len(failed)} plugin(s) failed to load",
-                detail="\n".join(failed),
+                detail="\n".join([*failed, *conflicts]),
             )
-        if incompatible:
-            detail_lines = list(incompatible)
+        if incompatible or conflicts:
+            detail_lines = [*incompatible, *conflicts]
             if manifestless:
                 detail_lines.append(
                     f"{manifestless} plugin(s) loaded without MANIFEST compatibility metadata"
                 )
+            if conflicts and incompatible:
+                message = f"{len(incompatible)} incompatible and {len(conflicts)} conflicting plugin(s) discovered"
+            elif conflicts:
+                message = f"{len(conflicts)} conflicting plugin(s) discovered"
+            else:
+                message = f"{len(incompatible)} incompatible plugin(s) discovered"
             return CheckResult(
                 name="Entry-point plugins",
                 status=Status.WARN,
-                message=f"{len(incompatible)} incompatible plugin(s) discovered",
+                message=message,
                 detail="\n".join(detail_lines),
             )
         return CheckResult(
@@ -325,6 +359,10 @@ def check_config_import_refs(
         name="Config import refs",
         status=Status.PASS,
         message=f"{len(import_paths)} import ref(s) resolved successfully",
+        detail=(
+            "Import refs execute trusted project Python objects during resolution. "
+            "Review config files like code."
+        ),
     )
 
 
@@ -388,7 +426,9 @@ def check_config_pipeline_build(
         detail=(
             f"source={pipeline_cfg.get('source', {}).get('type', 'unknown')}\n"
             f"middlewares={len(middlewares)}\n"
-            f"sinks={len(sinks)}"
+            f"sinks={len(sinks)}\n"
+            "Build-only preflight imports and constructs trusted project/plugin components "
+            "without executing the pipeline."
         ),
     )
 
@@ -735,7 +775,10 @@ class DoctorCommand(BaseCommand):
     """Run pre-flight health checks for the Agora installation."""
 
     name = "doctor"
-    description = "Check Python version, imports, plugins, config refs, and env vars."
+    description = (
+        "Preflight Python/version/plugin/config health. "
+        "Config and plugin imports are treated as trusted code."
+    )
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(

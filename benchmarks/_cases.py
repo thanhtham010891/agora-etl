@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import uvloop
+
 # ---------------------------------------------------------------------------
 # NullSink — extends BaseSink properly, zero I/O overhead
 # ---------------------------------------------------------------------------
@@ -35,10 +37,8 @@ class _NullSink:
 
         return WriteResult(written=True)
 
-    async def write_batch(self, records: list[Any]) -> tuple[list[Any], Any]:
-        from agora.core.writer import WriteResult
-
-        return [WriteResult(written=True) for _ in records], None
+    async def write_batch(self, records: list[Any]) -> None:
+        del records
 
     async def write_arrow_batch(self, batch: Any) -> None:
         pass
@@ -69,6 +69,10 @@ def _passthrough_mapper(row: dict[str, Any]) -> dict[str, Any]:
 # Case builder — returns (source, pipeline_builder, config)
 # ---------------------------------------------------------------------------
 
+_CSV_ARROW_CASES = frozenset({"arrow", "arrow_map", "arrow_filter", "arrow_to_csv"})
+_JSONL_ARROW_CASES = frozenset({"arrow", "arrow_map", "arrow_filter", "arrow_to_jsonl"})
+_PARQUET_ARROW_CASES = frozenset({"arrow", "arrow_map", "arrow_filter"})
+
 
 def _build_case(data_dir: Path, lane: str, case: str) -> Any:
     from agora import DeliveryConfig, Pipeline
@@ -77,7 +81,7 @@ def _build_case(data_dir: Path, lane: str, case: str) -> Any:
     if lane == "csv":
         from agora.sources.file import ArrowCsvSource, CsvSource
 
-        if case == "arrow":
+        if case in _CSV_ARROW_CASES:
             source = ArrowCsvSource(data_dir / "input.csv")
         elif case in ("batch_map", "batch_filter"):
             source = CsvSource(
@@ -92,7 +96,7 @@ def _build_case(data_dir: Path, lane: str, case: str) -> Any:
     elif lane == "jsonl":
         from agora.sources.file import ArrowJsonLinesSource, JsonLinesSource
 
-        if case == "arrow":
+        if case in _JSONL_ARROW_CASES:
             source = ArrowJsonLinesSource(data_dir / "input.jsonl")
         elif case in ("batch_map", "batch_filter"):
             source = JsonLinesSource(
@@ -107,7 +111,7 @@ def _build_case(data_dir: Path, lane: str, case: str) -> Any:
     elif lane == "parquet":
         from agora.sources.file import ParquetSource
 
-        if case == "arrow":
+        if case in _PARQUET_ARROW_CASES:
             # use_arrow_batches=True: yields pa.RecordBatch, no row_mapper
             source = ParquetSource(
                 data_dir / "input.parquet",
@@ -241,7 +245,8 @@ async def _run(data_dir: Path, lane: str, case: str) -> dict[str, Any]:
 
 def run_case(data_dir: str, lane: str, case: str) -> None:
     """Subprocess entry point — prints a single JSON line to stdout."""
-    result = asyncio.run(_run(Path(data_dir), lane, case))
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        result = runner.run(_run(Path(data_dir), lane, case))
     print(json.dumps(result), flush=True)
 
 

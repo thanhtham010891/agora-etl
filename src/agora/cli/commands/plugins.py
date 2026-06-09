@@ -109,6 +109,10 @@ def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> li
                 compatibility = "ok"
             elif item.compatible is False:
                 compatibility = "incompatible"
+            elif item.origin == "entrypoint_conflict":
+                compatibility = "conflict"
+            elif item.origin == "entrypoint_error":
+                compatibility = "error"
             rows.append(
                 {
                     "key": item.key,
@@ -127,6 +131,7 @@ def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> li
                     "manifest": item.agora_api_version or "",
                     "compatibility": compatibility,
                     "capabilities": list(item.capabilities),
+                    "error": item.error or "",
                     "extra": _extra_hint(item.key, item.type, category, item.origin),
                 }
             )
@@ -148,6 +153,7 @@ def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> li
                 "manifest": "",
                 "compatibility": "n/a",
                 "capabilities": [],
+                "error": "",
                 "extra": _extra_hint(key, kind, category, "manual"),
             }
         )

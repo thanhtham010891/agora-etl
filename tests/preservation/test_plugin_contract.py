@@ -2,7 +2,7 @@
 tests/preservation/test_plugin_contract.py
 ==========================================
 Preservation tests for the plugin contract declared in
-``packages/agora/docs/plugins/contract.md``.
+``docs/plugins/contract.md``.
 
 Each test maps to one declared guarantee. If a test fails, the public
 contract is broken — fix the code, not the test.
@@ -17,6 +17,8 @@ Coverage:
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -395,3 +397,137 @@ def test_c11_describe_items_returns_registry_item_info() -> None:
             f"[CONTRACT-11] describe_items() must return RegistryItemInfo, got {type(item)}"
         )
         assert isinstance(item.key, str)
+
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+_PLUGIN_SOURCE_ROOTS = tuple(sorted((_PACKAGE_ROOT / "plugins").glob("*/src")))
+_LEGACY_PLUGIN_IMPORT_REPLACEMENTS = {
+    "agora.runner.coordinator": "agora.runner",
+    "agora.state.backend": "agora.state",
+    "agora.metrics.collector": "agora.metrics",
+    "agora.metrics.prometheus": "agora.metrics.exporters",
+}
+_BANNED_PLUGIN_IMPORT_MODULES = {
+    "agora.core.constants",
+}
+
+
+def _iter_plugin_python_files() -> list[Path]:
+    files: list[Path] = []
+    for root in _PLUGIN_SOURCE_ROOTS:
+        files.extend(sorted(root.rglob("*.py")))
+    return files
+
+
+def _is_agora_public_module(module: str) -> bool:
+    return module == "agora" or module.startswith("agora.")
+
+
+def _plugin_contract_violations() -> list[str]:
+    violations: list[str] = []
+    for path in _iter_plugin_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel_path = path.relative_to(_PACKAGE_ROOT)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if _is_agora_public_module(module) and "._" in module:
+                    violations.append(
+                        f"{rel_path}:{node.lineno} imports internal support module {module!r}"
+                    )
+                if module in _BANNED_PLUGIN_IMPORT_MODULES:
+                    violations.append(
+                        f"{rel_path}:{node.lineno} imports non-contract module {module!r}"
+                    )
+                replacement = _LEGACY_PLUGIN_IMPORT_REPLACEMENTS.get(module)
+                if replacement is not None:
+                    violations.append(
+                        f"{rel_path}:{node.lineno} imports legacy module {module!r}; "
+                        f"use {replacement!r} instead"
+                    )
+                for alias in node.names:
+                    if _is_agora_public_module(module) and alias.name.startswith("_"):
+                        violations.append(
+                            f"{rel_path}:{node.lineno} imports private symbol {module}.{alias.name}"
+                        )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    module = alias.name
+                    if _is_agora_public_module(module) and "._" in module:
+                        violations.append(
+                            f"{rel_path}:{node.lineno} imports internal support module {module!r}"
+                        )
+                    if module in _BANNED_PLUGIN_IMPORT_MODULES:
+                        violations.append(
+                            f"{rel_path}:{node.lineno} imports non-contract module {module!r}"
+                        )
+                    replacement = _LEGACY_PLUGIN_IMPORT_REPLACEMENTS.get(module)
+                    if replacement is not None:
+                        violations.append(
+                            f"{rel_path}:{node.lineno} imports legacy module {module!r}; "
+                            f"use {replacement!r} instead"
+                        )
+    return violations
+
+
+def _manifest_version_binding_violations() -> list[str]:
+    violations: list[str] = []
+    for path in _iter_plugin_python_files():
+        if path.name != "plugin.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel_path = path.relative_to(_PACKAGE_ROOT)
+        found_manifest_keyword = False
+        found_public_constant_import = False
+
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "agora.core.registry":
+                found_public_constant_import = any(
+                    alias.name == "AGORA_PLUGIN_MANIFEST_VERSION" for alias in node.names
+                )
+            if not isinstance(node, ast.Assign):
+                continue
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if node.targets[0].id != "MANIFEST" or not isinstance(node.value, ast.Call):
+                continue
+            for keyword in node.value.keywords:
+                if keyword.arg != "agora_api_version":
+                    continue
+                found_manifest_keyword = True
+                if not (
+                    isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == "AGORA_PLUGIN_MANIFEST_VERSION"
+                ):
+                    violations.append(
+                        f"{rel_path}:{node.lineno} must bind MANIFEST.agora_api_version "
+                        "to AGORA_PLUGIN_MANIFEST_VERSION"
+                    )
+
+        if found_manifest_keyword and not found_public_constant_import:
+            violations.append(
+                f"{rel_path} must import AGORA_PLUGIN_MANIFEST_VERSION from 'agora.core.registry'"
+            )
+    return violations
+
+
+def test_c12_plugin_packages_avoid_legacy_or_internal_agora_imports() -> None:
+    """[CONTRACT-12] First-party and incubating plugin packages must depend on
+    public Agora plugin boundaries rather than legacy/internal import paths.
+
+    Validates: docs/plugins/contract.md — "Preferred import boundaries for plugin authors"
+    Validates: docs/plugins/contract.md — "Internal paths — do not import"
+    """
+    violations = _plugin_contract_violations()
+    assert not violations, "[CONTRACT-12] plugin boundary violations:\n" + "\n".join(violations)
+
+
+def test_c13_plugin_manifests_bind_to_public_manifest_version_constant() -> None:
+    """[CONTRACT-13] Plugin MANIFEST declarations should read the public
+    manifest-version constant from ``agora.core`` instead of hard-coding an
+    API version string.
+
+    Validates: docs/plugins/manifest.md — "Checking the current value at runtime"
+    """
+    violations = _manifest_version_binding_violations()
+    assert not violations, "[CONTRACT-13] manifest binding violations:\n" + "\n".join(violations)

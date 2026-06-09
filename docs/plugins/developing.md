@@ -5,6 +5,10 @@ _When to read this: you are publishing a plugin package and need the concrete en
 Agora plugins are normal Python packages that register components through entry
 points.
 
+For the compatibility rules behind those entry points, read
+[Plugin Contract](contract.md) alongside this page. This page is about the
+mechanics; the contract page is about what stays stable.
+
 ## Entry-point groups
 
 | Group | Purpose |
@@ -72,6 +76,28 @@ sink = sink_registry.create("my_sink", dsn="postgresql://example/db")
 pipeline = Pipeline(source).build(sink)
 ```
 
+Prefer registry and contract imports from public facades such as:
+
+- `agora`
+- `agora.core`
+- `agora.core.source`
+- `agora.core.sink`
+- `agora.core.middleware`
+- `agora.runner`
+- `agora.state`
+
+For group-specific provisional plugins, these advanced module-level contracts
+are also part of the supported boundary:
+
+- `agora.ai.cache` for AI cache implementations
+- `agora.ai.providers.base` for AI provider response types
+- `agora.core.registry` for MANIFEST compatibility binding
+- `agora.core.retry` for shared retry policy/helpers
+- `agora.metrics.exporters` for metrics exporter protocols and registries
+- `agora.middlewares.dedup.stores.base` for dedup store contracts
+
+Avoid underscore-prefixed support modules, even if they happen to work today.
+
 ## Manifest compatibility
 
 For the full manifest contract — what `AGORA_PLUGIN_MANIFEST_VERSION` tracks,
@@ -79,8 +105,13 @@ when it bumps, and how compatibility is evaluated — see
 [Manifest Contract](manifest.md).
 
 Quick summary: declare a `MANIFEST` object at your package root with
-`agora_api_version = "0.3"` to opt into compatibility diagnostics. Without a
-`MANIFEST`, your plugin loads normally with `compatible=None`.
+`agora_api_version = AGORA_PLUGIN_MANIFEST_VERSION` to opt into compatibility
+diagnostics. Without a `MANIFEST`, your plugin loads normally with
+`compatible=None`.
+
+```python
+from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION
+```
 
 ## Authoring examples
 

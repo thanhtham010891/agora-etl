@@ -2,6 +2,41 @@
 
 _When to read this: you want the mental model behind Agora's runtime pieces, lane selection, and how records move through the system._
 
+## Public surfaces first
+
+Agora now has a deliberate public import hierarchy inside `agora-etl`:
+
+- `agora` is the builder-first convenience facade for most application code
+- `agora.core` is the stable framework-contract facade
+- `agora.core.<domain>` packages such as `source`, `sink`, `middleware`,
+  `checkpoint`, `context`, `metrics`, `tracing`, `session`, `explain`, and
+  `container` are the public domain boundaries inside the core
+- `agora.core.runtime` is an advanced coordination facade for runtime-adjacent
+  tooling, not the default import boundary for ordinary builders or plugins
+- underscore-prefixed support modules under those packages remain internal
+
+The practical rule is simple: prefer package `__init__` facades and documented
+top-level modules, not helper files.
+
+## Orchestration layers
+
+The orchestration path is now intentionally split into three layers:
+
+1. **Builder layer** — `Pipeline`, `BoundPipeline`, and the fluent methods such
+   as `.pipe()`, `.build()`, `.fan_out()`, `.route()`, `.run()`, and
+   `.explain()`
+2. **Executor facade** — `agora.core.executor`, `agora.core.session`, and
+   `agora.core.explain`, which turn a built pipeline into one concrete run
+3. **Runtime support** — `agora.core.runtime`, which owns delivery, buffering,
+   lane planning, process-batch coordination, checkpoint persistence, and other
+   lower-level machinery behind the executor
+
+That split matters for maintainability:
+
+- application code should normally stop at `agora` or `agora.core`
+- plugin code should usually depend on `agora.core.<domain>` contracts
+- runtime internals are free to keep evolving behind the executor facade
+
 ## The five components
 
 Every pipeline is composed of five parts. Understanding what each one owns makes the rest of the runtime predictable.
@@ -10,7 +45,10 @@ Every pipeline is composed of five parts. Understanding what each one owns makes
 
 **MiddlewareChain** is the ordered list of middlewares you registered with `.pipe()`. Records flow through it left to right. If any middleware returns `None`, the record is dropped and does not continue. If any middleware raises, the record is routed to the DLQ (if configured) and the chain stops for that record.
 
-**Writer** delivers processed records to one or more sinks. It handles fan-out, batching, and sink concurrency. You don't interact with it directly — `.build()`, `.fan_out()`, and `.route()` construct it for you.
+**Writer** delivers processed records to one or more sinks. It handles fan-out,
+batching, sink concurrency, and native batch write result normalization. You
+do not construct it directly — `.build()`, `.fan_out()`, and `.route()`
+assemble the writer boundary for you.
 
 **DLQSink** captures failed records. A DLQ record preserves the original payload, the processed payload (if the failure happened at the sink), the pipeline and run IDs, the error type and message, and the source checkpoint at the time of failure. Failed records can be replayed with `agora dlq replay`.
 
@@ -153,6 +191,21 @@ The full contract — what is guaranteed, what is intentionally not — lives in
 - At-least-once delivery is the model. There is no exactly-once guarantee and no transactional coupling between sink writes and the checkpoint store.
 
 For the per-source resume contract (which sources support checkpointing, what their resume position means), see the [Recovery Support Matrix](guides/recovery-matrix.md).
+
+## Observability layers
+
+Observability now follows the same facade-first split as orchestration:
+
+- `agora.core.context` owns run-scoped context and trace/log helpers
+- `agora.core.metrics` owns per-run summary types such as
+  `PipelineRunSummary`
+- `agora.core.tracing` owns tracer implementations and span behavior
+- `agora.metrics.collector` and `agora.metrics.exporters` sit at the edge for
+  cumulative stats and metric export
+- `agora.health` exposes health/readiness endpoints on top of collector state
+
+This keeps runtime signal generation in the core while leaving process-level
+health and exporter integrations at the observability edge.
 
 ## Backpressure
 

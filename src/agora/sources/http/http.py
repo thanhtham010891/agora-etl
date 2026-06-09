@@ -208,9 +208,9 @@ class HTTPSource(BaseSource[T], Generic[T]):
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Rate-limited, retried, circuit-breaker-protected HTTP request."""
-        await self._throttle()
 
         async def _do_request() -> httpx.Response:
+            await self._throttle()
             resp = await self.client.request(method, url, **kwargs)
             resp.raise_for_status()
             return resp

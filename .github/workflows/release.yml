@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
 
       - name: Validate release tag matches package version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python - <<'PY'
           import os
@@ -47,9 +47,6 @@ jobs:
 
       - name: Setup environment
         run: make setup
-
-      - name: Run CI
-        run: make ci
 
       - name: Build release distributions
         run: ./.venv/bin/hatch build

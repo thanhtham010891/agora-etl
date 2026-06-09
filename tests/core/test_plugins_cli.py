@@ -55,6 +55,7 @@ def test_plugins_command_json_output_matches_golden_contract() -> None:
                 "manifest": "",
                 "compatibility": "n/a",
                 "capabilities": [],
+                "error": "",
                 "extra": "agora-etl",
             }
         ]
@@ -69,6 +70,43 @@ def test_plugins_command_json_output_matches_golden_contract() -> None:
     assert exit_code == 0
     assert fake_console.tables == []
     assert len(fake_console.outs) == 1
+    payload = json.loads(fake_console.outs[0])
+    assert payload == collected
+
+
+def test_plugins_command_json_output_keeps_broken_entrypoint_diagnostics() -> None:
+    cmd = PluginsCommand()
+    args = argparse.Namespace(subcommand="list", kind="sink", as_json=True)
+    ctx = MagicMock()
+    fake_console = _FakeConsole()
+    collected = {
+        "sink": [
+            {
+                "key": "broken_sink",
+                "category": "sink",
+                "group": "agora.sinks",
+                "registry": "sink_registry",
+                "stability": "stable",
+                "type": "unavailable",
+                "origin": "entrypoint_error",
+                "package": "broken-plugin",
+                "version": "0.1.0",
+                "manifest": "",
+                "compatibility": "error",
+                "capabilities": [],
+                "error": "ImportError: missing optional dependency",
+                "extra": "agora-etl[all]",
+            }
+        ]
+    }
+
+    with (
+        patch("agora.cli.commands.plugins._collect", return_value=collected),
+        patch("agora.cli.commands.plugins.console", fake_console),
+    ):
+        exit_code = cmd.execute(args, ctx)
+
+    assert exit_code == 0
     payload = json.loads(fake_console.outs[0])
     assert payload == collected
 

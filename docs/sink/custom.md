@@ -106,8 +106,8 @@ Legacy note:
 
 still work in `0.3.x`, but Agora now emits `DeprecationWarning` when it has to
 infer sink planes from those booleans. Prefer explicit data planes for new
-code, and prefer `sink_data_plane_spec(sink)` in tests. Legacy bool flags are planned for removal in
-`0.4.0`.
+code, and prefer `sink_data_plane_spec(sink)` in tests. Legacy bool flags are
+planned for removal in `0.4.0`.
 
 ## Practical advice
 

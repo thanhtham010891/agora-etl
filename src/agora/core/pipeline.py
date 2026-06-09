@@ -26,33 +26,30 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
-import threading
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-import logstruct
-
+from agora.core._pipeline_support import (
+    build_sink_fanout_writer,
+    explain_pipeline,
+    normalize_delivery_config,
+    run_async_sync_bridge,
+)
 from agora.core.executor import PipelineExecutor, PipelineRuntimeSpec
-from agora.core.explain import PipelineExplain
 from agora.core.middleware import FilterMiddleware, MiddlewareChain
-from agora.core.runtime import build_runtime_plan
-from agora.core.sink import BaseSink, SinkFanOut, SinkRouter
-from agora.core.tracing import NoopTracer
 from agora.core.types import DeliveryConfig
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agora.core.context import PipelineContext
+    from agora.core.explain import PipelineExplain
     from agora.core.metrics import PipelineRunSummary
+    from agora.core.sink import BaseSink, SinkRouter
     from agora.core.source import BaseSource
     from agora.core.writer import Writer
 
 T = TypeVar("T")
 U = TypeVar("U")
-
-logger = logstruct.getLogger(__name__)
 
 
 # ======================================================================
@@ -122,10 +119,10 @@ class Pipeline(Generic[T]):
 
             sinks = [StdoutSink()]
 
-        writer: SinkFanOut[Any] = SinkFanOut(sinks)
-        if config.sink_concurrency is not None:
-            writer = writer.with_concurrency(config.sink_concurrency)
-
+        writer = build_sink_fanout_writer(
+            sinks,
+            sink_concurrency=config.sink_concurrency,
+        )
         return self._build_bound_pipeline(writer, config)
 
     def fan_out(
@@ -135,10 +132,10 @@ class Pipeline(Generic[T]):
         config: DeliveryConfig | None = None,
     ) -> BoundPipeline[Any]:
         config = config or DeliveryConfig()
-        writer: SinkFanOut[Any] = SinkFanOut(sinks)
-        if config.sink_concurrency is not None:
-            writer = writer.with_concurrency(config.sink_concurrency)
-
+        writer = build_sink_fanout_writer(
+            sinks,
+            sink_concurrency=config.sink_concurrency,
+        )
         return self._build_bound_pipeline(writer, config)
 
     def route(
@@ -182,13 +179,9 @@ class BoundPipeline(Generic[T]):
         self._chain = chain
         self._writer = writer
         self._pipeline_id = pipeline_id
-        config = config or DeliveryConfig()
-        self._config = replace(
+        self._config = normalize_delivery_config(
             config,
-            checkpoint_key=config.checkpoint_key or pipeline_id,
-            checkpoint_every=max(config.checkpoint_every, 1),
-            batch_size=max(config.batch_size, 1),
-            tracer=config.tracer or NoopTracer(),
+            pipeline_id=pipeline_id,
         )
         self._live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
 
@@ -198,9 +191,10 @@ class BoundPipeline(Generic[T]):
 
     def with_sink(self, *sinks: BaseSink[Any]) -> BoundPipeline[Any]:
         """Replace sinks (used for dry-run mode)."""
-        writer: SinkFanOut[Any] = SinkFanOut(list(sinks))
-        if self._config.sink_concurrency is not None:
-            writer = writer.with_concurrency(self._config.sink_concurrency)
+        writer = build_sink_fanout_writer(
+            list(sinks),
+            sink_concurrency=self._config.sink_concurrency,
+        )
 
         bound: BoundPipeline[Any] = BoundPipeline(
             source=self._source,
@@ -230,17 +224,13 @@ class BoundPipeline(Generic[T]):
 
     def explain(self, max_records: int | None = None) -> PipelineExplain:
         """Return the resolved runtime plan without starting the pipeline."""
-        source = self._source.limit(max_records) if max_records is not None else self._source
-        plan = build_runtime_plan(
-            source,
-            self._chain,
-            self._writer,
-            writer_batch_size=self._config.batch_size,
-        )
-        return PipelineExplain.from_runtime_plan(
+        return explain_pipeline(
+            source=self._source,
+            chain=self._chain,
+            writer=self._writer,
             pipeline_id=self._pipeline_id,
-            plan=plan,
-            source_limit=max_records,
+            config=self._config,
+            max_records=max_records,
         )
 
     async def run(
@@ -287,34 +277,4 @@ class BoundPipeline(Generic[T]):
           on the same ``BoundPipeline`` instance simultaneously.
         """
         coro = self.run(max_records=max_records, run_id=run_id)
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is None:
-            # No running loop — safe to call asyncio.run() directly.
-            return asyncio.run(coro)
-
-        # A loop is already running (Jupyter, FastAPI startup, etc.).
-        # Run the coroutine in a dedicated background thread with its own loop
-        # so we don't block or nest the caller's loop.
-        result: PipelineRunSummary | None = None
-        exc: BaseException | None = None
-
-        def _run_in_thread() -> None:
-            nonlocal result, exc
-            try:
-                result = asyncio.run(coro)
-            except BaseException as e:
-                exc = e
-
-        thread = threading.Thread(target=_run_in_thread, daemon=True)
-        thread.start()
-        thread.join()
-
-        if exc is not None:
-            raise exc
-        assert result is not None
-        return result
+        return run_async_sync_bridge(coro)

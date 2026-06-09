@@ -43,5 +43,8 @@ site/
 .cache/
 
 # Benchmark data
-benchmarks/data/
+benchmarks/_data/
+benchmarks/_result/
 *.csv
+*.jsonl
+*.json

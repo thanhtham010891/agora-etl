@@ -195,6 +195,36 @@ def test_entrypoint_plugins_warn_when_manifest_is_incompatible() -> None:
     assert "legacy_sink [agora.sinks]" in result.detail
 
 
+def test_entrypoint_plugins_warn_when_plugin_conflicts_with_builtin_key() -> None:
+    from importlib.metadata import EntryPoint
+    from types import ModuleType
+
+    stdout_ep = MagicMock(spec=EntryPoint)
+    stdout_ep.name = "stdout"
+    stdout_ep.dist = MagicMock(name="shadow-stdout-plugin", version="1.0.0")
+
+    plugin_module = ModuleType("shadow_stdout_plugin.sinks")
+
+    class ShadowStdoutSink:
+        pass
+
+    ShadowStdoutSink.__module__ = "shadow_stdout_plugin.sinks"
+    plugin_module.ShadowStdoutSink = ShadowStdoutSink
+    stdout_ep.load.return_value = ShadowStdoutSink
+
+    def _entry_points(*, group: str):
+        return [stdout_ep] if group == "agora.sinks" else []
+
+    result = None
+    with patch("importlib.metadata.entry_points", side_effect=_entry_points):
+        result = check_entrypoint_plugins()
+
+    assert result is not None
+    assert result.status == Status.WARN
+    assert "conflicting plugin" in result.message
+    assert "stdout [agora.sinks]" in result.detail
+
+
 # ======================================================================
 # check_config_import_refs
 # ======================================================================
@@ -248,6 +278,7 @@ def test_config_import_refs_pass_on_valid_ref(tmp_path: Any) -> None:
     )
     result = check_config_import_refs(str(config))
     assert result.status == Status.PASS
+    assert "trusted project Python objects" in result.detail
 
 
 def test_config_pipeline_resolution_passes_for_agora_v1(tmp_path: Any) -> None:
@@ -293,6 +324,7 @@ def test_config_pipeline_build_passes_for_valid_agora_v1(tmp_path: Any) -> None:
     )
     result = check_config_pipeline_build(str(config))
     assert result.status == Status.PASS
+    assert "trusted project/plugin components" in result.detail
 
 
 def test_config_pipeline_build_fails_when_selected_pipeline_cannot_build(tmp_path: Any) -> None:
@@ -466,6 +498,7 @@ def test_command_name_and_description() -> None:
     cmd = DoctorCommand()
     assert cmd.name == "doctor"
     assert cmd.description
+    assert "trusted code" in cmd.description
 
 
 def test_command_execute_returns_0_on_healthy_install() -> None:

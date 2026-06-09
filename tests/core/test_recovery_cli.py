@@ -3,8 +3,8 @@ tests/core/test_recovery_cli.py
 ================================
 CLI contract tests for recovery UX surfaced by:
 
-- ``packages/agora/docs/guides/checkpointing.md``
-- ``packages/agora/docs/guides/recovery-matrix.md``
+- ``docs/guides/checkpointing.md``
+- ``docs/guides/recovery-matrix.md``
 """
 
 from __future__ import annotations

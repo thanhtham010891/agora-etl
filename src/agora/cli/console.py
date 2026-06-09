@@ -285,7 +285,7 @@ class _Console:
         """Print agora version with styling."""
         _out.print(
             f"[bold cyan]agora[/bold cyan] [bold white]{version}[/bold white]  "
-            f"[dim]async ETL framework — https://pypi.org/project/agora-etl/dim]"
+            f"[dim]async ETL framework — https://pypi.org/project/agora-etl/[/dim]"
         )
 
     # ------------------------------------------------------------------ #
@@ -329,10 +329,14 @@ class _Console:
             ("factory", "manual"): ("dim cyan", "○ optional"),
             ("factory", "entrypoint"): ("cyan", "○ lazy plugin"),
             ("unavailable", "entrypoint_incompatible"): ("bold red", "x incompatible"),
+            ("unavailable", "entrypoint_conflict"): ("bold yellow", "x conflict"),
+            ("unavailable", "entrypoint_error"): ("bold red", "x load error"),
         }
         compatibility_styles: dict[str, str] = {
             "ok": "bold green",
             "incompatible": "bold red",
+            "conflict": "bold yellow",
+            "error": "bold red",
             "n/a": "dim",
         }
 

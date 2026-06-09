@@ -213,6 +213,26 @@ async def test_health_dict_includes_middleware_hotspots() -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_dict_redacts_and_truncates_last_error() -> None:
+    collector = MetricsCollector()
+    raw_error = (
+        "request failed with Authorization: Bearer very-secret-token "
+        "against postgresql://alice:super-secret@example.com/db " + ("payload " * 80)
+    )
+
+    await collector.record_run("orders", error=RuntimeError(raw_error))
+
+    health = collector.to_health_dict()
+    last_error = health["pipelines"]["orders"]["last_error"]
+
+    assert "very-secret-token" not in last_error
+    assert "super-secret" not in last_error
+    assert "Bearer ***" in last_error
+    assert "postgresql://alice:***@example.com/db" in last_error
+    assert len(last_error) <= 240
+
+
+@pytest.mark.asyncio
 async def test_prometheus_exporter_renders_runtime_observability_metrics() -> None:
     collector = MetricsCollector()
     runtime = RuntimeMetrics(

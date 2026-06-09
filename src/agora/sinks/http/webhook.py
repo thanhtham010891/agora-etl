@@ -87,6 +87,8 @@ class WebhookSink(BaseSink[T], Generic[T]):
     ) -> None:
         if not _HTTPX_AVAILABLE:
             raise ImportError("WebhookSink requires httpx. Install via: pip install agora-etl")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         self._url = url
         self._payload_fn = payload_fn or _default_payload
         self._headers = {"Content-Type": "application/json", **(headers or {})}
@@ -172,7 +174,8 @@ class WebhookSink(BaseSink[T], Generic[T]):
                 follow_redirects=True,
             )
         last_exc: Exception | None = None
-        for attempt in range(1, self._max_retries + 1):
+        max_attempts = self._max_retries + 1
+        for attempt in range(1, max_attempts + 1):
             try:
                 resp = await self._client.post(self._url, json=payload)
                 resp.raise_for_status()
@@ -186,6 +189,8 @@ class WebhookSink(BaseSink[T], Generic[T]):
                 last_exc = exc
                 status = exc.response.status_code
                 if status == 429 or status >= 500:
+                    if attempt >= max_attempts:
+                        break
                     wait = 2**attempt
                     logger.warning(
                         "webhook_sink_retry",
@@ -205,6 +210,8 @@ class WebhookSink(BaseSink[T], Generic[T]):
                     raise
             except httpx.RequestError as exc:
                 last_exc = exc
+                if attempt >= max_attempts:
+                    break
                 logger.warning(
                     "webhook_sink_request_error",
                     url=self._url,

@@ -191,6 +191,15 @@ def _parse_args() -> argparse.Namespace:
         help="Run only these lanes (csv, jsonl, parquet). Omit to run all.",
     )
     parser.add_argument(
+        "--cases",
+        nargs="*",
+        metavar="CASE",
+        help=(
+            "Run only these case names (for example: direct batch_map arrow). "
+            "Omit to run every case in the selected lanes."
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=120,
@@ -231,7 +240,17 @@ def main() -> int:
     from benchmarks._cases import ALL_CASES
     from benchmarks._runner import run_case_isolated
 
-    cases = [(lane, case) for lane, case in ALL_CASES if lane in lanes]
+    selected_cases = set(args.cases or [])
+    cases = [
+        (lane, case)
+        for lane, case in ALL_CASES
+        if lane in lanes and (not selected_cases or case in selected_cases)
+    ]
+    if not cases:
+        available_cases = ", ".join(sorted({case for _, case in ALL_CASES}))
+        raise SystemExit(
+            f"No benchmark cases matched the selected filters. Available cases: {available_cases}"
+        )
 
     # ---- run with median ----
     _print_header(rows, lanes, median)

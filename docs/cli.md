@@ -54,6 +54,10 @@ AGORA_ENV=production agora run --config pipelines.toml
 
 When used with `--config`, Agora expects an `agora/v1` TOML document.
 
+If you want to run a pipeline on top of `uvloop`, use a small Python
+entrypoint instead of the CLI and follow
+[Running Agora with uvloop](guides/uvloop.md).
+
 ## agora worker
 
 Start the `WorkerPool` from a `worker.py` module:
@@ -66,6 +70,10 @@ agora worker --health-auth-token <token> # override health auth token
 ```
 
 The module must define `get_worker() -> WorkerPool`.
+
+If you want `uvloop` for a long-lived worker process, prefer a custom
+launcher script that calls `pool.run()` inside `asyncio.Runner(...)`. See
+[Running Agora with uvloop](guides/uvloop.md).
 
 ## agora pipelines
 
@@ -100,7 +108,8 @@ agora plugins list --kind state_backend
 Incompatible entry-point plugins may appear with an incompatible status so
 operators can see why Agora did not load them. `--json` includes the public
 contract metadata for each row: category, entry-point group, registry name,
-stability, compatibility, and manifest version.
+stability, compatibility, manifest version, and load error detail for broken
+entry-points.
 
 ## agora config
 
@@ -199,6 +208,10 @@ same project import path conventions as `agora run` and checks:
 - recovery posture for the selected source
 - whether the configured DLQ backend supports `agora dlq replay`
 - public entry-point plugin compatibility, including incompatible MANIFEST versions
+
+`agora doctor` is a preflight tool, not a pipeline run, but it still imports
+trusted project and plugin code when it resolves declarative import refs or
+constructs the selected pipeline. Review config files like code.
 
 ## agora version
 

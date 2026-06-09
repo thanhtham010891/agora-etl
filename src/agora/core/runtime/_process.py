@@ -56,6 +56,20 @@ class ProcessBatchError(Exception):
         self.__cause__ = cause
 
 
+class ProcessPoolUnavailableError(RuntimeError):
+    """Process pool could not be started in the current environment."""
+
+    def __init__(self, middleware_name: str, cause: BaseException) -> None:
+        super().__init__(
+            "Process pool unavailable for "
+            f"'{middleware_name}': {type(cause).__name__}: {cause}. "
+            "This environment may block multiprocessing primitives such as "
+            "semaphores or worker process creation."
+        )
+        self.middleware_name = middleware_name
+        self.__cause__ = cause
+
+
 def _run_codec_batch(
     fn: Callable[[Any], Any],
     codec: BatchCodec,
@@ -87,7 +101,12 @@ class ProcessPoolRunner:
     _in_flight: set[asyncio.Future[list[Any]]] = field(default_factory=set, init=False, repr=False)
 
     def open(self) -> None:
-        self._pool = ProcessPoolExecutor(max_workers=self.max_workers)
+        try:
+            self._pool = ProcessPoolExecutor(max_workers=self.max_workers)
+        except Exception as exc:
+            self._closed = True
+            self._in_flight.clear()
+            raise ProcessPoolUnavailableError(self.middleware_name, exc) from exc
         self._closed = False
         self._in_flight.clear()
 

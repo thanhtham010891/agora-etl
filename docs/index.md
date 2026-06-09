@@ -19,6 +19,7 @@ agora-etl is a Python async ETL framework built around a `Source → Middleware 
 | [Quickstart](guides/quickstart.md) | Build and run a first pipeline |
 | [Pipelines](guides/pipelines.md) | Compose sources, middlewares, sinks, fan-out, and routing |
 | [Lifecycle](guides/lifecycle.md) | Learn startup, run, shutdown, worker, and replay order |
+| [Running with uvloop](guides/uvloop.md) | Opt into `uvloop` at the application entrypoint without changing core runtime semantics |
 | [Runtime Guarantees](guides/runtime-guarantees.md) | What the runtime promises under success, failure, and restart |
 | [Failure Handling](guides/failure-handling.md) | DLQ, retry, and sink failure policies |
 | [Checkpointing](guides/checkpointing.md) | Resume long-running and file-based pipelines |

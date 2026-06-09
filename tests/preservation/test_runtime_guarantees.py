@@ -2,7 +2,7 @@
 tests/preservation/test_runtime_guarantees.py
 ==============================================
 Preservation tests for the runtime guarantees declared in
-``packages/agora/docs/guides/runtime-guarantees.md``.
+``docs/guides/runtime-guarantees.md``.
 
 Each test maps to one declared guarantee. If a test fails, the public
 contract is broken — fix the code, not the test.
@@ -25,15 +25,18 @@ from agora import (
     IterableSource,
     MapMiddleware,
     Pipeline,
+    ProcessBatchMiddleware,
     SinkFailurePolicy,
 )
-from agora.core.checkpoint import is_checkpoint_capable
+from agora.core.checkpoint import Checkpoint, is_checkpoint_capable
 from agora.core.data_plane import SourceDataPlaneSpec
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource, SourceRecordError
-from agora.core.types import DLQFailurePolicy
+from agora.core.types import Backpressure, CheckpointFailurePolicy, DLQFailurePolicy
+from agora.core.writer import WriteResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agora.core.dlq import DLQRecord
@@ -104,6 +107,32 @@ class _DLQCollectSink:
 
     async def close(self) -> None:
         return None
+
+
+class _RecordingCheckpointStore(InMemoryCheckpointStore):
+    """Checkpoint store that records persisted values for cadence assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_values: list[Any] = []
+
+    async def save(self, key: str, checkpoint: Checkpoint) -> None:
+        self.saved_values.append(checkpoint.value)
+        await super().save(key, checkpoint)
+
+
+class _FailingCheckpointStore(InMemoryCheckpointStore):
+    """Checkpoint store that always fails save() and counts attempts."""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        super().__init__()
+        self._exc = exc or RuntimeError("checkpoint broke")
+        self.save_calls = 0
+
+    async def save(self, key: str, checkpoint: Checkpoint) -> None:
+        del key, checkpoint
+        self.save_calls += 1
+        raise self._exc
 
 
 class _CheckpointedSequenceSource(BaseSource[int]):
@@ -212,6 +241,43 @@ class _BufferedPassThroughMiddleware(Middleware[int, int]):
                 future.set_result(record)
 
 
+class _DelayedBufferedPassThroughMiddleware(Middleware[int, int]):
+    """Buffered middleware that resolves records independently and out of order."""
+
+    name = "delayed_buffered_passthrough"
+
+    def __init__(
+        self,
+        *,
+        delays: dict[int, float] | None = None,
+        min_concurrency: int = 4,
+    ) -> None:
+        self.min_concurrency = min_concurrency
+        self._delays = delays or {}
+
+    async def process(self, record: int, ctx: Any) -> int | None:
+        del ctx
+        return record
+
+    async def submit(self, record: int, ctx: Any) -> asyncio.Future[int | None]:
+        del ctx
+        future: asyncio.Future[int | None] = asyncio.get_running_loop().create_future()
+        resolve_task: asyncio.Task[None] | None = None
+
+        async def _resolve() -> None:
+            delay = self._delays.get(record, 0.0)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            future.set_result(record)
+
+        resolve_task = asyncio.create_task(_resolve())
+        future.add_done_callback(lambda _: resolve_task)
+        return future
+
+    async def drain_pending(self, ctx: Any) -> None:
+        del ctx
+
+
 class _FailingSource(BaseSource[int]):
     source_name = "failing_source"
     supports_checkpoint = True
@@ -316,6 +382,451 @@ class _FailingPrefetchSource(BaseSource[int]):
         raise RuntimeError("prefetch source broke")
 
 
+class _OutOfOrderBufferedMiddleware(Middleware[int, int]):
+    """Buffered middleware whose later items resolve before the head item.
+
+    The runtime must not commit later completed work ahead of earlier records,
+    even during cancellation.
+    """
+
+    name = "out_of_order_buffered"
+
+    def __init__(self) -> None:
+        self.min_concurrency = 3
+        self.all_started = asyncio.Event()
+        self.cancelled: list[int] = []
+        self._started = 0
+
+    async def process(self, record: int, ctx: Any) -> int | None:
+        del ctx
+        return record
+
+    async def submit(self, record: int, ctx: Any) -> asyncio.Task[int]:
+        del ctx
+        self._started += 1
+        if self._started >= 3:
+            self.all_started.set()
+
+        async def _resolve() -> int:
+            try:
+                if record == 1:
+                    await asyncio.Future()
+                return record * 10
+            except asyncio.CancelledError:
+                self.cancelled.append(record)
+                raise
+
+        return asyncio.create_task(_resolve())
+
+    async def drain_pending(self, ctx: Any) -> None:
+        del ctx
+
+
+# ProcessBatchMiddleware worker functions must stay module-level so they remain
+# pickleable under spawn-based multiprocessing.
+def _process_batch_double_values(
+    batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [{**row, "value": row["value"] * 2} for row in batch]
+
+
+def _process_batch_timeout_generation_then_double(
+    batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    import time
+
+    if batch and batch[0]["id"] in {"timeout", "stale"}:
+        time.sleep(3.0)
+    else:
+        time.sleep(0.2)
+    return _process_batch_double_values(batch)
+
+
+def _process_batch_very_slow_double_values(
+    batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    import time
+
+    time.sleep(5.0)
+    return _process_batch_double_values(batch)
+
+
+class _ProcessBatchSource(BaseSource[dict[str, Any]]):
+    """Checkpointable batch source used for process-batch preservation tests."""
+
+    source_name = "process_batch_preservation_source"
+    supports_checkpoint = True
+
+    def __init__(
+        self,
+        batches: list[list[dict[str, Any]]],
+        *,
+        delays: list[float] | None = None,
+    ) -> None:
+        self._batches = batches
+        self._delays = delays or [0.0] * len(batches)
+        self._next_batch_index = 0
+        self._last_batch_index = -1
+
+    def current_checkpoint(self) -> dict[str, int] | None:
+        if self._last_batch_index < 0:
+            return None
+        return {"batch_index": self._last_batch_index}
+
+    async def prepare_resume(self, checkpoint: Any) -> None:
+        if checkpoint is None:
+            self._next_batch_index = 0
+            self._last_batch_index = -1
+            return
+        next_batch_index = int(checkpoint.value["batch_index"]) + 1
+        self._next_batch_index = next_batch_index
+        self._last_batch_index = next_batch_index - 1
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
+
+    async def stream(self) -> Any:
+        async for batch in self.stream_batches():
+            for record in batch:
+                yield record
+
+    async def stream_batches(self) -> Any:  # type: ignore[override]
+        while self._next_batch_index < len(self._batches):
+            delay = self._delays[self._next_batch_index]
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last_batch_index = self._next_batch_index
+            yield self._batches[self._next_batch_index]
+            self._next_batch_index += 1
+
+
+# ======================================================================
+# [GUARANTEE-S01] Checkpoint restore happens before source open
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gs01_checkpoint_restore_happens_before_source_open() -> None:
+    """[GUARANTEE-S01] Checkpoint restore happens before source.open().
+
+    Validates: docs/guides/runtime-guarantees.md — "Checkpoint restore happens
+    before source open"
+    """
+
+    class _ResumeOrderingSource(_CheckpointedSequenceSource):
+        source_name = "resume_ordering"
+
+        def __init__(self, records: list[int], events: list[str]) -> None:
+            super().__init__(records)
+            self._events = events
+            self.prepared_checkpoint: Any = None
+
+        async def prepare_resume(self, checkpoint: Any) -> None:
+            self.prepared_checkpoint = None if checkpoint is None else checkpoint.value
+            self._events.append("prepare_resume")
+            await super().prepare_resume(checkpoint)
+
+        async def open(self) -> None:
+            self._events.append("source.open")
+            assert self.prepared_checkpoint == {"index": 1}, (
+                "[GUARANTEE-S01] prepare_resume must receive the stored checkpoint "
+                "before source.open()"
+            )
+            assert self._resume_index == 1, (
+                "[GUARANTEE-S01] resume cursor must be restored before source.open()"
+            )
+
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "resume_ordering",
+        Checkpoint(
+            pipeline_id="resume_ordering",
+            run_id="seed",
+            source="resume_ordering",
+            value={"index": 1},
+        ),
+    )
+
+    events: list[str] = []
+    sink = _CollectSink()
+
+    summary = await (
+        Pipeline(_ResumeOrderingSource([10, 20, 30, 40], events))
+        .build(sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert events == ["prepare_resume", "source.open"]
+    assert sink.records == [30, 40], (
+        "[GUARANTEE-S01] restored checkpoint must apply before streaming starts"
+    )
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 3}
+
+
+# ======================================================================
+# [GUARANTEE-S02] Middleware startup is ordered and rollback-safe
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gs02_middleware_startup_is_ordered_and_rollback_safe() -> None:
+    """[GUARANTEE-S02] Middleware startup runs in registration order and rolls
+    back safely on failure before sink/source startup begins.
+
+    Validates: docs/guides/runtime-guarantees.md — "Middleware startup is
+    ordered and rollback-safe"
+    """
+
+    events: list[str] = []
+
+    class _TrackingSource(BaseSource[int]):
+        source_name = "startup_tracking_source"
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def stream(self):
+            events.append("source.stream")
+            yield 1
+
+    class _TrackingSink:
+        sink_name = "tracking_sink"
+
+        async def open(self) -> None:
+            events.append("sink.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"sink.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("sink.flush")
+
+        async def close(self) -> None:
+            events.append("sink.close")
+
+    class _TrackingMiddleware(Middleware[int, int]):
+        name = "tracking_start"
+
+        async def on_start(self, ctx: Any) -> None:
+            del ctx
+            events.append("tracking.start")
+
+        async def on_stop(self, ctx: Any) -> None:
+            del ctx
+            events.append("tracking.stop")
+
+        async def process(self, record: int, ctx: Any) -> int | None:
+            del ctx
+            return record
+
+    class _FailingStartMiddleware(Middleware[int, int]):
+        name = "failing_start"
+
+        async def on_start(self, ctx: Any) -> None:
+            del ctx
+            events.append("failing.start")
+            raise RuntimeError("middleware start broke")
+
+        async def on_stop(self, ctx: Any) -> None:
+            del ctx
+            events.append("failing.stop")
+
+        async def process(self, record: int, ctx: Any) -> int | None:
+            del ctx
+            return record
+
+    with pytest.raises(RuntimeError, match="middleware start broke"):
+        await (
+            Pipeline(_TrackingSource())
+            .pipe(_TrackingMiddleware())
+            .pipe(_FailingStartMiddleware())
+            .build(_TrackingSink())  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert events == [
+        "tracking.start",
+        "failing.start",
+        "failing.stop",
+        "tracking.stop",
+    ], "[GUARANTEE-S02] startup failure must roll back started middlewares in reverse order"
+
+
+# ======================================================================
+# [GUARANTEE-S03] Writer/DLQ open is all-or-nothing
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gs03_writer_and_dlq_open_is_all_or_nothing_before_streaming() -> None:
+    """[GUARANTEE-S03] Writer/DLQ open failure rolls back opened sinks and
+    prevents source consumption entirely.
+
+    Validates: docs/guides/runtime-guarantees.md — "Writer/DLQ open is
+    all-or-nothing at the run boundary"
+    """
+
+    events: list[str] = []
+
+    class _TrackingSource(BaseSource[int]):
+        source_name = "open_boundary_source"
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def stream(self):
+            events.append("source.stream")
+            yield 1
+
+    class _WriterSink:
+        sink_name = "writer"
+
+        async def open(self) -> None:
+            events.append("writer.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"writer.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("writer.flush")
+
+        async def close(self) -> None:
+            events.append("writer.close")
+
+    class _FailingDLQSink:
+        sink_name = "dlq"
+
+        async def open(self) -> None:
+            events.append("dlq.open")
+            raise RuntimeError("dlq open broke")
+
+        async def write(self, record: Any) -> None:
+            events.append(f"dlq.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("dlq.flush")
+
+        async def close(self) -> None:
+            events.append("dlq.close")
+
+    with pytest.raises(RuntimeError, match="dlq open broke"):
+        await (
+            Pipeline(_TrackingSource())
+            .build(
+                _WriterSink(),
+                config=DeliveryConfig(dlq=_FailingDLQSink()),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert events == [
+        "writer.open",
+        "dlq.open",
+        "dlq.close",
+        "writer.close",
+    ], "[GUARANTEE-S03] open failure must roll back sinks before source streaming begins"
+
+
+# ======================================================================
+# [GUARANTEE-P01] Middleware ordering and short-circuit semantics
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gp01_middleware_executes_left_to_right_with_drop_and_raise_short_circuit() -> None:
+    """[GUARANTEE-P01] Middleware runs left-to-right and short-circuits on
+    drop/raise per record.
+
+    Validates: docs/guides/runtime-guarantees.md — "Middleware execution order
+    is left to right"
+    """
+
+    class _TracingMiddleware(Middleware[int, int]):
+        def __init__(
+            self,
+            name: str,
+            events: list[str],
+            *,
+            transform: Callable[[int], int],
+            drop_on: set[int] | None = None,
+            raise_on: set[int] | None = None,
+        ) -> None:
+            self.name = name
+            self._events = events
+            self._transform = transform
+            self._drop_on = drop_on or set()
+            self._raise_on = raise_on or set()
+
+        async def process(self, record: int, ctx: Any) -> int | None:
+            del ctx
+            self._events.append(f"{self.name}.in:{record}")
+            if record in self._drop_on:
+                self._events.append(f"{self.name}.drop:{record}")
+                return None
+            if record in self._raise_on:
+                self._events.append(f"{self.name}.raise:{record}")
+                raise ValueError(f"{self.name} boom on {record}")
+            result = self._transform(record)
+            self._events.append(f"{self.name}.out:{result}")
+            return result
+
+        async def on_error(self, record: int, exc: Exception, ctx: Any) -> None:
+            del ctx
+            self._events.append(f"{self.name}.on_error:{record}:{type(exc).__name__}")
+
+    events: list[str] = []
+    sink = _CollectSink()
+    dlq = _DLQCollectSink()
+
+    summary = await (
+        Pipeline(IterableSource([1, 2, 3]))
+        .pipe(_TracingMiddleware("stage_one", events, transform=lambda value: value * 10))
+        .pipe(
+            _TracingMiddleware(
+                "stage_two",
+                events,
+                transform=lambda value: value + 5,
+                drop_on={20},
+                raise_on={30},
+            )
+        )
+        .pipe(_TracingMiddleware("stage_three", events, transform=lambda value: value - 1))
+        .build(sink, config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert events == [
+        "stage_one.in:1",
+        "stage_one.out:10",
+        "stage_two.in:10",
+        "stage_two.out:15",
+        "stage_three.in:15",
+        "stage_three.out:14",
+        "stage_one.in:2",
+        "stage_one.out:20",
+        "stage_two.in:20",
+        "stage_two.drop:20",
+        "stage_one.in:3",
+        "stage_one.out:30",
+        "stage_two.in:30",
+        "stage_two.raise:30",
+        "stage_two.on_error:3:ValueError",
+    ], "[GUARANTEE-P01] middleware must execute left-to-right and short-circuit per record"
+    assert sink.records == [14]
+    assert summary.records_written == 1
+    assert summary.records_dropped == 1
+    assert summary.records_errored == 1
+    assert len(dlq.records) == 1
+    assert dlq.records[0].stage == "middleware"
+    assert dlq.records[0].middleware == "stage_two"
+
+
 # ======================================================================
 # [GUARANTEE-01] Source order — linear mode
 # ======================================================================
@@ -388,6 +899,78 @@ async def test_g03_sink_fail_closed_propagates_when_no_dlq() -> None:
 
 
 # ======================================================================
+# [GUARANTEE-D02] Sink failure policy controls record terminality
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gd02_sink_failure_policy_controls_record_terminality() -> None:
+    """[GUARANTEE-D02] Sink failure policy determines whether an unrouted sink
+    error is terminal, while a DLQ-routed failure remains non-terminal even
+    under FAIL_CLOSED.
+
+    Validates: docs/guides/runtime-guarantees.md — "Sink failure policy
+    controls whether a failed record is terminal"
+    """
+
+    fail_closed_store = InMemoryCheckpointStore()
+    with pytest.raises(RuntimeError, match="sink fail closed"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([1, 2]))
+            .build(
+                _RaisingSink(RuntimeError("sink fail closed")),
+                config=DeliveryConfig(checkpoint=fail_closed_store),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+    fail_closed_checkpoint = await fail_closed_store.load("checkpointed_sequence")
+    assert fail_closed_checkpoint is None, (
+        "[GUARANTEE-D02] FAIL_CLOSED without DLQ must stop before any checkpoint advance"
+    )
+
+    routed_store = InMemoryCheckpointStore()
+    routed_dlq = _DLQCollectSink()
+    routed_summary = await (
+        Pipeline(_CheckpointedSequenceSource([1, 2]))
+        .build(
+            _RaisingSink(RuntimeError("sink routed to dlq")),
+            config=DeliveryConfig(checkpoint=routed_store, dlq=routed_dlq),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert routed_summary.records_written == 0
+    assert routed_summary.records_errored == 2
+    assert len(routed_dlq.records) == 2
+    assert routed_summary.last_checkpoint is not None
+    assert routed_summary.last_checkpoint.value == {"index": 1}, (
+        "[GUARANTEE-D02] DLQ-routed sink failures must remain non-terminal and "
+        "advance the checkpoint under FAIL_CLOSED"
+    )
+
+    log_continue_store = InMemoryCheckpointStore()
+    log_continue_summary = await (
+        Pipeline(_CheckpointedSequenceSource([1, 2]))
+        .build(
+            _RaisingSink(RuntimeError("sink log and continue")),
+            config=DeliveryConfig(
+                checkpoint=log_continue_store,
+                sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert log_continue_summary.records_written == 0
+    assert log_continue_summary.records_errored == 2
+    assert log_continue_summary.last_checkpoint is not None
+    assert log_continue_summary.last_checkpoint.value == {"index": 1}, (
+        "[GUARANTEE-D02] LOG_AND_CONTINUE must treat unrouted sink failures as handled"
+    )
+
+
+# ======================================================================
 # [GUARANTEE-04] Checkpoint advances on success
 # ======================================================================
 
@@ -412,6 +995,61 @@ async def test_g04_checkpoint_advances_on_successful_write() -> None:
     assert summary.last_checkpoint.value == {"index": 2}, (
         "[GUARANTEE-04] checkpoint must advance to the last successfully written record"
     )
+
+
+# ======================================================================
+# [GUARANTEE-C03] Checkpoint save cadence is explicit
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gc03_checkpoint_every_controls_save_cadence_for_row_and_batch_lanes() -> None:
+    """[GUARANTEE-C03] Checkpoint persistence happens only when the configured
+    record cadence is reached, and batch lanes still count records rather than
+    batches.
+
+    Validates: docs/guides/runtime-guarantees.md — "Checkpoint save cadence is explicit"
+    """
+    row_store = _RecordingCheckpointStore()
+    row_sink = _CollectSink()
+
+    row_summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40, 50]))
+        .build(
+            row_sink,
+            config=DeliveryConfig(checkpoint=row_store, checkpoint_every=2),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert row_sink.records == [10, 20, 30, 40, 50]
+    assert row_store.saved_values == [{"index": 1}, {"index": 3}], (
+        "[GUARANTEE-C03] row-lane checkpoint saves must happen only when "
+        "checkpoint_every is reached"
+    )
+    assert row_summary.runtime.checkpoint_save_count == 2
+    assert row_summary.last_checkpoint is not None
+    assert row_summary.last_checkpoint.value == {"index": 3}
+
+    batch_store = _RecordingCheckpointStore()
+    batch_sink = _CollectSink()
+
+    batch_summary = await (
+        Pipeline(_BatchSource([[1, 2], [3], [4, 5]]))
+        .build(
+            batch_sink,
+            config=DeliveryConfig(checkpoint=batch_store, checkpoint_every=3),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert batch_sink.records == [1, 2, 3, 4, 5]
+    assert batch_store.saved_values == [{"batch_index": 1}], (
+        "[GUARANTEE-C03] batch-lane checkpoint cadence must count records, not batches"
+    )
+    assert batch_summary.runtime.checkpoint_save_count == 1
+    assert batch_summary.last_checkpoint is not None
+    assert batch_summary.last_checkpoint.value == {"batch_index": 1}
 
 
 # ======================================================================
@@ -669,6 +1307,73 @@ async def test_g12_sink_log_and_continue_advances_checkpoint() -> None:
 
 
 # ======================================================================
+# [GUARANTEE-C05] Checkpoint save failure policy is honored
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gc05a_checkpoint_save_failure_is_fail_closed_by_default() -> None:
+    """[GUARANTEE-C05a] Checkpoint save failures abort the run under the default
+    fail-closed policy.
+
+    Validates: docs/guides/runtime-guarantees.md — "Checkpoint save failure
+    policy is honored"
+    """
+
+    store = _FailingCheckpointStore()
+    sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="checkpoint broke"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([1, 2]))
+            .build(
+                sink,
+                config=DeliveryConfig(checkpoint=store),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert sink.records == [1], (
+        "[GUARANTEE-C05a] the written record may reach the sink, but the run must "
+        "stop on checkpoint save failure"
+    )
+    assert store.save_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gc05b_checkpoint_save_failure_log_and_continue_avoids_retry_storm() -> None:
+    """[GUARANTEE-C05b] Under LOG_AND_CONTINUE, save failures are logged and the
+    pipeline keeps moving without retrying the same slot endlessly.
+
+    Validates: docs/guides/runtime-guarantees.md — "Checkpoint save failure
+    policy is honored"
+    """
+
+    store = _FailingCheckpointStore()
+    sink = _CollectSink()
+
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([1, 2, 3]))
+        .build(
+            sink,
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [1, 2, 3]
+    assert store.save_calls == 3, (
+        "[GUARANTEE-C05b] each handled record should trigger at most one failed "
+        "save attempt under LOG_AND_CONTINUE"
+    )
+    assert summary.runtime.checkpoint_save_count == 0
+    assert summary.runtime.checkpoint_failure_count == 3
+
+
+# ======================================================================
 # [GUARANTEE-13] Source delivery hook runs after successful sink write
 # ======================================================================
 
@@ -853,6 +1558,124 @@ async def test_g18_cancellation_preserves_cancelled_error_despite_cleanup_failur
 
 
 # ======================================================================
+# [GUARANTEE-H02] Shutdown order is stable
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gh02_shutdown_order_is_stable_across_source_middleware_sinks_and_checkpoint() -> (
+    None
+):
+    """[GUARANTEE-H02] Shutdown order stays source -> middleware reverse order
+    -> DLQ -> writer -> checkpoint store.
+
+    Validates: docs/guides/runtime-guarantees.md — "Shutdown order is stable"
+    """
+
+    events: list[str] = []
+
+    class _CheckpointingSource(BaseSource[int]):
+        source_name = "shutdown_order_source"
+        supports_checkpoint = True
+
+        def __init__(self) -> None:
+            self._last_index = -1
+
+        async def open(self) -> None:
+            events.append("source.open")
+
+        async def close(self) -> None:
+            events.append("source.close")
+
+        def current_checkpoint(self) -> dict[str, int] | None:
+            if self._last_index < 0:
+                return None
+            return {"index": self._last_index}
+
+        async def stream(self):
+            self._last_index = 0
+            yield 1
+
+    class _TrackingMiddleware(Middleware[int, int]):
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def on_stop(self, ctx: Any) -> None:
+            del ctx
+            events.append(f"{self.name}.stop")
+
+        async def process(self, record: int, ctx: Any) -> int | None:
+            del ctx
+            return record
+
+    class _TrackingWriterSink:
+        sink_name = "writer"
+
+        async def open(self) -> None:
+            events.append("writer.open")
+
+        async def write(self, record: int) -> None:
+            events.append(f"writer.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("writer.flush")
+
+        async def close(self) -> None:
+            events.append("writer.close")
+
+    class _TrackingDLQSink:
+        sink_name = "dlq"
+
+        async def open(self) -> None:
+            events.append("dlq.open")
+
+        async def write(self, record: Any) -> None:
+            events.append(f"dlq.write:{record}")
+
+        async def flush(self) -> None:
+            events.append("dlq.flush")
+
+        async def close(self) -> None:
+            events.append("dlq.close")
+
+    class _TrackingCheckpointStore(InMemoryCheckpointStore):
+        async def close(self) -> None:
+            events.append("checkpoint.close")
+            await super().close()
+
+    store = _TrackingCheckpointStore()
+
+    summary = await (
+        Pipeline(_CheckpointingSource())
+        .pipe(_TrackingMiddleware("middleware.one"))
+        .pipe(_TrackingMiddleware("middleware.two"))
+        .build(
+            _TrackingWriterSink(),
+            config=DeliveryConfig(checkpoint=store, dlq=_TrackingDLQSink()),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_written == 1
+
+    expected_shutdown_order = [
+        "source.close",
+        "middleware.two.stop",
+        "middleware.one.stop",
+        "dlq.flush",
+        "dlq.close",
+        "writer.flush",
+        "writer.close",
+        "checkpoint.close",
+    ]
+    assert all(event in events for event in expected_shutdown_order)
+    shutdown_positions = {event: events.index(event) for event in expected_shutdown_order}
+    assert [shutdown_positions[event] for event in expected_shutdown_order] == sorted(
+        shutdown_positions.values()
+    ), "[GUARANTEE-H02] shutdown steps must preserve the documented order"
+
+
+# ======================================================================
 # [GUARANTEE-19] Prefetch preserves order and does not duplicate records
 # ======================================================================
 
@@ -949,6 +1772,14 @@ class _BatchSource(BaseSource[int]):
 
     async def prepare_resume(self, checkpoint: Any) -> None:
         return None
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
 
     async def stream_batches(self) -> Any:  # type: ignore[override]
         for i, batch in enumerate(self._batches):
@@ -1175,6 +2006,368 @@ async def test_gb04_batch_failure_routes_entire_batch_to_dlq() -> None:
     assert len(dlq.records) == 3, "[GUARANTEE-B04] all 3 records must be in DLQ"
     assert all(r.stage == "batch_middleware" for r in dlq.records)
     assert summary.records_errored == 3
+
+
+# ======================================================================
+# [GUARANTEE-D03] Batch writes preserve per-record outcome handling
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gd03_batch_write_preserves_per_record_outcomes_and_checkpointing() -> None:
+    """[GUARANTEE-D03] A mixed-success batch write still resolves outcomes per
+    record: successful records commit, failed records route to DLQ, and the
+    checkpoint advances through the handled tail.
+
+    Validates: docs/guides/runtime-guarantees.md — "Batch writes preserve
+    per-record outcome handling"
+    """
+
+    class _PartiallyFailingBatchSink:
+        sink_name = "partial_batch_sink"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+            self.batches: list[list[int]] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> WriteResult:
+            raise AssertionError(f"single-record path should not be used: {record!r}")
+
+        async def write_batch(self, records: list[int]) -> list[WriteResult]:
+            batch = list(records)
+            self.batches.append(batch)
+            self.records.extend([batch[0], batch[2]])
+            return [
+                WriteResult(written=True),
+                WriteResult(written=False, errors=[RuntimeError("second record broke")]),
+                WriteResult(written=True),
+            ]
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = InMemoryCheckpointStore()
+    dlq = _DLQCollectSink()
+    sink = _PartiallyFailingBatchSink()
+
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+        .build(
+            sink,
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_every=1,
+                dlq=dlq,
+                batch_size=3,
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.batches == [[10, 20, 30]]
+    assert sink.records == [10, 30]
+    assert summary.records_written == 2
+    assert summary.records_errored == 1
+    assert len(dlq.records) == 1
+    assert dlq.records[0].record == 20
+    assert dlq.records[0].stage == "sink_write"
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}, (
+        "[GUARANTEE-D03] handled outcomes across one batch must still allow the "
+        "checkpoint to advance through the successful tail record"
+    )
+
+
+# ======================================================================
+# [GUARANTEE-P08] Process-isolated batch middleware keeps the same commit contract
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gp08a_process_batch_sink_failure_does_not_advance_checkpoint() -> None:
+    """[GUARANTEE-P08a] Process-isolated batch work is not committed until the
+    downstream sink write succeeds in the main runtime.
+
+    Validates: docs/guides/runtime-guarantees.md — "Process-isolated batch
+    middleware keeps the same commit contract"
+    """
+
+    store = InMemoryCheckpointStore()
+
+    with pytest.raises(RuntimeError, match="batch sink boom"):
+        await (
+            Pipeline(
+                _ProcessBatchSource(
+                    [
+                        [{"id": "a", "value": 1}],
+                        [{"id": "b", "value": 2}],
+                    ]
+                ),
+                id="process_batch_sink_failure_contract",
+            )
+            .pipe(
+                ProcessBatchMiddleware(
+                    fn=_process_batch_double_values,
+                    max_workers=1,
+                    name="process_contract",
+                )
+            )
+            .build(
+                _FailingBatchSink(),  # type: ignore[arg-type]
+                config=DeliveryConfig(
+                    batch_size=10,
+                    checkpoint=store,
+                    checkpoint_every=1,
+                ),
+            )
+            .run()
+        )
+
+    checkpoint = await store.load("process_batch_sink_failure_contract")
+    assert checkpoint is None, (
+        "[GUARANTEE-P08a] checkpoint must not advance before downstream write succeeds"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gp08b_process_batch_timeout_invalidates_stale_batches_and_preserves_ordered_commit() -> (
+    None
+):
+    """[GUARANTEE-P08b] Timed-out process batches fail the whole batch, stale
+    sibling results from the recycled pool do not commit, and later batches can
+    continue in source order once handled.
+
+    Validates: docs/guides/runtime-guarantees.md — "Process-isolated batch
+    middleware keeps the same commit contract"
+    """
+
+    sink = _CollectSink()
+    dlq = _DLQCollectSink()
+    store = InMemoryCheckpointStore()
+
+    summary = await (
+        Pipeline(
+            _ProcessBatchSource(
+                [
+                    [{"id": "timeout", "value": 1}],
+                    [{"id": "stale", "value": 2}],
+                    [{"id": "ok", "value": 3}],
+                ],
+                delays=[0.0, 1.1, 0.0],
+            ),
+            id="process_batch_timeout_contract",
+        )
+        .pipe(
+            ProcessBatchMiddleware(
+                fn=_process_batch_timeout_generation_then_double,
+                max_workers=2,
+                max_in_flight_batches=2,
+                timeout_s=1.5,
+                name="process_timeout_contract",
+            )
+        )
+        .build(
+            sink,
+            config=DeliveryConfig(
+                batch_size=10,
+                checkpoint=store,
+                checkpoint_every=1,
+                dlq=dlq,
+                sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert [record.record["id"] for record in dlq.records] == ["timeout", "stale"], (
+        "[GUARANTEE-P08b] timed-out or stale sibling batches must fail as whole batches"
+    )
+    assert [record["id"] for record in sink.records] == ["ok"], (
+        "[GUARANTEE-P08b] later batches must not commit ahead of earlier failed generations"
+    )
+    assert [record["value"] for record in sink.records] == [6]
+    assert summary.records_written == 1
+    assert summary.records_errored == 2
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"batch_index": 2}, (
+        "[GUARANTEE-P08b] checkpoint must advance only through handled batch outcomes"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gp08c_process_batch_cancellation_aborts_inflight_work_promptly() -> None:
+    """[GUARANTEE-P08c] Cancelling the pipeline aborts the active process-pool
+    generation instead of waiting indefinitely for worker completion.
+
+    Validates: docs/guides/runtime-guarantees.md — "Process-isolated batch
+    middleware keeps the same commit contract"
+    """
+
+    task = asyncio.create_task(
+        Pipeline(
+            _ProcessBatchSource(
+                [
+                    [{"id": "slow-1", "value": 1}],
+                    [{"id": "slow-2", "value": 2}],
+                    [{"id": "slow-3", "value": 3}],
+                ]
+            ),
+            id="process_batch_cancel_contract",
+        )
+        .pipe(
+            ProcessBatchMiddleware(
+                fn=_process_batch_very_slow_double_values,
+                max_workers=2,
+                max_in_flight_batches=2,
+                timeout_s=30.0,
+                name="process_cancel_contract",
+            )
+        )
+        .build(_CollectSink(), config=DeliveryConfig(batch_size=10))  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.sleep(0.2)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=3.0)
+
+
+# ======================================================================
+# [GUARANTEE-H03] Buffered shutdown does not break ordering
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gh03_buffered_shutdown_does_not_commit_later_ready_results_ahead_of_blocked_head() -> (
+    None
+):
+    """[GUARANTEE-H03] During buffered cancellation, later ready results do not
+    commit ahead of an earlier blocked record.
+
+    Validates: docs/guides/runtime-guarantees.md — "Buffered work does not break
+    ordering during shutdown"
+    """
+
+    middleware = _OutOfOrderBufferedMiddleware()
+    sink = _CollectSink()
+
+    task = asyncio.create_task(
+        Pipeline(IterableSource([1, 2, 3]), id="buffered_shutdown_order_contract")
+        .pipe(middleware)
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(middleware.all_started.wait(), timeout=1.0)
+    await asyncio.sleep(0.1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sink.records == [], (
+        "[GUARANTEE-H03] buffered shutdown must not flush later completed results "
+        "ahead of the first blocked record"
+    )
+    assert 1 in middleware.cancelled
+
+
+# ======================================================================
+# [GUARANTEE-BP01] Backpressure does not relax semantics
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_gbp01_adaptive_backpressure_preserves_ordering_dlq_and_checkpoint_semantics() -> (
+    None
+):
+    """[GUARANTEE-BP01] Adaptive backpressure changes throughput only; it does
+    not relax source-order, DLQ routing, or checkpoint gating semantics.
+
+    Validates: docs/guides/runtime-guarantees.md — "Backpressure and buffering"
+    """
+
+    class _SlowCheckpointStore(_RecordingCheckpointStore):
+        async def save(self, key: str, checkpoint: Checkpoint) -> None:
+            await asyncio.sleep(0.01)
+            await super().save(key, checkpoint)
+
+    class _FailOnThreeSink:
+        sink_name = "fail_on_three"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            if record == 3:
+                raise RuntimeError("record 3 broke")
+            self.records.append(record)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = _SlowCheckpointStore()
+    dlq = _DLQCollectSink()
+    sink = _FailOnThreeSink()
+
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource(list(range(1, 13))))
+        .pipe(
+            _DelayedBufferedPassThroughMiddleware(
+                delays={
+                    1: 0.03,
+                    2: 0.02,
+                    3: 0.01,
+                },
+                min_concurrency=4,
+            )
+        )
+        .build(
+            sink,
+            config=DeliveryConfig(
+                checkpoint=store,
+                dlq=dlq,
+                backpressure=Backpressure.adaptive(
+                    max_buffer_size=6,
+                    writer_slow_ms=100.0,
+                    checkpoint_slow_ms=1.0,
+                ),
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12], (
+        "[GUARANTEE-BP01] adaptive backpressure must not let later records "
+        "commit out of source order"
+    )
+    assert summary.records_written == 11
+    assert summary.records_errored == 1
+    assert len(dlq.records) == 1
+    assert dlq.records[0].record == 3
+    assert dlq.records[0].stage == "sink_write"
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 11}, (
+        "[GUARANTEE-BP01] handled outcomes under adaptive backpressure must still "
+        "gate checkpoint advancement correctly"
+    )
+    assert summary.runtime.adaptive_backpressure_enabled is True
+    assert summary.runtime.adaptive_backpressure_scale_down_count >= 1
+    assert summary.runtime.buffered_stage_limit < 4
 
 
 # ======================================================================

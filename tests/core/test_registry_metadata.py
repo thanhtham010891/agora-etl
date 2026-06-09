@@ -175,6 +175,83 @@ def test_registry_load_entrypoints_without_manifest_keeps_distribution_metadata(
     assert item.capabilities == ()
 
 
+def test_registry_records_broken_entrypoints_in_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenEntryPoint(_FakeEntryPoint):
+        def load(self) -> object:
+            raise ImportError("missing optional dependency")
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            BrokenEntryPoint(
+                "broken_sink",
+                object(),
+                dist_name="broken-plugin",
+                dist_version="0.1.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks")
+
+    assert registry.has("broken_sink") is False
+    item = registry.describe_items()[0]
+    assert item.key == "broken_sink"
+    assert item.type == "unavailable"
+    assert item.origin == "entrypoint_error"
+    assert item.package == "broken-plugin"
+    assert item.version == "0.1.0"
+    assert item.entrypoint_group == "agora.sinks"
+    assert item.error == "ImportError: missing optional dependency"
+
+
+def test_registry_records_conflicting_entrypoints_in_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BuiltinStdout:
+        pass
+
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="shadow_stdout_plugin",
+        plugin_module_name="shadow_stdout_plugin.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "stdout",
+                plugin_cls,
+                dist_name="shadow-stdout-plugin",
+                dist_version="1.0.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.register("stdout", BuiltinStdout)
+    registry.load_entrypoints("agora.sinks")
+
+    assert registry.get("stdout") is BuiltinStdout
+    items = registry.describe_items()
+    builtin_item = next(item for item in items if item.key == "stdout" and item.origin == "manual")
+    conflict_item = next(
+        item for item in items if item.key == "stdout" and item.origin == "entrypoint_conflict"
+    )
+
+    assert builtin_item.type == "instance"
+    assert conflict_item.type == "unavailable"
+    assert conflict_item.package == "shadow-stdout-plugin"
+    assert conflict_item.version == "1.0.0"
+    assert conflict_item.entrypoint_group == "agora.sinks"
+    assert conflict_item.error == "conflicts with an existing built-in/public key"
+
+
 def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
     registry: Registry[type] = Registry(name="source")
 
@@ -230,6 +307,60 @@ def test_registry_rows_mark_incompatible_entrypoints_explicitly() -> None:
     assert rows[0]["group"] == "agora.sinks"
 
 
+def test_registry_rows_mark_broken_entrypoints_explicitly() -> None:
+    registry: Registry[type] = Registry(name="sink")
+    registry._metadata["broken_sink"] = {
+        "package": "broken-plugin",
+        "version": "0.1.0",
+        "compatible": None,
+        "load_error": "ImportError: missing optional dependency",
+    }
+    registry._origins["broken_sink"] = "entrypoint_error"
+    registry._registration_types["broken_sink"] = "unavailable"
+
+    rows = _registry_rows(
+        registry,
+        _FakeContract(
+            kind="sink",
+            group="agora.sinks",
+            registry_attr="sink_registry",
+            stability="stable",
+        ),
+    )
+
+    assert rows[0]["origin"] == "entrypoint_error"
+    assert rows[0]["compatibility"] == "error"
+    assert rows[0]["error"] == "ImportError: missing optional dependency"
+    assert rows[0]["group"] == "agora.sinks"
+
+
+def test_registry_rows_mark_conflicting_entrypoints_explicitly() -> None:
+    registry: Registry[type] = Registry(name="sink")
+    registry._metadata["stdout"] = {
+        "package": "shadow-stdout-plugin",
+        "version": "1.0.0",
+        "compatible": None,
+        "load_error": "conflicts with an existing built-in/public key",
+    }
+    registry._origins["stdout"] = "entrypoint_conflict"
+    registry._registration_types["stdout"] = "unavailable"
+
+    rows = _registry_rows(
+        registry,
+        _FakeContract(
+            kind="sink",
+            group="agora.sinks",
+            registry_attr="sink_registry",
+            stability="stable",
+        ),
+    )
+
+    assert rows[0]["origin"] == "entrypoint_conflict"
+    assert rows[0]["compatibility"] == "conflict"
+    assert rows[0]["error"] == "conflicts with an existing built-in/public key"
+    assert rows[0]["group"] == "agora.sinks"
+
+
 def test_registry_manifest_lookup_walks_up_to_parent_package(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,6 +409,73 @@ def test_registry_manifest_lookup_walks_up_to_parent_package(
     assert item.compatible is True
     assert item.entrypoint_group == "agora.sources"
     assert item.capabilities == ("source:kafka", "sink:kafka")
+
+
+def test_registry_does_not_allow_entrypoint_to_override_manual_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BuiltinStdout:
+        pass
+
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="shadow_stdout_plugin",
+        plugin_module_name="shadow_stdout_plugin.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "stdout",
+                plugin_cls,
+                dist_name="shadow-stdout-plugin",
+                dist_version="1.0.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.register("stdout", BuiltinStdout)
+
+    with caplog.at_level("WARNING"):
+        registry.load_entrypoints("agora.sinks")
+
+    assert registry.get("stdout") is BuiltinStdout
+    assert any(record.message == "registry_entrypoint_conflict" for record in caplog.records)
+
+
+def test_registry_reloading_same_entrypoint_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="repeat_plugin",
+        plugin_module_name="repeat_plugin.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "repeat_sink",
+                plugin_cls,
+                dist_name="repeat-plugin",
+                dist_version="1.0.0",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks")
+    registry.load_entrypoints("agora.sinks")
+
+    items = [item for item in registry.describe_items() if item.key == "repeat_sink"]
+    assert len(items) == 1
+    assert items[0].origin == "entrypoint"
 
 
 def test_registry_rows_are_sorted_by_key() -> None:

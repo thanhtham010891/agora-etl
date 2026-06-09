@@ -78,6 +78,7 @@ class RegistryItemInfo:
     compatible: bool | None = None
     entrypoint_group: str | None = None
     capabilities: tuple[str, ...] = ()
+    error: str | None = None
 
 
 def _coerce_manifest(
@@ -126,6 +127,8 @@ def _coerce_manifest(
         "agora_api_version": agora_api_version,
         "compatible": compatible,
         "capabilities": tuple(getattr(manifest, "capabilities", ()) or ()),
+        "distribution_name": distribution_name,
+        "distribution_version": distribution_version,
     }
 
 
@@ -155,6 +158,18 @@ class Registry(Generic[P]):
     def name(self) -> str:
         """Human-readable registry name."""
         return self._name
+
+    def _diagnostic_key(
+        self,
+        key: str,
+        *,
+        origin: str,
+        package: str | None,
+        version: str | None,
+    ) -> str:
+        package_part = package or "unknown-package"
+        version_part = version or "unknown-version"
+        return f"__diag__:{origin}:{key}:{package_part}:{version_part}"
 
     # ------------------------------------------------------------------ #
     # Registration                                                         #
@@ -333,7 +348,7 @@ class Registry(Generic[P]):
             metadata = self._metadata.get(key, {})
             items.append(
                 RegistryItemInfo(
-                    key=key,
+                    key=metadata.get("display_key", key),
                     type=self._registration_types.get(
                         key,
                         "factory"
@@ -349,6 +364,7 @@ class Registry(Generic[P]):
                     compatible=metadata.get("compatible"),
                     entrypoint_group=metadata.get("entrypoint_group"),
                     capabilities=tuple(metadata.get("capabilities", ()) or ()),
+                    error=metadata.get("load_error"),
                 )
             )
         return items
@@ -476,13 +492,80 @@ class Registry(Generic[P]):
 
         eps = entry_points(group=group)
         for ep in eps:
+            distribution = getattr(ep, "dist", None)
+            distribution_name = getattr(distribution, "name", None)
+            distribution_version = getattr(distribution, "version", None)
+            existing_origin = self._origins.get(ep.name)
+            existing_metadata = self._metadata.get(ep.name, {})
+
+            if existing_origin == "manual":
+                diagnostic_key = self._diagnostic_key(
+                    ep.name,
+                    origin="entrypoint_conflict",
+                    package=distribution_name,
+                    version=distribution_version,
+                )
+                self._metadata[diagnostic_key] = {
+                    "display_key": ep.name,
+                    "package": distribution_name,
+                    "version": distribution_version,
+                    "entrypoint_group": group,
+                    "compatible": None,
+                    "load_error": "conflicts with an existing built-in/public key",
+                }
+                self._origins[diagnostic_key] = "entrypoint_conflict"
+                self._registration_types[diagnostic_key] = "unavailable"
+                logger.warning(
+                    "registry_entrypoint_conflict",
+                    registry=self._name,
+                    group=group,
+                    name=ep.name,
+                    package=distribution_name,
+                    version=distribution_version,
+                    reason="public key already reserved by built-in/manual registration",
+                )
+                continue
+
+            if existing_origin == "entrypoint":
+                if (
+                    existing_metadata.get("entrypoint_group") == group
+                    and existing_metadata.get("distribution_name") == distribution_name
+                    and existing_metadata.get("distribution_version") == distribution_version
+                ):
+                    continue
+                diagnostic_key = self._diagnostic_key(
+                    ep.name,
+                    origin="entrypoint_conflict",
+                    package=distribution_name,
+                    version=distribution_version,
+                )
+                self._metadata[diagnostic_key] = {
+                    "display_key": ep.name,
+                    "package": distribution_name,
+                    "version": distribution_version,
+                    "entrypoint_group": group,
+                    "compatible": None,
+                    "load_error": "conflicts with another installed plugin using the same key",
+                }
+                self._origins[diagnostic_key] = "entrypoint_conflict"
+                self._registration_types[diagnostic_key] = "unavailable"
+                logger.warning(
+                    "registry_entrypoint_conflict",
+                    registry=self._name,
+                    group=group,
+                    name=ep.name,
+                    package=distribution_name,
+                    version=distribution_version,
+                    reason="entry-point key already claimed by another installed plugin",
+                )
+                continue
+
             try:
                 plugin = ep.load()
-                distribution = getattr(ep, "dist", None)
                 metadata = _coerce_manifest(
                     plugin,
-                    distribution_name=getattr(distribution, "name", None),
-                    distribution_version=getattr(distribution, "version", None),
+                    distribution_name=distribution_name,
+                    distribution_version=distribution_version,
                 )
                 if metadata is not None:
                     metadata["entrypoint_group"] = group
@@ -515,7 +598,16 @@ class Registry(Generic[P]):
                     group=group,
                     name=ep.name,
                 )
-            except Exception:
+            except Exception as exc:
+                self._metadata[ep.name] = {
+                    "package": distribution_name,
+                    "version": distribution_version,
+                    "entrypoint_group": group,
+                    "compatible": None,
+                    "load_error": f"{type(exc).__name__}: {exc}",
+                }
+                self._origins[ep.name] = "entrypoint_error"
+                self._registration_types[ep.name] = "unavailable"
                 logger.exception(
                     "registry_entrypoint_error",
                     registry=self._name,
