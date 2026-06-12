@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from agora.core.data_plane import DataPlane
 from agora.core.runtime._plan_types import WriterSinkPlan
-from agora.core.sink import sink_capabilities, writer_target_data_plane_specs
+from agora.core.sink import writer_target_data_plane_specs
 
 if TYPE_CHECKING:
     from agora.core.source import BaseSource
@@ -28,11 +28,21 @@ def direct_flush_eligible(
 
 def writer_has_arrow_batch_path(writer: Writer[Any]) -> bool:
     """Return whether the writer can preserve Arrow batches to any sink path."""
+    sink_capability_cache = getattr(writer, "_sink_capabilities", None)
+    if sink_capability_cache is not None:
+        return any(
+            DataPlane.ARROW_BATCHES in capability.native_data_planes
+            for capability in sink_capability_cache
+        )
     sink_specs = writer_target_data_plane_specs(writer)
     if getattr(writer, "_sinks", None) is not None and sink_specs:
         return any(DataPlane.ARROW_BATCHES in spec.native_planes for spec in sink_specs)
-    capabilities = sink_capabilities(writer)
-    return DataPlane.ARROW_BATCHES in capabilities.native_data_planes
+    return callable(getattr(writer, "write_arrow_batch", None))
+
+
+def writer_accepts_arrow_batches(writer: Writer[Any]) -> bool:
+    """Return whether the writer object itself can receive Arrow batches."""
+    return callable(getattr(writer, "write_arrow_batch", None))
 
 
 def sink_selection_reason(
@@ -80,17 +90,32 @@ def writer_sink_plans(
 def writer_input_data_plane_reason(
     *,
     middleware_output_data_plane: DataPlane,
+    writer_input_data_plane: DataPlane,
     arrow_fast_path: bool,
+    sink_plans: tuple[WriterSinkPlan, ...],
 ) -> str:
     """Explain the writer input data plane chosen by the planner."""
     if middleware_output_data_plane != DataPlane.ARROW_BATCHES:
         return f"writer receives middleware output as {middleware_output_data_plane.value}"
+    if writer_input_data_plane != DataPlane.ARROW_BATCHES:
+        return (
+            "writer materializes arrow_batches to python_batches before sink dispatch "
+            "because the writer object has no Arrow batch entrypoint"
+        )
+    downgraded_sinks = tuple(sink for sink in sink_plans if sink.downgraded_from_input)
+    if not downgraded_sinks:
+        if arrow_fast_path:
+            return (
+                "writer keeps arrow_batches because the source/middleware chain stays "
+                "Arrow-native and every resolved sink path accepts Arrow batches natively"
+            )
+        return "writer keeps arrow_batches through the sink boundary"
     if arrow_fast_path:
         return (
-            "writer keeps arrow_batches because the source/middleware chain stays Arrow-native "
-            "and at least one sink exposes an Arrow batch write path"
+            "writer keeps arrow_batches through the writer boundary and only downgrades "
+            "for sink paths that do not expose a native Arrow batch write path"
         )
     return (
-        "writer materializes arrow_batches to python_batches because the writer has no "
-        "Arrow batch write path"
+        "writer keeps arrow_batches until sink dispatch, then downgrades every sink path "
+        "because none of the resolved sinks exposes a native Arrow batch write path"
     )

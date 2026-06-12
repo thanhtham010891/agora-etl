@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
 
 def test_runtime_facade_reexports_public_api() -> None:
     module = importlib.import_module("agora.core.runtime")
@@ -27,15 +25,10 @@ def test_runtime_facade_reexports_public_api() -> None:
         assert hasattr(module, name), f"agora.core.runtime is missing export {name}"
 
 
-def test_runtime_facade_deprecated_delivery_alias_warns() -> None:
+def test_runtime_facade_does_not_export_removed_delivery_alias() -> None:
     module = importlib.import_module("agora.core.runtime")
 
-    with pytest.deprecated_call(
-        match="RecordDeliveryCoordinator is deprecated; use DeliveryEngine instead."
-    ):
-        alias = module.RecordDeliveryCoordinator
-
-    assert alias is module.DeliveryEngine
+    assert not hasattr(module, "RecordDeliveryCoordinator")
 
 
 def test_runtime_facade_writer_transport_import_path_remains_stable() -> None:

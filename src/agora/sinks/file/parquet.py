@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
@@ -92,12 +92,13 @@ class ParquetSink(BaseSink[T], Generic[T]):
     def _write_batch(self, rows: list[dict[str, Any]]) -> None:
         try:
             import pyarrow as pa
-            import pyarrow.parquet as pq
+            import pyarrow.parquet as _pq
         except ImportError:
             raise ImportError(
                 "ParquetSink requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from None
 
+        pq = cast("Any", _pq)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pydict(self._rows_to_columns(rows), schema=self._schema)
         if self._writer is None:
@@ -133,12 +134,13 @@ class ParquetSink(BaseSink[T], Generic[T]):
 
     def _write_arrow_batch(self, batch: Any) -> None:
         try:
-            import pyarrow.parquet as pq
+            import pyarrow.parquet as _pq
         except ImportError:
             raise ImportError(
                 "ParquetSink requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from None
 
+        pq = cast("Any", _pq)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if self._writer is None:
             self._schema = batch.schema

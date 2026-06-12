@@ -281,6 +281,11 @@ def _print_pipeline_plan(config_path: str, resolved: Any) -> None:
             details.append(f"service_name={tracing['service_name']}")
         console.item("tracing", ", ".join(details))
 
+    performance = plan.get("performance") or {"acceleration": "auto"}
+    console.item(
+        "acceleration",
+        f"{performance['acceleration']} ({performance.get('profile', 'balanced')})",
+    )
     console.item("sinks", ", ".join(plan["sinks"]))
     console.blank()
 

@@ -87,7 +87,7 @@ def test_registry_load_entrypoints_records_manifest_metadata(
     )
 
     registry: Registry[type] = Registry(name="sink")
-    registry.load_entrypoints("agora.sinks")
+    registry.load_entrypoints("agora.sinks", eager=True)
 
     item = registry.describe_items()[0]
     assert item.key == "fake_sink"
@@ -123,7 +123,7 @@ def test_registry_skips_incompatible_manifest_entrypoints(
     )
 
     registry: Registry[type] = Registry(name="sink")
-    registry.load_entrypoints("agora.sinks")
+    registry.load_entrypoints("agora.sinks", eager=True)
 
     assert registry.has("bad_sink") is False
 
@@ -195,7 +195,7 @@ def test_registry_records_broken_entrypoints_in_diagnostics(
     )
 
     registry: Registry[type] = Registry(name="sink")
-    registry.load_entrypoints("agora.sinks")
+    registry.load_entrypoints("agora.sinks", eager=True)
 
     assert registry.has("broken_sink") is False
     item = registry.describe_items()[0]
@@ -400,7 +400,7 @@ def test_registry_manifest_lookup_walks_up_to_parent_package(
     )
 
     registry: Registry[type] = Registry(name="source")
-    registry.load_entrypoints("agora.sources")
+    registry.load_entrypoints("agora.sources", eager=True)
 
     item = registry.describe_items()[0]
     assert item.package == "agora-etl-plugins"
@@ -470,8 +470,8 @@ def test_registry_reloading_same_entrypoint_is_idempotent(
     )
 
     registry: Registry[type] = Registry(name="sink")
-    registry.load_entrypoints("agora.sinks")
-    registry.load_entrypoints("agora.sinks")
+    registry.load_entrypoints("agora.sinks", eager=True)
+    registry.load_entrypoints("agora.sinks", eager=True)
 
     items = [item for item in registry.describe_items() if item.key == "repeat_sink"]
     assert len(items) == 1

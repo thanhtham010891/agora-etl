@@ -29,6 +29,10 @@ class FileSource(BaseSource[T], Generic[T]):
     supports_prefetch: bool = True
     prefetch_limit: int = 2
     supports_checkpoint: bool = True
+    # Optional advisory: name of an Arrow-native counterpart source. When set,
+    # the planner may emit a one-time hint suggesting the Arrow fast path for
+    # transform-free pipelines whose sink already accepts Arrow batches.
+    arrow_alternative_hint: str | None = None
 
     @abstractmethod
     def read_records(self) -> AsyncIterator[T]:

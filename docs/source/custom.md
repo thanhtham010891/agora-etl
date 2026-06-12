@@ -118,15 +118,10 @@ The public data-plane vocabulary is importable directly from `agora`:
 from agora import DataPlane, SourceDataPlaneSpec, source_data_plane_spec
 ```
 
-Legacy note:
-
-- `supports_batch_emit`
-- `emits_arrow_batches`
-
-still work in `0.3.x`, but they now emit `DeprecationWarning` when Agora uses
-them to infer the source plane. Prefer `data_plane_spec()` for new code, and
-prefer `source_data_plane_spec(source)` in tests when runtime-equivalent
-validation matters. Legacy bool flags are planned for removal in `0.4.0`.
+In `0.4.0`, Agora no longer infers non-row source planes from legacy bool
+flags. Use `data_plane_spec()` for batch or Arrow sources, and prefer
+`source_data_plane_spec(source)` in tests when runtime-equivalent validation
+matters.
 
 Once a source emits Arrow batches, the middleware chain must stay internally
 consistent:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
@@ -21,6 +22,95 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 logger = logstruct.getLogger(__name__)
+
+
+def _values_all_empty(values: list[str]) -> bool:
+    return all(value == "" for value in values)
+
+
+def _make_fixed_row_builder(header: list[str]) -> Callable[[list[str]], dict[str, Any]]:
+    """Return a fast equal-width row builder for the common fixed-header case."""
+    keys = tuple(header)
+
+    match len(keys):
+        case 0:
+            return lambda values: {}
+        case 1:
+            key0 = keys[0]
+            return lambda values: {key0: values[0]}
+        case 2:
+            key0, key1 = keys
+            return lambda values: {key0: values[0], key1: values[1]}
+        case 3:
+            key0, key1, key2 = keys
+            return lambda values: {key0: values[0], key1: values[1], key2: values[2]}
+        case 4:
+            key0, key1, key2, key3 = keys
+            return lambda values: {
+                key0: values[0],
+                key1: values[1],
+                key2: values[2],
+                key3: values[3],
+            }
+        case 5:
+            key0, key1, key2, key3, key4 = keys
+            return lambda values: {
+                key0: values[0],
+                key1: values[1],
+                key2: values[2],
+                key3: values[3],
+                key4: values[4],
+            }
+        case 6:
+            key0, key1, key2, key3, key4, key5 = keys
+            return lambda values: {
+                key0: values[0],
+                key1: values[1],
+                key2: values[2],
+                key3: values[3],
+                key4: values[4],
+                key5: values[5],
+            }
+        case 7:
+            key0, key1, key2, key3, key4, key5, key6 = keys
+            return lambda values: {
+                key0: values[0],
+                key1: values[1],
+                key2: values[2],
+                key3: values[3],
+                key4: values[4],
+                key5: values[5],
+                key6: values[6],
+            }
+        case 8:
+            key0, key1, key2, key3, key4, key5, key6, key7 = keys
+            return lambda values: {
+                key0: values[0],
+                key1: values[1],
+                key2: values[2],
+                key3: values[3],
+                key4: values[4],
+                key5: values[5],
+                key6: values[6],
+                key7: values[7],
+            }
+        case _:
+            return lambda values: dict(zip(keys, values, strict=False))
+
+
+def _build_variable_width_row(
+    header: tuple[str, ...],
+    values: list[str],
+    field_count: int,
+) -> dict[str, Any]:
+    row: dict[Any, Any] = dict(zip(header, values, strict=False))
+    value_count = len(values)
+    if value_count < field_count:
+        for key in header[value_count:]:
+            row[key] = None
+    else:
+        row[None] = values[field_count:]
+    return cast("dict[str, Any]", row)
 
 
 class CsvSource(FileSource[T], Generic[T]):
@@ -54,6 +144,7 @@ class CsvSource(FileSource[T], Generic[T]):
     """
 
     source_name = "csv"
+    arrow_alternative_hint = "ArrowCsvSource (drop row_mapper)"
 
     def __init__(
         self,
@@ -118,6 +209,39 @@ class CsvSource(FileSource[T], Generic[T]):
             record_drop_count=self._record_drop_count,
         )
 
+    def _iter_dict_rows(self, file_obj: TextIOWrapper) -> Iterator[dict[str, Any]]:
+        """Yield rows as dicts via ``csv.reader`` with a cached header.
+
+        ``csv.DictReader`` re-reads its ``fieldnames`` property on every row,
+        which dominates the per-record cost in row-based CSV pipelines. Reading
+        the header once and zipping against a cached field list avoids that.
+        Matches ``DictReader`` semantics: short rows pad missing fields with
+        ``None``; long rows collect overflow under the ``None`` key.
+        """
+        import csv as _csv
+
+        reader = _csv.reader(file_obj, delimiter=self._delimiter)
+        if self._has_header:
+            header = next(reader, None)
+            if header is None:
+                return
+        else:
+            header = list(self._fieldnames or [])
+        header_tuple = tuple(header)
+        field_count = len(header_tuple)
+        build_fixed_row = _make_fixed_row_builder(header)
+        skip_blank_lines = self._skip_blank_lines
+        for values in reader:
+            # csv.DictReader skips genuinely empty rows (blank lines).
+            if not values:
+                continue
+            if skip_blank_lines and _values_all_empty(values):
+                continue
+            if len(values) == field_count:
+                yield build_fixed_row(values)
+                continue
+            yield _build_variable_width_row(header_tuple, values, field_count)
+
     def stream_sync_batches(self) -> Iterator[Any]:
         """Synchronous generator yielding processed records batch by batch.
 
@@ -126,47 +250,37 @@ class CsvSource(FileSource[T], Generic[T]):
         Yields individual records (after row_mapper) so the Rust layer only
         needs to push Python objects into RecordBuffer.
         """
-        import csv as _csv
-
         self._record_error_count = 0
         self._record_drop_count = 0
-
-        def _make_reader_with_header(f: TextIOWrapper) -> _csv.DictReader[str]:
-            return _csv.DictReader(f, delimiter=self._delimiter)
-
-        def _make_reader_no_header(f: TextIOWrapper) -> _csv.DictReader[str]:
-            return _csv.DictReader(f, fieldnames=self._fieldnames, delimiter=self._delimiter)
-
-        reader_factory = _make_reader_with_header if self._has_header else _make_reader_no_header
+        row_mapper = self._row_mapper
+        resume_row_number = self._resume_row_number
+        on_record_error = self._on_record_error
+        current_checkpoint = self.current_checkpoint
+        source_name = self.source_name
 
         with open(self._path, encoding=self._encoding, newline="") as file_obj:
-            reader = reader_factory(file_obj)
             row_number = 0
-            for row in reader:
+            for row in self._iter_dict_rows(file_obj):
                 row_number += 1
-                if row_number <= self._resume_row_number:
+                if row_number <= resume_row_number:
                     continue
                 self._last_row_number = row_number
-                if self._skip_blank_lines and all(v == "" for v in row.values()):
-                    continue
                 try:
-                    record = self._row_mapper(row)
+                    record = row_mapper(row)
                     if record is not None:
                         yield record
                     else:
                         self._record_drop_count += 1
                 except Exception as exc:
                     self._record_error_count += 1
-                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                    if on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
                         self._record_drop_count += 1
                         continue
-                    from agora.core.source import SourceRecordError
-
                     raise SourceRecordError(
                         exc,
                         record=row,
-                        checkpoint=self.current_checkpoint(),
-                        source=self.source_name,
+                        checkpoint=current_checkpoint(),
+                        source=source_name,
                     ) from exc
 
     async def stream_batches(self) -> AsyncIterator[list[T]]:
@@ -177,44 +291,36 @@ class CsvSource(FileSource[T], Generic[T]):
         Enabled via ``emit_batches=True``. Yields control to the event loop
         periodically so other coroutines stay responsive.
         """
-        import csv as _csv
-
         self._record_error_count = 0
         self._record_drop_count = 0
-
-        def _make_reader_with_header(f: TextIOWrapper) -> _csv.DictReader[str]:
-            return _csv.DictReader(f, delimiter=self._delimiter)
-
-        def _make_reader_no_header(f: TextIOWrapper) -> _csv.DictReader[str]:
-            return _csv.DictReader(f, fieldnames=self._fieldnames, delimiter=self._delimiter)
-
-        reader_factory = _make_reader_with_header if self._has_header else _make_reader_no_header
+        row_mapper = self._row_mapper
+        resume_row_number = self._resume_row_number
+        on_record_error = self._on_record_error
+        current_checkpoint = self.current_checkpoint
+        source_name = self.source_name
 
         with open(self._path, encoding=self._encoding, newline="") as file_obj:
-            reader = reader_factory(file_obj)
             row_number = 0
             batches_emitted = 0
             batch: list[T] = []
 
-            for row in reader:
+            for row in self._iter_dict_rows(file_obj):
                 row_number += 1
-                if row_number <= self._resume_row_number:
+                if row_number <= resume_row_number:
                     continue
                 self._last_row_number = row_number
-                if self._skip_blank_lines and all(v == "" for v in row.values()):
-                    continue
                 try:
-                    record = self._row_mapper(row)
+                    record = row_mapper(row)
                 except Exception as exc:
                     self._record_error_count += 1
-                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                    if on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
                         self._record_drop_count += 1
                         continue
                     raise SourceRecordError(
                         exc,
                         record=row,
-                        checkpoint=self.current_checkpoint(),
-                        source=self.source_name,
+                        checkpoint=current_checkpoint(),
+                        source=source_name,
                     ) from exc
 
                 if record is None:
@@ -245,30 +351,21 @@ class CsvSource(FileSource[T], Generic[T]):
                 await asyncio.sleep(0)
 
     async def read_records(self) -> AsyncIterator[T]:
-        import csv
-
         self._record_error_count = 0
         self._record_drop_count = 0
 
         def _open_reader() -> Any:
             file_obj = open(self._path, encoding=self._encoding, newline="")  # noqa: SIM115
-            if self._has_header:
-                reader = csv.DictReader(file_obj, delimiter=self._delimiter)
-            else:
-                reader = csv.DictReader(
-                    file_obj,
-                    fieldnames=self._fieldnames,
-                    delimiter=self._delimiter,
-                )
-            return file_obj, reader
+            return file_obj, self._iter_dict_rows(file_obj)
 
         def _read_batch(
             reader: Any, row_number: int
         ) -> tuple[list[tuple[int, dict[str, Any]]], int]:
             batch: list[tuple[int, dict[str, Any]]] = []
+            resume_row_number = self._resume_row_number
             for row in reader:
                 row_number += 1
-                if row_number <= self._resume_row_number:
+                if row_number <= resume_row_number:
                     continue
                 batch.append((row_number, row))
                 if len(batch) >= self._batch_size:
@@ -277,6 +374,10 @@ class CsvSource(FileSource[T], Generic[T]):
 
         file_obj, reader = await asyncio.to_thread(_open_reader)
         row_number = 0
+        row_mapper = self._row_mapper
+        on_record_error = self._on_record_error
+        current_checkpoint = self.current_checkpoint
+        source_name = self.source_name
         try:
             while True:
                 batch, row_number = await asyncio.to_thread(_read_batch, reader, row_number)
@@ -284,10 +385,8 @@ class CsvSource(FileSource[T], Generic[T]):
                     break
                 for row_num, row in batch:
                     self._last_row_number = row_num
-                    if self._skip_blank_lines and all(value == "" for value in row.values()):
-                        continue
                     try:
-                        record = self._row_mapper(row)
+                        record = row_mapper(row)
                         if record is not None:
                             yield record
                         else:
@@ -295,14 +394,14 @@ class CsvSource(FileSource[T], Generic[T]):
                     except Exception as exc:
                         self._record_error_count += 1
                         logger.warning("csv_source_row_error", error=str(exc))
-                        if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                        if on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
                             self._record_drop_count += 1
                             continue
                         raise SourceRecordError(
                             exc,
                             record=row,
-                            checkpoint=self.current_checkpoint(),
-                            source=self.source_name,
+                            checkpoint=current_checkpoint(),
+                            source=source_name,
                         ) from exc
         finally:
             await asyncio.to_thread(file_obj.close)
@@ -339,10 +438,20 @@ class ArrowCsvSource(FileSource[Any]):
         self,
         path: Path,
         batch_size: int = 65_536,
+        read_block_size: int | None = None,
     ) -> None:
         self._path = Path(path)
         self._batch_size = max(batch_size, 1)
+        self._read_block_size = (
+            max(int(read_block_size), 1) if read_block_size is not None else None
+        )
         self._rows_read: int = 0
+        self._arrow_batch_count: int = 0
+        self._arrow_max_batch_rows: int = 0
+        self._arrow_read_time_ms: float = 0.0
+        self._arrow_batch_materialize_time_ms: float = 0.0
+        self._arrow_total_load_time_ms: float = 0.0
+        self._arrow_resolved_read_block_size: int = 0
 
     def current_checkpoint(self) -> dict[str, int] | None:
         return {"rows": self._rows_read} if self._rows_read else None
@@ -358,20 +467,60 @@ class ArrowCsvSource(FileSource[Any]):
             emits_arrow_batches=True,
         )
 
+    def runtime_metrics(self) -> SourceRuntimeMetrics:
+        return SourceRuntimeMetrics(
+            arrow_batch_count=self._arrow_batch_count,
+            arrow_max_batch_rows=self._arrow_max_batch_rows,
+            arrow_read_time_ms=self._arrow_read_time_ms,
+            arrow_batch_materialize_time_ms=self._arrow_batch_materialize_time_ms,
+            arrow_total_load_time_ms=self._arrow_total_load_time_ms,
+            arrow_resolved_read_block_size=self._arrow_resolved_read_block_size,
+        )
+
     async def stream_batches(self) -> AsyncIterator[Any]:
         try:
-            import pyarrow.csv as pacsv
+            import pyarrow.csv as _pacsv
         except ImportError as exc:
             raise ImportError(
                 "ArrowCsvSource requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from exc
 
+        pacsv = cast("Any", _pacsv)
+        self._rows_read = 0
+        self._arrow_batch_count = 0
+        self._arrow_max_batch_rows = 0
+        self._arrow_read_time_ms = 0.0
+        self._arrow_batch_materialize_time_ms = 0.0
+        self._arrow_total_load_time_ms = 0.0
+        self._arrow_resolved_read_block_size = self._read_block_size or 0
+
         def _read() -> list[Any]:
-            table = pacsv.read_csv(str(self._path))
-            return table.to_batches(max_chunksize=self._batch_size)  # type: ignore[no-any-return]
+            import pyarrow as pa
+
+            read_options = None
+            if self._read_block_size is not None:
+                read_options = pacsv.ReadOptions(block_size=self._read_block_size)
+            source = pa.input_stream(self._path.as_posix())
+            try:
+                read_t0 = time.perf_counter()
+                table = pacsv.read_csv(
+                    source,
+                    read_options=read_options,
+                )
+                read_t1 = time.perf_counter()
+                batches = cast("list[Any]", table.to_batches(max_chunksize=self._batch_size))
+                read_t2 = time.perf_counter()
+            finally:
+                source.close()
+            self._arrow_read_time_ms = (read_t1 - read_t0) * 1000.0
+            self._arrow_batch_materialize_time_ms = (read_t2 - read_t1) * 1000.0
+            self._arrow_total_load_time_ms = (read_t2 - read_t0) * 1000.0
+            return batches
 
         for batch in await asyncio.to_thread(_read):
             self._rows_read += batch.num_rows
+            self._arrow_batch_count += 1
+            self._arrow_max_batch_rows = max(self._arrow_max_batch_rows, int(batch.num_rows))
             yield batch
 
     async def stream(self) -> AsyncIterator[Any]:  # type: ignore[override]

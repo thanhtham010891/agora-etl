@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from agora import DeliveryConfig, InMemoryCheckpointStore, InMemoryTracer, Pipeline
+from agora import (
+    DataPlane,
+    DeliveryConfig,
+    InMemoryCheckpointStore,
+    InMemoryTracer,
+    Pipeline,
+    SourceDataPlaneSpec,
+)
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 
@@ -32,11 +39,17 @@ class _CheckpointedSource(BaseSource[dict[str, int]]):
 
 class _ArrowBatchSource(BaseSource[dict[str, int]]):
     source_name = "arrow_batch"
-    supports_batch_emit = True
-    emits_arrow_batches = True
 
     def __init__(self, rows: list[dict[str, int]]) -> None:
         self._rows = rows
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.ARROW_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=True,
+        )
 
     async def stream_batches(self):
         pa = pytest.importorskip("pyarrow")
@@ -267,7 +280,8 @@ async def test_pipeline_tracing_captures_arrow_fast_path_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_noop_tracer_trace_span_returns_singleton_and_allocates_no_spans() -> None:
-    from agora.core.context import _NOOP_SPAN_SCOPE, PipelineContext
+    from agora.core.context import PipelineContext
+    from agora.core.context._tracing import _NOOP_SPAN_SCOPE
     from agora.core.metrics import PipelineMetrics
     from agora.core.tracing import NoopTracer
 
@@ -310,3 +324,64 @@ async def test_real_tracer_trace_span_pushes_and_pops_stack() -> None:
     assert len(tracer.spans) == 2
     assert tracer.spans[0].name == "outer"
     assert tracer.spans[0].attributes["key"] == "val"
+
+
+@pytest.mark.asyncio
+async def test_real_tracer_normalizes_non_scalar_trace_attributes() -> None:
+    from agora.core.context import PipelineContext
+    from agora.core.metrics import PipelineMetrics
+
+    tracer = InMemoryTracer()
+    ctx = PipelineContext(
+        pipeline_id="test",
+        metrics=PipelineMetrics(),
+        tracer=tracer,
+    )
+
+    with ctx.trace_span("outer", payload=["a", "b"], count=2):
+        pass
+
+    assert tracer.spans[0].attributes["payload"] == "['a', 'b']"
+    assert tracer.spans[0].attributes["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_inmemory_tracer_shared_attributes_use_copy_on_write_for_error_flag() -> None:
+    from agora.core.context import PipelineContext
+    from agora.core.metrics import PipelineMetrics
+
+    tracer = InMemoryTracer()
+    ctx = PipelineContext(
+        pipeline_id="test",
+        metrics=PipelineMetrics(),
+        tracer=tracer,
+    )
+    shared_attrs = {
+        "middleware": "shared_stage",
+        "execution_mode": "linear",
+    }
+
+    span = ctx._start_trace_span(
+        "middleware.process",
+        attributes=shared_attrs,
+        normalize=False,
+        share_attributes=True,
+    )
+    assert span is not None
+    ctx._finish_trace_span(span, RuntimeError("boom"))
+
+    second_span = ctx._start_trace_span(
+        "middleware.process",
+        attributes=shared_attrs,
+        normalize=False,
+        share_attributes=True,
+    )
+    assert second_span is not None
+    ctx._finish_trace_span(second_span)
+
+    assert shared_attrs == {
+        "middleware": "shared_stage",
+        "execution_mode": "linear",
+    }
+    assert tracer.spans[0].attributes["error"] is True
+    assert "error" not in tracer.spans[1].attributes

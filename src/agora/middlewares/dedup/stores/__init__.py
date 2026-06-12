@@ -48,15 +48,15 @@ class _LazyDedupStoreRegistry(Registry[type[DedupStore[str]]]):
             return
         self.load_entrypoints(_DEDUP_STORE_ENTRYPOINT_GROUP)
 
-    def load_entrypoints(self, group: str) -> None:
+    def load_entrypoints(self, group: str, *, eager: bool = False) -> None:
         if group != _DEDUP_STORE_ENTRYPOINT_GROUP:
-            super().load_entrypoints(group)
+            super().load_entrypoints(group, eager=eager)
             return
         if self._entrypoints_loaded or self._entrypoints_loading:
             return
         self._entrypoints_loading = True
         try:
-            super().load_entrypoints(group)
+            super().load_entrypoints(group, eager=eager)
         finally:
             self._entrypoints_loading = False
             self._entrypoints_loaded = True

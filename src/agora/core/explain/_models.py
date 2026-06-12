@@ -8,6 +8,32 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from agora.core.data_plane import DataPlane
     from agora.core.runtime import RuntimePlan
+    from agora.core.types import DeliveryConfig
+
+
+@dataclass(frozen=True, slots=True)
+class AccelerationExplain:
+    """Acceleration decisions shown by ``Pipeline.explain()``."""
+
+    mode: str
+    profile: str
+    profile_settings: dict[str, Any]
+    available: bool
+    package_version: str | None
+    compatible: bool
+    active_capabilities: tuple[str, ...]
+    inactive_capabilities: dict[str, str]
+    source_prefetch_eligible: bool
+    source_prefetch_active: bool
+    source_prefetch_inactive_reason: str | None
+    direct_flush_eligible: bool
+    direct_flush_inactive_reason: str | None
+    expected_row_materialization_points: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        from agora.core.explain._serialization import acceleration_explain_to_dict
+
+        return acceleration_explain_to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +90,7 @@ class PipelineExplain:
     writer_input_data_plane_reason: str
     sink_downgrade_count: int
     sinks: tuple[SinkWriteExplain, ...]
+    acceleration: AccelerationExplain
 
     @classmethod
     def from_runtime_plan(
@@ -72,6 +99,7 @@ class PipelineExplain:
         pipeline_id: str,
         plan: RuntimePlan,
         source_limit: int | None = None,
+        config: DeliveryConfig | None = None,
     ) -> PipelineExplain:
         from agora.core.explain._builders import build_pipeline_explain
 
@@ -79,6 +107,7 @@ class PipelineExplain:
             pipeline_id=pipeline_id,
             plan=plan,
             source_limit=source_limit,
+            config=config,
         )
 
     def to_dict(self) -> dict[str, Any]:

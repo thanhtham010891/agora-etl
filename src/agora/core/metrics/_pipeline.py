@@ -35,11 +35,27 @@ class PipelineMetrics:
     runtime: RuntimeMetrics = field(default_factory=RuntimeMetrics)
     last_checkpoint: Checkpoint | None = None
     _live_metric_overlays: list[Any] = field(default_factory=list, repr=False)
+    _last_middleware_name: str | None = field(default=None, init=False, repr=False)
+    _last_middleware_metrics: MiddlewareMetrics | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def middleware(self, name: str) -> MiddlewareMetrics:
-        if name not in self.by_middleware:
-            self.by_middleware[name] = MiddlewareMetrics(name=name)
-        return self.by_middleware[name]
+        cached_name = self._last_middleware_name
+        cached_metrics = self._last_middleware_metrics
+        if cached_name == name and cached_metrics is not None:
+            return cached_metrics
+
+        metrics = self.by_middleware.get(name)
+        if metrics is None:
+            metrics = MiddlewareMetrics(name=name)
+            self.by_middleware[name] = metrics
+
+        self._last_middleware_name = name
+        self._last_middleware_metrics = metrics
+        return metrics
 
     def inc_source(self, source_key: str, count: int = 1) -> None:
         self.by_source[source_key] = self.by_source.get(source_key, 0) + count

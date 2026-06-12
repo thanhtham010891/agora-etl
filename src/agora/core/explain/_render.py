@@ -30,6 +30,32 @@ def render_pipeline_explain(explain: PipelineExplain) -> str:
     parts.append(f"writer_reason={explain.writer_input_data_plane_reason!r}")
     if explain.sink_downgrade_count > 0:
         parts.append(f"sink_downgrades={explain.sink_downgrade_count}")
+    acceleration = explain.acceleration
+    parts.append(
+        "acceleration="
+        f"{acceleration.mode}/{'available' if acceleration.available else 'unavailable'}"
+    )
+    parts.append(f"performance_profile={acceleration.profile}")
+    if acceleration.profile_settings:
+        rendered_settings = ",".join(
+            f"{key}={value}" for key, value in acceleration.profile_settings.items()
+        )
+        parts.append(f"profile_settings={rendered_settings}")
+    if acceleration.package_version is not None:
+        parts.append(f"agora_etl_rs={acceleration.package_version}")
+    parts.append(f"agora_etl_rs_compatible={acceleration.compatible}")
+    if acceleration.active_capabilities:
+        parts.append(f"rust_paths={','.join(acceleration.active_capabilities)}")
+    if acceleration.source_prefetch_active:
+        parts.append("source_prefetch=rust")
+    elif acceleration.source_prefetch_inactive_reason:
+        parts.append(f"source_prefetch_reason={acceleration.source_prefetch_inactive_reason!r}")
+    if acceleration.direct_flush_inactive_reason:
+        parts.append(f"direct_flush_reason={acceleration.direct_flush_inactive_reason!r}")
+    if acceleration.expected_row_materialization_points:
+        parts.append(
+            f"row_materialization={'; '.join(acceleration.expected_row_materialization_points)!r}"
+        )
 
     middleware = "<empty>"
     if explain.middleware_matrix:

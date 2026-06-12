@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from agora.core._pipeline_support import resolved_performance_profile_settings
+from agora.core.acceleration import require_acceleration
 from agora.core.runtime import (
     DeliveryEngine,
     ExecutionCoordinator,
@@ -39,6 +41,7 @@ def prepare_execution(
     run_id: str | None,
 ) -> PreparedExecution:
     """Build the runtime collaborators for one pipeline execution."""
+    acceleration_status = require_acceleration(spec.config.acceleration_mode)
     if max_records is not None:
         spec = replace(spec, source=spec.source.limit(max_records))
 
@@ -59,6 +62,29 @@ def prepare_execution(
         plan=plan,
         max_buffer_size=spec.config.max_buffer_size,
         backpressure=spec.config.backpressure,
+        acceleration_mode=spec.config.acceleration_mode,
+        performance_profile=spec.config.performance_profile,
+    )
+    runtime = state.ctx.metrics.runtime
+    runtime.acceleration_mode = acceleration_status.mode.value
+    runtime.acceleration_profile = spec.config.performance_profile
+    runtime.acceleration_profile_settings = resolved_performance_profile_settings(
+        spec.config,
+        source_prefetch_limit=plan.source_prefetch_limit,
+    ).to_dict()
+    runtime.acceleration_available = acceleration_status.enabled
+    runtime.acceleration_package_version = acceleration_status.version or ""
+    runtime.acceleration_compatible = acceleration_status.compatible
+    runtime.acceleration_capabilities = tuple(
+        sorted(capability.value for capability in acceleration_status.capabilities)
+    )
+    runtime.direct_flush_eligible = plan.writer.direct_flush_eligible
+    runtime.direct_flush_inactive_reason = _direct_flush_inactive_reason(
+        eligible=plan.writer.direct_flush_eligible,
+        batch_size=spec.config.batch_size,
+        batch_flush_interval_ms=spec.config.batch_flush_interval_ms,
+        lane=plan.lane.value,
+        rust_available=execution.rust_available(),
     )
     return PreparedExecution(
         spec=spec,
@@ -115,6 +141,8 @@ def pipeline_run_trace_attrs(
         "direct_flush_eligible": plan.writer.direct_flush_eligible,
         "arrow_fast_path_eligible": plan.writer.arrow_fast_path,
         "arrow_chain_eligible": plan.writer.arrow_chain,
+        "acceleration_mode": str(spec.config.acceleration_mode),
+        "acceleration_profile": spec.config.performance_profile,
     }
 
 
@@ -124,6 +152,11 @@ def apply_runtime_trace_attributes(span: Any, runtime: Any) -> None:
     span.set_attribute("source_data_plane", runtime.source_data_plane)
     span.set_attribute("writer_input_data_plane", runtime.writer_input_data_plane)
     span.set_attribute("direct_flush_active", runtime.direct_flush_active)
+    span.set_attribute("direct_flush_eligible", runtime.direct_flush_eligible)
+    span.set_attribute("direct_flush_inactive_reason", runtime.direct_flush_inactive_reason)
+    span.set_attribute("acceleration_mode", runtime.acceleration_mode)
+    span.set_attribute("acceleration_available", runtime.acceleration_available)
+    span.set_attribute("acceleration_profile", runtime.acceleration_profile)
     span.set_attribute("arrow_fast_path_active", runtime.arrow_fast_path_active)
     span.set_attribute("arrow_chain_active", runtime.arrow_chain_active)
     span.set_attribute(
@@ -131,3 +164,24 @@ def apply_runtime_trace_attributes(span: Any, runtime: Any) -> None:
         runtime.writer_downgraded_sink_count,
     )
     span.set_attribute("rust_prefetch_active", runtime.rust_prefetch_active)
+
+
+def _direct_flush_inactive_reason(
+    *,
+    eligible: bool,
+    batch_size: int,
+    batch_flush_interval_ms: int | None,
+    lane: str,
+    rust_available: bool,
+) -> str:
+    if eligible:
+        return ""
+    if lane != "linear":
+        return f"direct flush only applies to the linear lane (planned lane: {lane})"
+    if batch_size <= 1:
+        return "writer batch size is 1"
+    if batch_flush_interval_ms is not None and batch_flush_interval_ms > 0:
+        return "batch flush interval requires the pending-write owner path"
+    if not rust_available:
+        return "Rust linear batch buffer is unavailable or disabled"
+    return "writer shape is not safe for direct flush"

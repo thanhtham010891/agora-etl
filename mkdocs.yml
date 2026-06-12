@@ -22,6 +22,7 @@ nav:
       - Scheduling: guides/scheduling.md
       - Testing: guides/testing.md
       - Observability: guides/observability.md
+      - Performance: guides/performance.md
       - Configuration: configuration.md
       - CLI Reference: cli.md
   - Reference:
@@ -88,6 +89,7 @@ nav:
   - Change Log:
       - Overview: change-log/index.md
       - Releases:
+          - 0.4.0: change-log/0.4.0.md
           - 0.3.3: change-log/0.3.3.md
           - 0.3.2: change-log/0.3.2.md
           - 0.3.1: change-log/0.3.1.md

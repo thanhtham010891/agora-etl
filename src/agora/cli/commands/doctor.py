@@ -23,6 +23,7 @@ Usage::
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from agora.cli.commands.base import BaseCommand
 from agora.cli.console import console
 from agora.cli.recovery import recovery_insight_for_source
 from agora.config import resolve_config_document, validate_config_document
+from agora.core.acceleration import acceleration_status, normalize_acceleration_mode
 from agora.core.component_factory import config_component_factory
 from agora.core.discovery import public_entrypoint_group_contracts
 from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION, _coerce_manifest
@@ -78,6 +80,22 @@ class DoctorReport:
     @property
     def warned(self) -> bool:
         return any(r.status == Status.WARN for r in self.results)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable machine-readable report."""
+        return {
+            "failed": self.failed,
+            "warned": self.warned,
+            "results": [
+                {
+                    "name": result.name,
+                    "status": result.status.value,
+                    "message": result.message,
+                    "detail": result.detail,
+                }
+                for result in self.results
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -144,6 +162,79 @@ def check_plugins_importable() -> CheckResult:
             message="agora-etl-plugins not installed",
             detail="Install with: pip install agora-etl-plugins",
         )
+
+
+def check_acceleration(
+    config_path: str | None = None,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Report optional agora-etl-rs acceleration posture."""
+    mode = "auto"
+    profile = "balanced"
+    if config_path is not None:
+        try:
+            ctx = _load_doctor_config_context(
+                config_path,
+                pipeline_name=pipeline_name,
+                profile_name=profile_name,
+                environment_name=environment_name,
+            )
+            if ctx.resolved is not None:
+                performance = ctx.resolved.pipeline_config.get("performance", {})
+                if isinstance(performance, dict):
+                    mode = str(performance.get("acceleration", mode))
+                    profile = str(performance.get("profile", profile))
+        except Exception as exc:
+            return CheckResult(
+                name="agora-etl-rs acceleration",
+                status=Status.WARN,
+                message="Cannot resolve acceleration config",
+                detail=str(exc),
+            )
+
+    normalized_mode = normalize_acceleration_mode(mode)
+    status = acceleration_status(normalized_mode, refresh=normalized_mode.value == "required")
+    capabilities = ", ".join(sorted(capability.value for capability in status.capabilities))
+    detail = "\n".join(
+        [
+            f"mode={status.mode.value}",
+            f"profile={profile}",
+            f"version={status.version or 'unknown'}",
+            f"compatible={getattr(status, 'compatible', status.enabled)}",
+            f"capabilities={capabilities or 'none'}",
+            f"reason={status.reason or 'ready'}",
+        ]
+    )
+    if status.enabled:
+        return CheckResult(
+            name="agora-etl-rs acceleration",
+            status=Status.PASS,
+            message="agora-etl-rs acceleration available",
+            detail=detail,
+        )
+    if normalized_mode.value == "required":
+        return CheckResult(
+            name="agora-etl-rs acceleration",
+            status=Status.FAIL,
+            message="Acceleration is required but unavailable",
+            detail=detail,
+        )
+    if normalized_mode.value == "off":
+        return CheckResult(
+            name="agora-etl-rs acceleration",
+            status=Status.PASS,
+            message="Acceleration disabled by config",
+            detail=detail,
+        )
+    return CheckResult(
+        name="agora-etl-rs acceleration",
+        status=Status.WARN,
+        message="agora-etl-rs acceleration not available; pure Python fallback will be used",
+        detail=detail,
+    )
 
 
 def check_entrypoint_plugins() -> CheckResult:
@@ -803,6 +894,11 @@ class DoctorCommand(BaseCommand):
             default=None,
             help="Select a config environment overlay from [environments.<name>].",
         )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit a machine-readable JSON doctor report.",
+        )
 
     def execute(self, args: argparse.Namespace, ctx: AgoraContext) -> int:
         ensure_project_on_path(ctx)
@@ -811,6 +907,14 @@ class DoctorCommand(BaseCommand):
         report.add(check_python_version())
         report.add(check_agora_importable())
         report.add(check_plugins_importable())
+        report.add(
+            check_acceleration(
+                args.config,
+                pipeline_name=args.pipeline,
+                profile_name=args.profile,
+                environment_name=args.environment,
+            )
+        )
         report.add(check_entrypoint_plugins())
 
         if args.config:
@@ -863,7 +967,10 @@ class DoctorCommand(BaseCommand):
                 )
             )
 
-        _render_report(report)
+        if getattr(args, "json", False):
+            console.out(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        else:
+            _render_report(report)
         return 1 if report.failed else 0
 
 
@@ -873,6 +980,7 @@ __all__ = [
     "DoctorConfigContext",
     "DoctorReport",
     "Status",
+    "check_acceleration",
     "check_agora_importable",
     "check_config_import_refs",
     "check_config_pipeline_build",

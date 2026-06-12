@@ -33,11 +33,17 @@ class LinearLaneStrategy:
         batch_size = c.writer_batch_size
         source_name = c.source.source_name
         metrics = ctx.metrics
+        uses_pending_write_owner = c.delivery._uses_pending_write_owner(batch_size)
 
-        if c.rust_available() and batch_size > 1:
+        if c.rust_available() and batch_size > 1 and not uses_pending_write_owner:
+            metrics.runtime.rust_linear_batch_buffer_active = True
             buf = c.make_linear_batch_buffer(batch_size, LINEAR_FLUSH_INTERVAL)
             use_direct_flush = c.plan.writer.direct_flush_eligible
             metrics.runtime.direct_flush_active = use_direct_flush
+            if not use_direct_flush and not metrics.runtime.direct_flush_inactive_reason:
+                metrics.runtime.direct_flush_inactive_reason = (
+                    "writer shape is not safe for direct flush"
+                )
 
             try:
                 async for source_record in source_records:
@@ -45,18 +51,21 @@ class LinearLaneStrategy:
                     if buf.inc_consumed(source_name):
                         buf.flush_metrics(metrics)
 
-                    result = await c.chain.process(source_record.raw, ctx)
-                    if result.value is None:
+                    result_value, result_failure = await c.chain.process_outcome(
+                        source_record.raw,
+                        ctx,
+                    )
+                    if result_value is None:
                         await c.delivery.drop_record(
                             state,
                             source_record.checkpoint,
-                            failure=result.failure,
+                            failure=result_failure,
                             on_success=source_record.on_success,
                         )
                         continue
 
                     if buf.push(
-                        result.value,
+                        result_value,
                         source_record.raw,
                         source_record.checkpoint,
                         source_record.on_success,
@@ -118,7 +127,11 @@ class LinearLaneStrategy:
                 raise source_error
             return
 
-        hot = HotPathMetrics.for_source(source_name, metrics=metrics)
+        hot = HotPathMetrics.for_source(
+            source_name,
+            metrics=metrics,
+            acceleration_mode=c.acceleration_mode,
+        )
 
         try:
             async for source_record in source_records:
@@ -126,24 +139,27 @@ class LinearLaneStrategy:
                     hot.flush(metrics)
                 state.processed_count += 1
 
-                result = await c.chain.process(source_record.raw, ctx)
+                result_value, result_failure = await c.chain.process_outcome(
+                    source_record.raw,
+                    ctx,
+                )
                 if batch_size > 1:
                     await c.delivery.queue_processed_record(
                         state,
-                        result.value,
+                        result_value,
                         source_record.raw,
                         source_record.checkpoint,
                         batch_size,
-                        failure=result.failure,
+                        failure=result_failure,
                         on_success=source_record.on_success,
                     )
                 else:
                     await c.delivery.write_processed_record(
                         state,
-                        result.value,
+                        result_value,
                         source_record.raw,
                         source_record.checkpoint,
-                        failure=result.failure,
+                        failure=result_failure,
                         on_success=source_record.on_success,
                     )
         except Exception as exc:

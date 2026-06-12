@@ -30,6 +30,10 @@ class MapMiddleware(Middleware[T, U]):
         self.name = name
         self._fn = fn
         self._fn_is_async = inspect.iscoroutinefunction(fn)
+        self._rust_sync_builtin_fast = not self._fn_is_async
+        self._row_fast_process = (
+            cast("Callable[[T], U | None]", self._fn) if not self._fn_is_async else None
+        )
 
     async def process(self, record: T, ctx: PipelineContext) -> U | None:
         del ctx
@@ -103,13 +107,19 @@ class FilterMiddleware(Middleware[T, T]):
     def __init__(self, predicate: Callable[[T], bool], name: str = "filter") -> None:
         self.name = name
         self._predicate = predicate
+        self._predicate_is_async = inspect.iscoroutinefunction(predicate)
+        self._rust_sync_builtin_fast = not self._predicate_is_async
+        self._row_fast_process = self._process_sync if not self._predicate_is_async else None
 
     async def process(self, record: T, ctx: PipelineContext) -> T | None:
-        if inspect.iscoroutinefunction(self._predicate):
+        if self._predicate_is_async:
             keep = await self._predicate(record)  # type: ignore[misc, unused-ignore]
         else:
             keep = self._predicate(record)
         return record if keep else None
+
+    def _process_sync(self, record: T) -> T | None:
+        return record if self._predicate(record) else None
 
     async def apply_in_batch(
         self,
@@ -118,7 +128,7 @@ class FilterMiddleware(Middleware[T, T]):
         chain: Any,
         idx: int,
     ) -> Any:
-        if not inspect.iscoroutinefunction(self._predicate):
+        if not self._predicate_is_async:
             return await self._apply_sync_filter_batch(current, ctx)
         return await super().apply_in_batch(current, ctx, chain, idx)
 
@@ -219,6 +229,7 @@ class RouteMiddleware(Middleware[T, U]):
     def __init__(self, key: Callable[[T], str], name: str = "router") -> None:
         self.name = name
         self._key = key
+        self._key_is_async = inspect.iscoroutinefunction(key)
         self._routes: dict[str, Middleware[T, U]] = {}
         self._default: Middleware[T, U] | None = None
 
@@ -254,7 +265,7 @@ class RouteMiddleware(Middleware[T, U]):
             await middleware.on_stop(ctx)
 
     async def process(self, record: T, ctx: PipelineContext) -> U | None:
-        if inspect.iscoroutinefunction(self._key):
+        if self._key_is_async:
             key = await self._key(record)  # type: ignore[misc, unused-ignore]
         else:
             key = self._key(record)

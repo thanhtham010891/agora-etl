@@ -358,10 +358,10 @@ def test_arrow_chain_materializes_at_writer_boundary_when_writer_has_no_arrow_pa
     assert plan.middleware.output_data_plane == DataPlane.ARROW_BATCHES
     assert plan.writer.arrow_chain is True
     assert plan.writer.arrow_fast_path is False
-    assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
+    assert plan.writer.input_data_plane == DataPlane.ARROW_BATCHES
     assert plan.writer.sink_plans[0].selected_data_plane == DataPlane.PYTHON_BATCHES
-    assert "materializes arrow_batches to python_batches" in plan.writer.input_data_plane_reason
-    assert plan.writer.sink_plans[0].selection_reason == "sink accepts python_batches natively"
+    assert "keeps arrow_batches until sink dispatch" in plan.writer.input_data_plane_reason
+    assert "writer downgrades to python_batches" in plan.writer.sink_plans[0].selection_reason
 
 
 def test_arrow_source_with_python_row_chain_tracks_single_materialization() -> None:
@@ -397,6 +397,7 @@ def test_runtime_plan_tracks_sink_downgrades_for_mixed_arrow_fanout() -> None:
 
     assert plan.writer.input_data_plane == DataPlane.ARROW_BATCHES
     assert plan.writer.downgraded_sink_count == 1
+    assert "only downgrades for sink paths" in plan.writer.input_data_plane_reason
     assert [sink.selected_data_plane for sink in plan.writer.sink_plans] == [
         DataPlane.ARROW_BATCHES,
         DataPlane.PYTHON_ROWS,
@@ -419,3 +420,105 @@ def test_router_does_not_advertise_arrow_writer_path_from_arrow_capable_sink() -
     assert plan.writer.arrow_fast_path is False
     assert plan.writer.input_data_plane == DataPlane.PYTHON_BATCHES
     assert plan.writer.sink_plans[0].selected_data_plane == DataPlane.PYTHON_ROWS
+
+
+class _HintedBatchSource(_BatchSource):
+    """List-batch source that advertises an Arrow-native counterpart."""
+
+    source_name = "hinted_batch_source"
+    arrow_alternative_hint = "ArrowFakeSource"
+
+
+class _RowOnlySink(BaseSink[int]):
+    sink_name = "row_only_sink"
+
+    async def write(self, record: int) -> None:
+        del record
+
+
+def test_arrow_advisory_fires_for_hinted_source_with_arrow_sink(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agora.core.runtime import _plan_middleware
+
+    _plan_middleware._ADVISED_SOURCE_TYPES.discard(_HintedBatchSource)
+    with caplog.at_level("INFO"):
+        build_runtime_plan(
+            _HintedBatchSource(),
+            MiddlewareChain([]),
+            SinkFanOut([_ArrowNativeSink()]),
+            writer_batch_size=5000,
+        )
+
+    hits = [r for r in caplog.records if r.msg == "arrow_fast_path_available"]
+    assert len(hits) == 1
+
+
+def test_arrow_advisory_silent_for_arrow_emitting_source(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agora.core.runtime import _plan_middleware
+
+    _plan_middleware._ADVISED_SOURCE_TYPES.discard(_ArrowBatchSource)
+    with caplog.at_level("INFO"):
+        build_runtime_plan(
+            _ArrowBatchSource(),
+            MiddlewareChain([]),
+            SinkFanOut([_ArrowNativeSink()]),
+            writer_batch_size=5000,
+        )
+
+    assert not [r for r in caplog.records if r.msg == "arrow_fast_path_available"]
+
+
+def test_arrow_advisory_silent_with_middleware(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agora.core.runtime import _plan_middleware
+
+    _plan_middleware._ADVISED_SOURCE_TYPES.discard(_HintedBatchSource)
+    with caplog.at_level("INFO"):
+        build_runtime_plan(
+            _HintedBatchSource(),
+            MiddlewareChain([_BufferedConcurrency1()]),
+            SinkFanOut([_ArrowNativeSink()]),
+            writer_batch_size=5000,
+        )
+
+    assert not [r for r in caplog.records if r.msg == "arrow_fast_path_available"]
+
+
+def test_arrow_advisory_silent_when_sink_not_arrow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agora.core.runtime import _plan_middleware
+
+    _plan_middleware._ADVISED_SOURCE_TYPES.discard(_HintedBatchSource)
+    with caplog.at_level("INFO"):
+        build_runtime_plan(
+            _HintedBatchSource(),
+            MiddlewareChain([]),
+            SinkFanOut([_RowOnlySink()]),
+            writer_batch_size=5000,
+        )
+
+    assert not [r for r in caplog.records if r.msg == "arrow_fast_path_available"]
+
+
+def test_arrow_advisory_fires_once_per_source_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agora.core.runtime import _plan_middleware
+
+    _plan_middleware._ADVISED_SOURCE_TYPES.discard(_HintedBatchSource)
+    with caplog.at_level("INFO"):
+        for _ in range(3):
+            build_runtime_plan(
+                _HintedBatchSource(),
+                MiddlewareChain([]),
+                SinkFanOut([_ArrowNativeSink()]),
+                writer_batch_size=5000,
+            )
+
+    hits = [r for r in caplog.records if r.msg == "arrow_fast_path_available"]
+    assert len(hits) == 1

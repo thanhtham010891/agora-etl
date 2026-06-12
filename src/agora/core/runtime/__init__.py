@@ -12,7 +12,6 @@ from agora.core.runtime._buffered import (
     AdaptiveBackpressureController,
     ExecutionCoordinator,
 )
-from agora.core.runtime._compat import resolve_runtime_deprecated_export
 from agora.core.runtime._delivery import (
     CheckpointedOutcome,
     CheckpointState,
@@ -50,7 +49,6 @@ __all__ = [
     "HotPathMetrics",
     "PendingWrite",
     "ProcessedSourceRecord",
-    "RecordDeliveryCoordinator",
     "RecordDeliveryError",
     "RunState",
     "RuntimeLane",
@@ -63,11 +61,3 @@ __all__ = [
     "build_runtime_plan",
     "make_checkpoint_state",
 ]
-
-
-def __getattr__(name: str) -> object:
-    return resolve_runtime_deprecated_export(
-        name,
-        delivery_engine=DeliveryEngine,
-        module_name=__name__,
-    )

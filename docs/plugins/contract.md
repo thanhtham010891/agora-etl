@@ -1,6 +1,6 @@
 # Plugin Contract
 
-_When to read this: you are building a third-party plugin package and need to know which extension points are safe to build on, and what the compatibility expectations are in the current `0.3.x` public contract._
+_When to read this: you are building a third-party plugin package and need to know which extension points are safe to build on, and what the compatibility expectations are in the current `0.4.x` public contract._
 
 This page is the single source of truth for the plugin author contract. It is the plugin-layer equivalent of [Runtime Guarantees](../guides/runtime-guarantees.md).
 
@@ -177,8 +177,8 @@ sink_spec = sink_data_plane_spec(MySink())
 ```
 
 Those helpers use the same normalization and validation path the runtime uses.
-Legacy bool flags still work in `0.3.x`, but they are compatibility shims only
-and emit `DeprecationWarning` when Agora has to infer the contract from them.
+In `0.4.0`, plugin sources and sinks must declare explicit data-plane
+contracts. Legacy bool-flag inference is no longer supported.
 
 ### Sinks — `agora.sinks`
 

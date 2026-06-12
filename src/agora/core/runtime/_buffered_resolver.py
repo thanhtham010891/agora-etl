@@ -87,7 +87,7 @@ async def _coerce_processed_record(
             result=None,
         )
 
-    final_result = await chain.process_range(
+    final_value, final_failure = await chain.process_range_outcome(
         split_index + 1,
         chain.middleware_count(),
         buffered_result,
@@ -95,6 +95,6 @@ async def _coerce_processed_record(
     )
     return ProcessedSourceRecord(
         source_record=source_record,
-        result=final_result.value,
-        failure=final_result.failure,
+        result=final_value,
+        failure=final_failure,
     )

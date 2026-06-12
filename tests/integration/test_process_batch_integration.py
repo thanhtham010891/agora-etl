@@ -19,10 +19,12 @@ from typing import Any
 import pytest
 
 from agora import (
+    DataPlane,
     DeliveryConfig,
     InMemoryCheckpointStore,
     Pipeline,
     SinkFailurePolicy,
+    SourceDataPlaneSpec,
 )
 from agora.core.source import BaseSource
 from agora.middlewares.process import ArrowProcessBatchMiddleware, ProcessBatchMiddleware
@@ -122,13 +124,20 @@ class _BatchSource(BaseSource[dict]):
     """Simple batch source that emits pre-defined batches."""
 
     source_name = "test_batch_source"
-    supports_batch_emit = True
     supports_checkpoint = True
 
     def __init__(self, batches: list[list[dict]], *, delays: list[float] | None = None) -> None:
         self._batches = batches
         self._delays = delays or [0.0] * len(batches)
         self._idx = 0
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
 
     def current_checkpoint(self) -> dict[str, int]:
         return {"batch_index": self._idx}
@@ -156,8 +165,6 @@ class _ArrowBatchSource(BaseSource[Any]):
     """Simple Arrow-emitting batch source for process-arrow integration tests."""
 
     source_name = "test_arrow_batch_source"
-    supports_batch_emit = True
-    emits_arrow_batches = True
     supports_checkpoint = True
 
     def __init__(
@@ -169,6 +176,14 @@ class _ArrowBatchSource(BaseSource[Any]):
         self._batches = batches
         self._delays = delays or [0.0] * len(batches)
         self._idx = 0
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.ARROW_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=True,
+        )
 
     def current_checkpoint(self) -> dict[str, int]:
         return {"batch_index": self._idx}

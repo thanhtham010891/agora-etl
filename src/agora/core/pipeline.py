@@ -99,7 +99,10 @@ class Pipeline(Generic[T]):
     ) -> BoundPipeline[Any]:
         return BoundPipeline(
             source=self._source,
-            chain=MiddlewareChain(self._middlewares),
+            chain=MiddlewareChain(
+                self._middlewares,
+                acceleration_mode=config.acceleration_mode,
+            ),
             writer=writer,
             pipeline_id=self._pipeline_id,
             config=config,
@@ -183,6 +186,7 @@ class BoundPipeline(Generic[T]):
             config,
             pipeline_id=pipeline_id,
         )
+        self._chain.set_acceleration_mode(self._config.acceleration_mode)
         self._live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
 
     @property

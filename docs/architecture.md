@@ -143,11 +143,8 @@ The planner resolves two important boundaries up front:
 - the plane emitted by the source
 - the plane that will actually enter the writer after any required materialization
 
-Legacy note: `supports_batch_emit`, `emits_arrow_batches`,
-`batch_writable_native`, and `arrow_passthrough_native` still work in `0.3.x`
-as compatibility shims, but the runtime now prefers explicit data-plane
-contracts and emits `DeprecationWarning` when it has to infer a non-row plane
-from the old booleans.
+In `0.4.0`, the planner requires explicit data-plane contracts. Legacy source
+and sink bool flags are no longer consulted when selecting a non-row lane.
 
 ## How To Predict The Selected Lane
 
@@ -157,11 +154,11 @@ Use this as the quick mental model:
 | --- | --- | --- | --- | --- |
 | `stream()` only | regular middleware or no middleware | any sink | `linear` | default path |
 | `stream()` only | any stage with `submit()` and `min_concurrency > 1` | any sink | `buffered` | preserves source order while running the buffered stage concurrently |
-| `stream_batches()` via `supports_batch_emit=True` | regular `BatchMiddleware` or no middleware | batch-writable sink | `batch` | avoids per-record runtime orchestration |
-| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | Arrow-native sink | `batch` + Arrow fast path | `arrow_fast_path_active=true`, `arrow_chain_active=true` |
-| Arrow batch source (`emits_arrow_batches=True`) | no Arrow stages, only Python-row middleware | any sink | `batch` | materialises rows once before the chain |
-| Arrow batch source (`emits_arrow_batches=True`) | all stages Arrow-native | mixed fan-out sinks | `batch` + partial Arrow fast path | Arrow sinks get `write_arrow_batch()`, other sinks get row fallback at the sink boundary |
-| Arrow batch source (`emits_arrow_batches=True`) | mixed Arrow + regular middleware | any sink | invalid | planner raises `PipelineError` before the run starts |
+| `stream_batches()` with `data_plane_spec().emitted_plane == PYTHON_BATCHES` | regular `BatchMiddleware` or no middleware | batch-writable sink | `batch` | avoids per-record runtime orchestration |
+| Arrow batch source (`data_plane_spec().emitted_plane == ARROW_BATCHES`) | all stages Arrow-native | Arrow-native sink | `batch` + Arrow fast path | `arrow_fast_path_active=true`, `arrow_chain_active=true` |
+| Arrow batch source (`data_plane_spec().emitted_plane == ARROW_BATCHES`) | no Arrow stages, only Python-row middleware | any sink | `batch` | materialises rows once before the chain |
+| Arrow batch source (`data_plane_spec().emitted_plane == ARROW_BATCHES`) | all stages Arrow-native | mixed fan-out sinks | `batch` + partial Arrow fast path | Arrow sinks get `write_arrow_batch()`, other sinks get row fallback at the sink boundary |
+| Arrow batch source (`data_plane_spec().emitted_plane == ARROW_BATCHES`) | mixed Arrow + regular middleware | any sink | invalid | planner raises `PipelineError` before the run starts |
 
 To confirm the decision at runtime, inspect:
 

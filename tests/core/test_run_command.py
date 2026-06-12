@@ -563,6 +563,10 @@ async def test_build_and_run_plan_prints_resolved_pipeline_summary(
         """
 format = "agora/v1"
 
+[performance]
+acceleration = "required"
+profile = "throughput"
+
 [defaults]
 pipeline = "planned"
 profile = "batch"
@@ -638,6 +642,7 @@ type = "stdout"
     assert ("item", ("dedup", "key=id")) in printed
     assert ("item", ("dlq", "disabled")) in printed
     assert ("item", ("tracing", "disabled")) in printed
+    assert ("item", ("acceleration", "required (throughput)")) in printed
     assert ("item", ("sinks", "stdout")) in printed
 
 

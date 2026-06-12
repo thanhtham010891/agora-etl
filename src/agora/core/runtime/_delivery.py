@@ -145,6 +145,17 @@ class DeliveryEngine:
     async def close_pending_write_owner(self, state: RunState) -> None:
         await close_pending_write_owner(state)
 
+    def _pending_write_uses_owner(
+        self,
+        state: RunState,
+        writer_batch_size: int,
+    ) -> bool:
+        uses_owner = state.pending_write_uses_owner
+        if uses_owner is None:
+            uses_owner = self._uses_pending_write_owner(writer_batch_size)
+            state.pending_write_uses_owner = uses_owner
+        return uses_owner
+
     async def write_to_dlq(
         self,
         ctx: PipelineContext,
@@ -346,12 +357,45 @@ class DeliveryEngine:
             persist_checkpoint=self.persist_checkpoint,
         )
 
+    async def _commit_pending_write_success_batch(
+        self,
+        state: RunState,
+        batch: list[PendingWrite],
+    ) -> None:
+        state.ctx.metrics.records_written += len(batch)
+
+        pending_checkpoint: Checkpoint | None = None
+        pending_checkpoint_batch_size = 0
+        delivered_hooks: list[Callable[[], Awaitable[None]]] = []
+
+        for item in batch:
+            checkpoint = self.prepare_checkpoint(
+                state.ctx,
+                state.checkpoint_state,
+                item.checkpoint,
+            )
+            if checkpoint is not None:
+                pending_checkpoint = checkpoint
+                pending_checkpoint_batch_size += 1
+            if item.on_success is not None:
+                delivered_hooks.append(item.on_success)
+
+        if pending_checkpoint is not None:
+            await self.persist_checkpoint(
+                state.ctx,
+                state.checkpoint_state,
+                pending_checkpoint,
+                batch_size=pending_checkpoint_batch_size,
+            )
+        for hook in delivered_hooks:
+            await hook()
+
     async def _flush_pending_writes_once(self, state: RunState) -> None:
         if not state.pending_writes:
             return
 
-        batch = list(state.pending_writes)
-        state.pending_writes.clear()
+        batch = state.pending_writes
+        state.pending_writes = []
 
         try:
             write_results, _ = await self.transport.write_batch(
@@ -371,6 +415,10 @@ class DeliveryEngine:
 
         validate_write_result_count(expected=len(batch), actual=len(write_results))
 
+        if all(wr.ok for wr in write_results):
+            await self._commit_pending_write_success_batch(state, batch)
+            return
+
         outcomes: list[CommitOutcome] = []
         for item, wr in zip(batch, write_results, strict=True):
             outcome = await self._resolve_write_result(
@@ -388,6 +436,43 @@ class DeliveryEngine:
             await self.close_pending_write_owner(state)
         await self._flush_pending_writes_once(state)
 
+    async def queue_success_record(
+        self,
+        state: RunState,
+        result: Any,
+        raw_record: Any,
+        checkpoint_value: CheckpointValue,
+        writer_batch_size: int,
+        *,
+        on_success: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        uses_pending_write_owner = self._pending_write_uses_owner(state, writer_batch_size)
+        if uses_pending_write_owner:
+            if state.pending_write_owner_task is None:
+                await self._ensure_pending_write_owner(state, writer_batch_size)
+            flushed = state.pending_write_flushed
+            assert flushed is not None
+            flushed.clear()
+        pending_writes = state.pending_writes
+        pending_writes.append(
+            PendingWrite(
+                processed=result,
+                raw=raw_record,
+                checkpoint=checkpoint_value,
+                on_success=on_success,
+            )
+        )
+        pending_count = len(pending_writes)
+        if uses_pending_write_owner:
+            notify = state.pending_write_notify
+            assert notify is not None
+            notify.set()
+            if pending_count >= writer_batch_size:
+                await self._wait_for_pending_write_capacity(state, writer_batch_size)
+            return
+        if pending_count >= writer_batch_size:
+            await self.flush_pending_writes(state)
+
     async def queue_processed_record(
         self,
         state: RunState,
@@ -402,27 +487,14 @@ class DeliveryEngine:
         if result is None:
             await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
             return
-
-        await self._ensure_pending_write_owner(state, writer_batch_size)
-
-        if state.pending_write_flushed is not None:
-            state.pending_write_flushed.clear()
-        state.pending_writes.append(
-            PendingWrite(
-                processed=result,
-                raw=raw_record,
-                checkpoint=checkpoint_value,
-                on_success=on_success,
-            )
+        await self.queue_success_record(
+            state,
+            result,
+            raw_record,
+            checkpoint_value,
+            writer_batch_size,
+            on_success=on_success,
         )
-        if state.pending_write_notify is not None:
-            state.pending_write_notify.set()
-        if state.pending_write_owner_task is not None:
-            if len(state.pending_writes) >= writer_batch_size:
-                await self._wait_for_pending_write_capacity(state, writer_batch_size)
-            return
-        if len(state.pending_writes) >= writer_batch_size:
-            await self.flush_pending_writes(state)
 
     async def dispatch_processed_result(
         self,
@@ -435,6 +507,9 @@ class DeliveryEngine:
         failure: MiddlewareFailure | None = None,
         on_success: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        if result is None:
+            await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
+            return
         if writer_batch_size <= 1:
             await self.write_processed_record(
                 state,
@@ -445,13 +520,12 @@ class DeliveryEngine:
                 on_success=on_success,
             )
             return
-        await self.queue_processed_record(
+        await self.queue_success_record(
             state,
             result,
             raw_record,
             checkpoint_value,
             writer_batch_size,
-            failure=failure,
             on_success=on_success,
         )
 

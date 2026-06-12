@@ -376,6 +376,21 @@ async def test_sink_fan_out_arrow_batch_uses_arrow_path_for_sink_with_write_arro
 
 
 @pytest.mark.asyncio
+async def test_sink_fan_out_arrow_batch_single_arrow_sink_skips_row_materialization() -> None:
+    class _ArrowBatch:
+        def to_pylist(self) -> list[dict[str, int]]:
+            raise AssertionError("single arrow sink should not materialize rows")
+
+    batch = _ArrowBatch()
+    sink = _ArrowBatchCollectSink()
+    fan_out = SinkFanOut([sink])  # type: ignore[list-item]
+
+    await fan_out.write_arrow_batch(batch)
+
+    assert sink.batches == [batch]
+
+
+@pytest.mark.asyncio
 async def test_sink_router_with_max_records_limits_at_source_boundary() -> None:
     class _CollectRouteSink:
         sink_name = "collect_route"
@@ -770,16 +785,8 @@ def test_sink_capabilities_warn_once_for_legacy_bool_flags() -> None:
             del batch
 
     sink = _LegacyArrowSink()
-    with pytest.deprecated_call(match="legacy sink data-plane bool flags"):
-        first = sink_capabilities(sink)
-    second = sink_capabilities(sink)
-
-    assert first.native_data_planes == (
-        DataPlane.PYTHON_ROWS,
-        DataPlane.PYTHON_BATCHES,
-        DataPlane.ARROW_BATCHES,
-    )
-    assert second.native_data_planes == first.native_data_planes
+    with pytest.raises(TypeError, match="legacy sink data-plane bool flags"):
+        sink_capabilities(sink)
 
 
 def test_sink_capabilities_do_not_warn_for_explicit_data_planes() -> None:
@@ -811,7 +818,7 @@ def test_sink_capabilities_do_not_warn_for_explicit_data_planes() -> None:
 
 @pytest.mark.asyncio
 async def test_sink_fanout_write_single_sink_returns_write_ok_singleton() -> None:
-    from agora.core.sink import _WRITE_OK
+    from agora.core.sink._writers import _WRITE_OK
 
     written: list[str] = []
 
@@ -849,7 +856,7 @@ async def test_sink_fanout_write_single_sink_error_returns_write_result_not_ok()
 
 @pytest.mark.asyncio
 async def test_sink_fanout_write_multi_sink_does_not_use_fast_path() -> None:
-    from agora.core.sink import _WRITE_OK
+    from agora.core.sink._writers import _WRITE_OK
 
     written: list[str] = []
 

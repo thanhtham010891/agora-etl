@@ -153,6 +153,9 @@ class Registry(Generic[P]):
         self._registration_types: dict[str, str] = {}
         self._origins: dict[str, str] = {}
         self._metadata: dict[str, dict[str, Any]] = {}
+        # Entry points registered lazily: name -> zero-arg loader that performs
+        # the deferred ``ep.load()`` + manifest check + real registration.
+        self._lazy_loaders: dict[str, Callable[[], None]] = {}
 
     @property
     def name(self) -> str:
@@ -233,8 +236,21 @@ class Registry(Generic[P]):
     # Lookup                                                               #
     # ------------------------------------------------------------------ #
 
+    def _resolve_lazy(self, key: str) -> None:
+        """Run the deferred entry-point loader for *key*, if any.
+
+        Lazy entry points are scanned at import time but their module import
+        (``ep.load()``) is deferred until the plugin is actually looked up,
+        keeping ``import agora`` from pulling optional plugin dependencies.
+        """
+        loader = self._lazy_loaders.pop(key, None)
+        if loader is not None:
+            loader()
+
     def get(self, key: str) -> P | None:
         """Return the plugin for *key*, or None if not registered."""
+        if key not in self._plugins:
+            self._resolve_lazy(key)
         return self._plugins.get(key)
 
     def get_or_raise(self, key: str) -> P:
@@ -247,6 +263,9 @@ class Registry(Generic[P]):
             ``KeyError`` for backward compatibility.
         """
         plugin = self._plugins.get(key)
+        if plugin is None:
+            self._resolve_lazy(key)
+            plugin = self._plugins.get(key)
         if plugin is None:
             available = self.all_keys()
             raise PluginNotFoundError(
@@ -274,6 +293,12 @@ class Registry(Generic[P]):
         if factory is not None:
             return factory(**kwargs)
 
+        if key not in self._plugins:
+            self._resolve_lazy(key)
+            factory = self._factories.get(key)
+            if factory is not None:
+                return factory(**kwargs)
+
         plugin = self._plugins.get(key)
         if plugin is not None:
             if callable(plugin):
@@ -292,15 +317,15 @@ class Registry(Generic[P]):
         )
 
     def has(self, key: str) -> bool:
-        """Return True if *key* is registered (plugin or factory)."""
-        return key in self._plugins or key in self._factories
+        """Return True if *key* is registered (plugin, factory, or lazy entry point)."""
+        return key in self._plugins or key in self._factories or key in self._lazy_loaders
 
     def all_keys(self) -> list[str]:
         """Return all registered keys (insertion order, Python ≥3.7)."""
-        # Merge keys from both dicts, preserving order, no duplicates.
+        # Merge keys from all maps, preserving order, no duplicates.
         seen: set[str] = set()
         keys: list[str] = []
-        for k in (*self._plugins, *self._factories):
+        for k in (*self._plugins, *self._factories, *self._lazy_loaders):
             if k not in seen:
                 seen.add(k)
                 keys.append(k)
@@ -373,13 +398,14 @@ class Registry(Generic[P]):
         return self.has(key)
 
     def __len__(self) -> int:
-        return len(set(self._plugins) | set(self._factories))
+        return len(set(self._plugins) | set(self._factories) | set(self._lazy_loaders))
 
     def __repr__(self) -> str:
         return (
             f"Registry(name={self._name!r}, "
             f"plugins={len(self._plugins)}, "
-            f"factories={len(self._factories)})"
+            f"factories={len(self._factories)}, "
+            f"lazy={len(self._lazy_loaders)})"
         )
 
     # ------------------------------------------------------------------ #
@@ -473,7 +499,7 @@ class Registry(Generic[P]):
     # Auto-discovery — setuptools entry points                             #
     # ------------------------------------------------------------------ #
 
-    def load_entrypoints(self, group: str) -> None:
+    def load_entrypoints(self, group: str, *, eager: bool = False) -> None:
         """Discover and register plugins via setuptools entry_points.
 
         Third-party packages advertise plugins in ``pyproject.toml``::
@@ -487,6 +513,14 @@ class Registry(Generic[P]):
 
         Each entry point's ``.load()`` result is registered under the
         entry point name.  Errors are logged but do not abort discovery.
+
+        By default the import of each plugin module (``ep.load()``) is
+        **deferred** until the plugin is first looked up via
+        ``get``/``get_or_raise``/``create``. This keeps ``import agora`` from
+        pulling optional plugin dependencies (aiokafka, asyncpg, redis, …) at
+        startup. Pass ``eager=True`` to import and register every plugin
+        immediately — used by ``agora doctor`` and ``agora plugins list`` where
+        full MANIFEST compatibility metadata must be reported up front.
         """
         from importlib.metadata import entry_points
 
@@ -526,7 +560,8 @@ class Registry(Generic[P]):
                 )
                 continue
 
-            if existing_origin == "entrypoint":
+            existing_lazy = ep.name in self._lazy_loaders and existing_origin == "entrypoint_lazy"
+            if existing_origin == "entrypoint" or existing_lazy:
                 if (
                     existing_metadata.get("entrypoint_group") == group
                     and existing_metadata.get("distribution_name") == distribution_name
@@ -560,57 +595,98 @@ class Registry(Generic[P]):
                 )
                 continue
 
-            try:
-                plugin = ep.load()
-                metadata = _coerce_manifest(
-                    plugin,
-                    distribution_name=distribution_name,
-                    distribution_version=distribution_version,
-                )
-                if metadata is not None:
-                    metadata["entrypoint_group"] = group
-                if metadata is not None and metadata.get("compatible") is False:
-                    self._metadata[ep.name] = metadata
-                    self._origins[ep.name] = "entrypoint_incompatible"
-                    self._registration_types[ep.name] = "unavailable"
-                    logger.warning(
-                        "registry_entrypoint_incompatible",
-                        registry=self._name,
-                        group=group,
-                        name=ep.name,
-                        plugin_api_version=metadata.get("agora_api_version"),
-                        expected_manifest_version=AGORA_PLUGIN_MANIFEST_VERSION,
-                        hint=(
-                            f"Update MANIFEST.agora_api_version to "
-                            f"{AGORA_PLUGIN_MANIFEST_VERSION!r} in the plugin package "
-                            f"and verify it still works with the current base classes. "
-                            f"See docs/plugins/manifest.md for the compatibility model."
-                        ),
-                    )
-                    continue
-                self.register(ep.name, plugin)
-                self._origins[ep.name] = "entrypoint"
-                if metadata is not None:
-                    self._metadata[ep.name] = metadata
-                logger.info(
-                    "registry_entrypoint_loaded",
-                    registry=self._name,
-                    group=group,
-                    name=ep.name,
-                )
-            except Exception as exc:
-                self._metadata[ep.name] = {
-                    "package": distribution_name,
-                    "version": distribution_version,
-                    "entrypoint_group": group,
-                    "compatible": None,
-                    "load_error": f"{type(exc).__name__}: {exc}",
-                }
-                self._origins[ep.name] = "entrypoint_error"
+            if eager:
+                self._load_entrypoint(ep, group, distribution_name, distribution_version)
+            else:
+                self._register_lazy_entrypoint(ep, group, distribution_name, distribution_version)
+
+    def _register_lazy_entrypoint(
+        self,
+        ep: Any,
+        group: str,
+        distribution_name: str | None,
+        distribution_version: str | None,
+    ) -> None:
+        """Record an entry point without importing its module.
+
+        Stores light metadata (name/package/version/group) so the plugin is
+        discoverable via ``has``/``all_keys``, and a loader closure that runs
+        the real ``ep.load()`` + manifest check on first lookup.
+        """
+        name = ep.name
+        self._metadata[name] = {
+            "package": distribution_name,
+            "version": distribution_version,
+            "entrypoint_group": group,
+            "distribution_name": distribution_name,
+            "distribution_version": distribution_version,
+            "compatible": None,
+        }
+        self._origins[name] = "entrypoint_lazy"
+        self._registration_types[name] = "lazy"
+        self._lazy_loaders[name] = lambda: self._load_entrypoint(
+            ep, group, distribution_name, distribution_version
+        )
+
+    def _load_entrypoint(
+        self,
+        ep: Any,
+        group: str,
+        distribution_name: str | None,
+        distribution_version: str | None,
+    ) -> None:
+        """Import an entry point's module and register the loaded plugin."""
+        try:
+            plugin = ep.load()
+            metadata = _coerce_manifest(
+                plugin,
+                distribution_name=distribution_name,
+                distribution_version=distribution_version,
+            )
+            if metadata is not None:
+                metadata["entrypoint_group"] = group
+            if metadata is not None and metadata.get("compatible") is False:
+                self._metadata[ep.name] = metadata
+                self._origins[ep.name] = "entrypoint_incompatible"
                 self._registration_types[ep.name] = "unavailable"
-                logger.exception(
-                    "registry_entrypoint_error",
+                logger.warning(
+                    "registry_entrypoint_incompatible",
                     registry=self._name,
                     group=group,
                     name=ep.name,
+                    plugin_api_version=metadata.get("agora_api_version"),
+                    expected_manifest_version=AGORA_PLUGIN_MANIFEST_VERSION,
+                    hint=(
+                        f"Update MANIFEST.agora_api_version to "
+                        f"{AGORA_PLUGIN_MANIFEST_VERSION!r} in the plugin package "
+                        f"and verify it still works with the current base classes. "
+                        f"See docs/plugins/manifest.md for the compatibility model."
+                    ),
                 )
+                return
+            self.register(ep.name, plugin)
+            self._origins[ep.name] = "entrypoint"
+            if metadata is not None:
+                self._metadata[ep.name] = metadata
+            logger.info(
+                "registry_entrypoint_loaded",
+                registry=self._name,
+                group=group,
+                name=ep.name,
+            )
+        except Exception as exc:
+            self._metadata[ep.name] = {
+                "package": distribution_name,
+                "version": distribution_version,
+                "entrypoint_group": group,
+                "compatible": None,
+                "load_error": f"{type(exc).__name__}: {exc}",
+            }
+            self._origins[ep.name] = "entrypoint_error"
+            self._registration_types[ep.name] = "unavailable"
+            logger.exception(
+                "registry_entrypoint_error",
+                registry=self._name,
+                group=group,
+                name=ep.name,
+            )

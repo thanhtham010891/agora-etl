@@ -130,6 +130,22 @@ class TracingConfig(BaseModel):
         return value
 
 
+class PerformanceConfig(BaseModel):
+    """Schema for optional runtime performance policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    acceleration: Literal["auto", "off", "required"] = "auto"
+    profile: Literal["balanced", "throughput", "low_latency"] = "balanced"
+
+    @field_validator("acceleration", "profile", mode="before")
+    @classmethod
+    def _normalize_policy_value(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+
 class PipelineConfig(BaseModel):
     """Validated root schema for one declarative pipeline."""
 
@@ -142,6 +158,7 @@ class PipelineConfig(BaseModel):
     dlq: DLQConfig | None = None
     schedule: ScheduleConfig | None = None
     tracing: TracingConfig | None = None
+    performance: PerformanceConfig | None = None
     sinks: list[ComponentConfig] = Field(default_factory=list)
 
     @field_validator("pipeline_id")
@@ -251,6 +268,7 @@ class ConfigDocument(BaseModel):
 
     format: Literal["agora/v1"]
     defaults: ConfigDefaults = Field(default_factory=ConfigDefaults)
+    performance: PerformanceConfig | None = None
     worker: WorkerConfig | None = None
     pipelines: dict[str, dict[str, Any]]
     profiles: dict[str, OverlayScope] = Field(default_factory=dict)
@@ -330,7 +348,14 @@ def resolve_config_document(
         available = ", ".join(sorted(document.pipelines))
         raise ConfigError(f"Pipeline '{selected_pipeline}' was not found. Available: {available}")
 
-    merged = deep_merge(base_pipeline, {})
+    document_defaults: dict[str, Any] = {}
+    if document.performance is not None:
+        document_defaults["performance"] = document.performance.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude_none=True,
+        )
+    merged = deep_merge(document_defaults, base_pipeline)
     selected_profile = _select_optional_overlay(profile_name, document.defaults.profile)
     selected_environment = _select_optional_overlay(
         environment_name,
@@ -401,6 +426,19 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
             "service_name": service_name,
         }
 
+    performance = {
+        "acceleration": (
+            validated.performance.acceleration
+            if validated.performance is not None
+            else PerformanceConfig().acceleration
+        ),
+        "profile": (
+            validated.performance.profile
+            if validated.performance is not None
+            else PerformanceConfig().profile
+        ),
+    }
+
     schedule = None
     if validated.schedule is not None:
         schedule = {
@@ -420,6 +458,7 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "dlq": dlq,
         "schedule": schedule,
         "tracing": tracing,
+        "performance": performance,
         "sinks": [sink.type for sink in validated.sinks],
         "import_refs": import_refs,
     }
@@ -622,6 +661,7 @@ __all__ = [
     "DedupConfig",
     "ImportRefConfig",
     "OverlayScope",
+    "PerformanceConfig",
     "PipelineConfig",
     "ResolvedPipelineConfig",
     "ResolvedWorkerConfig",

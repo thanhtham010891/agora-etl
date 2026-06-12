@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from agora.core.batch import is_arrow_native_sink
 from agora.core.runtime._delivery import CheckpointState, RecordDeliveryError, RunState
-from agora.core.runtime._hot_metrics import HotPathMetrics
+from agora.core.runtime._hot_metrics import HotPathMetrics, RustHotPathMetrics
 from agora.core.types import SinkFailurePolicy
+
+HotMetrics = HotPathMetrics | RustHotPathMetrics
 
 if TYPE_CHECKING:
     from agora.core.context import PipelineContext
@@ -29,7 +31,11 @@ class BatchLaneStrategy:
         state = RunState(ctx=ctx, checkpoint_state=checkpoint_state, pending_writes=[])
         source_name = c.source.source_name
         metrics = ctx.metrics
-        hot = HotPathMetrics.for_source(source_name, metrics=metrics)
+        hot = HotPathMetrics.for_source(
+            source_name,
+            metrics=metrics,
+            acceleration_mode=c.acceleration_mode,
+        )
 
         arrow_writer: Any = c.delivery.transport.writer
         metrics.runtime.arrow_fast_path_active = c.plan.writer.arrow_fast_path
@@ -66,6 +72,17 @@ class BatchLaneStrategy:
                 batch_size = len(batch)
                 hot.inc_consumed(batch_size)
 
+                if c.chain.is_empty():
+                    await self._write_passthrough_arrow_batch(
+                        state,
+                        batch=batch,
+                        checkpoint_value=checkpoint_value,
+                        batch_size=batch_size,
+                        arrow_writer=arrow_writer,
+                        hot=hot,
+                    )
+                    continue
+
                 arrow_result = await c.chain.process_arrow_batch(batch, ctx)
 
                 await self._finalize_arrow_batch_result(
@@ -93,6 +110,64 @@ class BatchLaneStrategy:
 
         hot.flush_final(metrics)
 
+    async def _write_passthrough_arrow_batch(
+        self,
+        state: RunState,
+        *,
+        batch: Any,
+        checkpoint_value: Any,
+        batch_size: int,
+        arrow_writer: Any,
+        hot: HotMetrics,
+    ) -> None:
+        c = self.coordinator
+        metrics = state.ctx.metrics
+
+        try:
+            if is_arrow_native_sink(arrow_writer):
+                await c.delivery.transport.write_arrow_batch(state.ctx, arrow_writer, batch)
+            else:
+                rows = await asyncio.to_thread(batch.to_pylist)
+                results, _elapsed_ms = await c.delivery.transport.write_batch(state.ctx, rows)
+                first_error = next(
+                    (error for result in results for error in result.errors),
+                    None,
+                )
+                if first_error is not None:
+                    raise first_error
+                if not all(result.written for result in results):
+                    raise RuntimeError("arrow batch fallback write did not write all records")
+            hot.inc_written(batch_size)
+            if hot.inc_consumed(0):
+                hot.flush(metrics)
+        except Exception as exc:
+            metrics.records_errored += batch_size
+            routed = True
+            if c.delivery.dlq_sink is not None:
+                raw_rows = await asyncio.to_thread(batch.to_pylist)
+                for raw_record in raw_rows:
+                    ok = await c.delivery.write_to_dlq(
+                        ctx=state.ctx,
+                        stage="sink_write",
+                        exc=exc,
+                        record=raw_record,
+                        original_record=raw_record,
+                        processed_record=raw_record,
+                        checkpoint=checkpoint_value,
+                    )
+                    routed = routed and ok
+            if routed or c.delivery.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+                state.ctx.log.exception(
+                    "arrow_batch_write_error",
+                    batch_size=batch_size,
+                    error=str(exc),
+                )
+            elif c.delivery.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                raise RecordDeliveryError(exc) from exc
+
+        await c.delivery.save_batch_checkpoint(state, checkpoint_value, batch_size)
+        hot.flush(metrics)
+
     async def _finalize_list_batch_result(
         self,
         state: RunState,
@@ -100,7 +175,7 @@ class BatchLaneStrategy:
         *,
         raw_batch: list[Any],
         checkpoint_value: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> None:
         c = self.coordinator
         await c.delivery.write_batch_result(
@@ -121,7 +196,7 @@ class BatchLaneStrategy:
         checkpoint_value: Any,
         batch_size: int,
         arrow_writer: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> None:
         c = self.coordinator
         metrics = state.ctx.metrics
@@ -218,7 +293,7 @@ class BatchLaneStrategy:
         self,
         ctx: PipelineContext,
         state: RunState,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
         stage: Any,
     ) -> None:
         c = self.coordinator
@@ -319,7 +394,7 @@ class BatchLaneStrategy:
         self,
         ctx: PipelineContext,
         state: RunState,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
         arrow_writer: Any,
         stage: Any,
     ) -> None:
@@ -441,7 +516,7 @@ class BatchLaneStrategy:
         pending_batches: dict[int, tuple[Any, list[Any], Any]],
         next_commit: int,
         stage: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> int:
         while True:
             entry = pending_batches.get(next_commit)
@@ -467,7 +542,7 @@ class BatchLaneStrategy:
         pending_batches: dict[int, tuple[Any, list[Any], Any]],
         next_commit: int,
         stage: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> int:
         entry = pending_batches.get(next_commit)
         if entry is None:
@@ -491,7 +566,7 @@ class BatchLaneStrategy:
         raw_batch: list[Any],
         checkpoint_value: Any,
         stage: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> None:
         c = self.coordinator
         from agora.core.batch import BatchFailure, BatchProcessResult
@@ -525,7 +600,7 @@ class BatchLaneStrategy:
         next_commit: int,
         stage: Any,
         arrow_writer: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> int:
         while True:
             entry = pending_batches.get(next_commit)
@@ -554,7 +629,7 @@ class BatchLaneStrategy:
         next_commit: int,
         stage: Any,
         arrow_writer: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> int:
         entry = pending_batches.get(next_commit)
         if entry is None:
@@ -582,7 +657,7 @@ class BatchLaneStrategy:
         checkpoint_value: Any,
         stage: Any,
         arrow_writer: Any,
-        hot: HotPathMetrics,
+        hot: HotMetrics,
     ) -> None:
         c = self.coordinator
         from agora.core.batch import BatchFailure, BatchProcessResult

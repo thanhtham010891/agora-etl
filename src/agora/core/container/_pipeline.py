@@ -42,13 +42,26 @@ def build_pipeline_from_container(container: AgoraContainer) -> BoundPipeline[An
         else DLQFailurePolicy.LOG_ONLY
     )
     tracer = container.resolve("_tracer") if container.has("_tracer") else None
+    acceleration_mode = (
+        container.resolve("_acceleration_mode") if container.has("_acceleration_mode") else "auto"
+    )
+    performance_profile = (
+        container.resolve("_performance_profile")
+        if container.has("_performance_profile")
+        else "balanced"
+    )
 
     return BoundPipeline(
         source=source,
-        chain=MiddlewareChain(middlewares),
+        chain=MiddlewareChain(
+            middlewares,
+            acceleration_mode=acceleration_mode,
+        ),
         writer=SinkFanOut(sinks),
         pipeline_id=pipeline_id,
         config=DeliveryConfig(
+            acceleration_mode=acceleration_mode,
+            performance_profile=performance_profile,
             dlq=dlq_sink,
             dlq_failure_policy=dlq_failure_policy,
             tracer=tracer,

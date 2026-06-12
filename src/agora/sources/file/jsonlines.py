@@ -13,6 +13,13 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
+from agora.core.acceleration import (
+    AccelerationMode,
+    AccelerationUnavailableError,
+    acceleration_supports,
+    normalize_acceleration_mode,
+    read_jsonl_arrow_batches,
+)
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
@@ -46,6 +53,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
     """
 
     source_name = "jsonl"
+    arrow_alternative_hint = "ArrowJsonLinesSource"
 
     def __init__(
         self,
@@ -151,43 +159,52 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         """
         self._record_error_count = 0
         self._record_drop_count = 0
+        row_mapper = self._row_mapper
+        json_loads = _json_lib.loads
+        resume_line_number = self._resume_line_number
+        emit_batch_size = self._emit_batch_size
+        on_record_error = self._on_record_error
+        current_checkpoint = self.current_checkpoint
+        source_name = self.source_name
 
         with open(self._path, encoding=self._encoding) as file_obj:
             line_number = 0
             batches_emitted = 0
             batch: list[T] = []
+            batch_append = batch.append
 
             for line in file_obj:
                 line_number += 1
-                if line_number <= self._resume_line_number:
+                if line_number <= resume_line_number:
                     continue
                 self._last_line_number = line_number
                 stripped = line.strip()
                 if not stripped:
                     continue
                 try:
-                    parsed = _json_lib.loads(stripped)
-                    record = self._row_mapper(parsed)
+                    parsed = json_loads(stripped)
+                    record = row_mapper(parsed)
                 except Exception as exc:
                     self._record_error_count += 1
-                    if self._on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
+                    if on_record_error == SourceRecordFailurePolicy.LOG_AND_CONTINUE:
                         self._record_drop_count += 1
                         continue
                     raise SourceRecordError(
                         exc,
                         record=stripped,
-                        checkpoint=self.current_checkpoint(),
-                        source=self.source_name,
+                        checkpoint=current_checkpoint(),
+                        source=source_name,
                     ) from exc
 
                 if record is None:
                     self._record_drop_count += 1
                     continue
 
-                batch.append(record)
-                if len(batch) >= self._emit_batch_size:
+                batch_append(record)
+                if len(batch) >= emit_batch_size:
                     yield batch
                     batch = []
+                    batch_append = batch.append
                     batches_emitted += 1
                     if batches_emitted % 4 == 0:
                         await asyncio.sleep(0)
@@ -301,10 +318,13 @@ class ArrowJsonLinesSource(FileSource[Any]):
         self,
         path: Path,
         batch_size: int = 65_536,
+        *,
+        acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO,
     ) -> None:
         self._path = Path(path)
         self._batch_size = max(batch_size, 1)
         self._rows_read: int = 0
+        self._acceleration_mode = normalize_acceleration_mode(acceleration_mode)
 
     def current_checkpoint(self) -> dict[str, int] | None:
         return {"rows": self._rows_read} if self._rows_read else None
@@ -322,19 +342,60 @@ class ArrowJsonLinesSource(FileSource[Any]):
 
     async def stream_batches(self) -> AsyncIterator[Any]:
         try:
-            import pyarrow.json as pajson
+            rust_reader = await self._read_batches_via_rust()
+        except Exception as exc:
+            if self._acceleration_mode == AccelerationMode.REQUIRED:
+                raise
+            logger.warning(
+                "arrow_jsonl_source_rust_fallback",
+                path=str(self._path),
+                error=str(exc),
+            )
+            rust_reader = None
+
+        if rust_reader is not None:
+            for batch in rust_reader:
+                self._rows_read += batch.num_rows
+                yield batch
+            return
+
+        try:
+            import pyarrow.json as _pajson
         except ImportError as exc:
             raise ImportError(
                 "ArrowJsonLinesSource requires pyarrow. Install via: pip install 'agora-etl[file]'"
             ) from exc
 
+        pajson = cast("Any", _pajson)
+
         def _read() -> list[Any]:
             table = pajson.read_json(str(self._path))
-            return table.to_batches(max_chunksize=self._batch_size)  # type: ignore[no-any-return]
+            return cast("list[Any]", table.to_batches(max_chunksize=self._batch_size))
 
         for batch in await asyncio.to_thread(_read):
             self._rows_read += batch.num_rows
             yield batch
+
+    async def _read_batches_via_rust(self) -> Any | None:
+        # The Rust bridge now uses Arrow C Stream / RecordBatchReader, but the
+        # current arrow-json reader still benchmarks far below pyarrow.json on
+        # this lane. Keep it opt-in via REQUIRED while the parser path is tuned.
+        if self._acceleration_mode != AccelerationMode.REQUIRED:
+            return None
+        if not acceleration_supports(
+            "jsonl_arrow_reader",
+            mode=self._acceleration_mode,
+        ):
+            return None
+        try:
+            return await asyncio.to_thread(
+                read_jsonl_arrow_batches,
+                str(self._path),
+                self._batch_size,
+                mode=self._acceleration_mode,
+            )
+        except AccelerationUnavailableError:
+            return None
 
     async def stream(self) -> AsyncIterator[Any]:  # type: ignore[override]
         async for batch in self.stream_batches():

@@ -4,6 +4,7 @@ Release notes are versioned as separate documents so the top-level changelog can
 
 ## Releases
 
+- [0.4.0](0.4.0.md) — performance comeback release with visible optional Rust acceleration and benchmark gates
 - [0.3.3](0.3.3.md) — AI provider contract cleanup, Anthropic official bundle promotion, and config-driven OTel workers
 - [0.3.2](0.3.2.md) — public boundary freeze, preservation-backed runtime guarantees, plugin contract cleanup, and perf/security hardening
 - [0.3.1](0.3.1.md) — runtime contract hardening, recovery CLI UX, and stronger doctor/preflight diagnostics

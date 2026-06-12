@@ -86,6 +86,12 @@ def _collect(kinds: list[str]) -> dict[str, list[dict[str, Any]]]:
         contract = _CONTRACTS_BY_KIND[kind]
         module = importlib.import_module(contract.module_path)
         registry = getattr(module, contract.registry_attr)
+        # Force eager import so compatibility/MANIFEST metadata is populated for
+        # every plugin — runtime resolution stays lazy, but `plugins list` must
+        # report the full picture.
+        load_entrypoints = getattr(registry, "load_entrypoints", None)
+        if callable(load_entrypoints):
+            load_entrypoints(contract.group, eager=True)
         result[kind] = _registry_rows(registry, contract)
 
     return result

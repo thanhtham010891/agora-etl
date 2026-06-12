@@ -12,14 +12,17 @@ import pytest
 from agora import (
     DeliveryConfig,
     FilterMiddleware,
+    InMemoryTracer,
     IterableSource,
     MapMiddleware,
     Pipeline,
     SinkFailurePolicy,
 )
+from agora.core.context import PipelineContext
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.errors import PipelineError
-from agora.core.middleware import Middleware
+from agora.core.metrics import PipelineMetrics
+from agora.core.middleware import Middleware, MiddlewareChain, MiddlewareFailure
 from agora.core.runtime import _buffered, _lanes, _source_adapter
 from agora.core.runtime._delivery import SourceRecord
 from agora.core.runtime._plan import BufferedStageSpec
@@ -92,7 +95,10 @@ def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
     pipeline = (
         Pipeline(make_source(5))
         .pipe(MapMiddleware(lambda x: x * 2, name="double"))
-        .build(StdoutSink())
+        .build(
+            StdoutSink(),
+            config=DeliveryConfig(acceleration_mode="off", performance_profile="low_latency"),
+        )
     )
 
     explain = pipeline.explain(max_records=2)
@@ -111,9 +117,100 @@ def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
     assert explain.sinks[0].sink_name == "stdout"
     assert explain.sinks[0].selection_reason == "sink accepts python_rows natively"
     assert explain.sink_downgrade_count == 0
+    assert explain.acceleration.mode == "off"
+    assert explain.acceleration.profile == "low_latency"
+    assert explain.acceleration.available is False
+    assert explain.acceleration.direct_flush_eligible is False
+    assert explain.acceleration.direct_flush_inactive_reason == "writer batch size is 1"
     assert explain.to_dict()["lane_reason"] == explain.lane_reason
     assert explain.to_dict()["source_limit"] == 2
+    assert explain.to_dict()["acceleration"]["mode"] == "off"
     assert "PipelineExplain(" in str(explain)
+    assert "acceleration=off/unavailable" in str(explain)
+
+
+def test_throughput_profile_resolves_explicit_runtime_settings() -> None:
+    bound = Pipeline(make_source(5)).build(
+        StdoutSink(),
+        config=DeliveryConfig(performance_profile="throughput"),
+    )
+
+    assert bound._config.batch_size == 1_000
+    assert bound._config.batch_flush_interval_ms == 100
+    assert bound._config.max_buffer_size == 1_024
+    assert bound._config.backpressure is not None
+    assert bound._config.backpressure.max_buffer_size == 4_096
+
+    explain = bound.explain()
+    settings = explain.acceleration.profile_settings
+    assert settings["profile"] == "throughput"
+    assert settings["writer_batch_size"] == 1_000
+    assert settings["flush_cadence_ms"] == 100
+    assert settings["max_in_flight_batches"] == 1_024
+
+
+def test_manual_delivery_settings_win_over_throughput_profile() -> None:
+    bound = Pipeline(make_source(5)).build(
+        StdoutSink(),
+        config=DeliveryConfig(
+            performance_profile="throughput",
+            batch_size=25,
+            batch_flush_interval_ms=7,
+            max_buffer_size=9,
+        ),
+    )
+
+    assert bound._config.batch_size == 25
+    assert bound._config.batch_flush_interval_ms == 7
+    assert bound._config.max_buffer_size == 9
+
+
+def test_explain_reports_source_prefetch_benchmark_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SyncPrefetchSource(BaseSource[int]):
+        source_name = "sync_prefetch"
+        supports_rust_prefetch = True
+        prefetch_limit = 2
+
+        async def stream(self):
+            yield 1
+
+        def stream_sync_batches(self):
+            yield 1
+
+    monkeypatch.setattr(
+        "agora.core.explain._builders.acceleration_status",
+        lambda mode: type(
+            "Status",
+            (),
+            {
+                "mode": type("Mode", (), {"value": "auto"})(),
+                "enabled": True,
+                "version": "0.2.0",
+                "compatible": True,
+                "capabilities": frozenset(),
+                "reason": None,
+                "supports": lambda self, capability: False,
+            },
+        )(),
+    )
+
+    balanced = Pipeline(_SyncPrefetchSource()).build(StdoutSink()).explain()
+    throughput = (
+        Pipeline(_SyncPrefetchSource())
+        .build(StdoutSink(), config=DeliveryConfig(performance_profile="throughput"))
+        .explain()
+    )
+
+    assert balanced.acceleration.source_prefetch_eligible is True
+    assert balanced.acceleration.source_prefetch_active is False
+    assert (
+        balanced.acceleration.source_prefetch_inactive_reason
+        == "benchmark gate not enabled for that lane"
+    )
+    assert throughput.acceleration.source_prefetch_active is True
+    assert throughput.acceleration.source_prefetch_inactive_reason is None
 
 
 def test_pipeline_explain_reports_arrow_fanout_sink_downgrades() -> None:
@@ -161,7 +258,7 @@ def test_pipeline_explain_reports_arrow_fanout_sink_downgrades() -> None:
     assert explain.writer_input_data_plane == DataPlane.ARROW_BATCHES
     assert explain.arrow_chain_eligible is True
     assert explain.arrow_fast_path_eligible is True
-    assert "keeps arrow_batches" in explain.writer_input_data_plane_reason
+    assert "only downgrades for sink paths" in explain.writer_input_data_plane_reason
     assert explain.sink_downgrade_count == 1
     assert [sink.selected_data_plane for sink in explain.sinks] == [
         DataPlane.ARROW_BATCHES,
@@ -169,6 +266,9 @@ def test_pipeline_explain_reports_arrow_fanout_sink_downgrades() -> None:
     ]
     assert explain.sinks[0].selection_reason == "sink accepts arrow_batches natively"
     assert "writer downgrades to python_rows" in explain.sinks[1].selection_reason
+    assert explain.acceleration.expected_row_materialization_points == (
+        f"{explain.sinks[1].sink_name}: {explain.sinks[1].selection_reason}",
+    )
     assert "(downgraded)" in str(explain)
 
 
@@ -244,6 +344,50 @@ def test_pipeline_explain_reports_arrow_materialization_reason_for_row_chain() -
     assert (
         "writer receives middleware output as python_batches"
         in explain.writer_input_data_plane_reason
+    )
+
+
+def test_pipeline_explain_tracks_arrow_batch_sink_boundary_materialization() -> None:
+    class _ArrowBatchSource(BaseSource[int]):
+        source_name = "arrow_batch_source"
+
+        async def stream(self):
+            yield 1
+
+        async def stream_batches(self):  # type: ignore[override]
+            yield []
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.ARROW_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=True,
+            )
+
+    class _BatchSink(BaseSink[int]):
+        sink_name = "batch_sink"
+        accepted_data_planes = (
+            DataPlane.PYTHON_ROWS,
+            DataPlane.PYTHON_BATCHES,
+        )
+        native_data_planes = accepted_data_planes
+
+        async def write(self, record: int) -> None:
+            del record
+
+        async def write_batch(self, records: list[int]) -> None:
+            del records
+
+    explain = Pipeline(_ArrowBatchSource()).fan_out([_BatchSink()]).explain()
+
+    assert explain.writer_input_data_plane == DataPlane.ARROW_BATCHES
+    assert "keeps arrow_batches until sink dispatch" in explain.writer_input_data_plane_reason
+    assert explain.sink_downgrade_count == 1
+    assert explain.sinks[0].selected_data_plane == DataPlane.PYTHON_BATCHES
+    assert "writer downgrades to python_batches" in explain.sinks[0].selection_reason
+    assert explain.acceleration.expected_row_materialization_points == (
+        f"{explain.sinks[0].sink_name}: {explain.sinks[0].selection_reason}",
     )
 
 
@@ -456,6 +600,20 @@ class TimedBatchSource(BaseSource[int]):
             yield value
             if delay > 0:
                 await asyncio.sleep(delay)
+
+
+class BlockingAfterRecordsSource(BaseSource[int]):
+    source_name = "blocking_after_records"
+
+    def __init__(self, records: list[int]) -> None:
+        self._records = records
+        self.blocked = asyncio.Event()
+
+    async def stream(self):
+        for record in self._records:
+            yield record
+        self.blocked.set()
+        await asyncio.Future()
 
 
 class StrictBatchCollectSink:
@@ -696,6 +854,22 @@ async def test_run_with_max_records_stops_infinite_source_without_waiting_for_ne
 
 
 @pytest.mark.asyncio
+async def test_run_with_max_records_does_not_pull_blocking_fourth_record() -> None:
+    source = BlockingAfterRecordsSource([0, 1, 2])
+    sink = CollectSink()
+
+    summary = await asyncio.wait_for(
+        Pipeline(source).build(sink).run(max_records=3),
+        timeout=1.0,
+    )
+
+    assert summary.records_consumed == 3
+    assert summary.records_written == 3
+    assert sink.records == [0, 1, 2]
+    assert source.blocked.is_set() is False
+
+
+@pytest.mark.asyncio
 async def test_run_with_max_records_stops_infinite_buffered_pipeline_without_waiting():
     sink = CollectSink()
     summary = await asyncio.wait_for(
@@ -779,7 +953,11 @@ async def test_python_prefetch_adapter_aclose_does_not_hang_when_queue_is_full()
 async def test_buffered_prefetch_source_without_rust_capability_uses_python_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
+    monkeypatch.setattr(
+        _source_adapter,
+        "acceleration_status",
+        lambda mode: type("Status", (), {"enabled": True, "reason": None})(),
+    )
 
     source = PrefetchSafeSource(count=6)
     sink = CollectSink()
@@ -897,8 +1075,16 @@ async def test_buffered_rust_prefetch_uses_blocking_wait_and_batch_drain(
         def stream_sync_batches(self):
             yield from range(6)
 
-    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
-    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+    monkeypatch.setattr(
+        _source_adapter,
+        "acceleration_status",
+        lambda mode: type("Status", (), {"enabled": True, "reason": None})(),
+    )
+    monkeypatch.setattr(
+        _source_adapter,
+        "make_record_buffer",
+        lambda capacity, *, mode: _FakeRecordBuffer(capacity),
+    )
     _FakeRecordBuffer.instances.clear()
 
     ctx = SimpleNamespace(
@@ -1062,8 +1248,16 @@ async def test_rust_prefetch_does_not_call_current_checkpoint_without_opt_in(
         def stream_sync_batches(self):
             yield from range(4)
 
-    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
-    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+    monkeypatch.setattr(
+        _source_adapter,
+        "acceleration_status",
+        lambda mode: type("Status", (), {"enabled": True, "reason": None})(),
+    )
+    monkeypatch.setattr(
+        _source_adapter,
+        "make_record_buffer",
+        lambda capacity, *, mode: _FakeRecordBuffer(capacity),
+    )
 
     ctx = SimpleNamespace(
         metrics=SimpleNamespace(
@@ -1237,8 +1431,16 @@ async def test_rust_prefetch_preserves_delivery_success_callbacks(
                 self._current = value
                 yield value
 
-    monkeypatch.setattr(_source_adapter, "_RUST_AVAILABLE", True)
-    monkeypatch.setattr(_source_adapter, "RecordBuffer", _FakeRecordBuffer)
+    monkeypatch.setattr(
+        _source_adapter,
+        "acceleration_status",
+        lambda mode: type("Status", (), {"enabled": True, "reason": None})(),
+    )
+    monkeypatch.setattr(
+        _source_adapter,
+        "make_record_buffer",
+        lambda capacity, *, mode: _FakeRecordBuffer(capacity),
+    )
 
     ctx = SimpleNamespace(
         metrics=SimpleNamespace(
@@ -1522,8 +1724,19 @@ async def test_writer_batch_size_direct_flush_preserves_delivery_success_hooks(
         def flush_metrics_final(self, metrics) -> None:
             del metrics
 
-    monkeypatch.setattr(_buffered, "_RUST_AVAILABLE", True)
-    monkeypatch.setattr(_buffered, "LinearBatchBuffer", _FakeLinearBatchBuffer)
+    monkeypatch.setattr(
+        _buffered,
+        "acceleration_status",
+        lambda mode: type("Status", (), {"enabled": True, "reason": None})(),
+    )
+    monkeypatch.setattr(
+        _buffered,
+        "make_linear_batch_buffer",
+        lambda batch_size, flush_interval, *, mode: _FakeLinearBatchBuffer(
+            batch_size,
+            flush_interval,
+        ),
+    )
     _FakeLinearBatchBuffer.instances.clear()
 
     acknowledged: list[int] = []
@@ -1644,6 +1857,110 @@ async def test_buffered_stage_failure_metrics_not_double_counted(
 
 
 @pytest.mark.asyncio
+async def test_single_buffered_stage_failure_metrics_not_double_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    class _TraceSpan:
+        def __call__(self, *args, **kwargs):
+            del args, kwargs
+            return self
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    class _FailingBufferedMiddleware(Middleware[int, int]):
+        name = "failing_buffered"
+        min_concurrency = 2
+
+        async def process(self, record: int, ctx) -> int | None:
+            del ctx
+            return record
+
+        async def submit(self, record: int, ctx) -> asyncio.Future[int]:
+            del record, ctx
+            future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+            future.set_exception(RuntimeError("boom"))
+            return future
+
+    metrics = SimpleNamespace(
+        records_in=0,
+        records_out=0,
+        records_dropped=0,
+        records_errored=0,
+        total_time_ms=0.0,
+    )
+    ctx = SimpleNamespace(
+        metrics=SimpleNamespace(middleware=lambda _name: metrics),
+        trace_span=_TraceSpan(),
+    )
+    dispatched: list[tuple[object | None, MiddlewareFailure | None]] = []
+
+    async def _dispatch_processed_result(
+        state,
+        result,
+        raw_record,
+        checkpoint_value,
+        writer_batch_size,
+        *,
+        failure=None,
+        on_success=None,
+    ) -> None:
+        del state, raw_record, checkpoint_value, writer_batch_size, on_success
+        dispatched.append((result, failure))
+
+    async def _unexpected_process_range(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("process_range should not run after buffered middleware failure")
+
+    strategy = _lanes.BufferedLaneStrategy(
+        coordinator=SimpleNamespace(
+            chain=SimpleNamespace(
+                process_range=_unexpected_process_range,
+                middleware_count=lambda: 1,
+            ),
+            delivery=SimpleNamespace(dispatch_processed_result=_dispatch_processed_result),
+            writer_batch_size=1,
+        )
+    )
+    stage = BufferedStageSpec(
+        index=0,
+        middleware=_FailingBufferedMiddleware(),
+        name="failing_buffered",
+        concurrency=2,
+    )
+    monotonic_values = iter([100.0, 100.25])
+
+    def _fake_monotonic() -> float:
+        return next(monotonic_values, 100.25)
+
+    monkeypatch.setattr(_lanes.time, "monotonic", _fake_monotonic)
+
+    entry = await strategy._submit_single_buffered_record(
+        stage,
+        SourceRecord(raw=1),
+        ctx,
+        1,
+        suffix_start=1,
+    )
+    await strategy._resolve_single_buffered_record(SimpleNamespace(ctx=ctx), entry)
+
+    assert len(dispatched) == 1
+    assert dispatched[0][0] is None
+    assert dispatched[0][1] is not None
+    assert metrics.records_in == 1
+    assert metrics.records_out == 0
+    assert metrics.records_dropped == 0
+    assert metrics.records_errored == 1
+    assert metrics.total_time_ms == pytest.approx(250.0)
+
+
+@pytest.mark.asyncio
 async def test_multiple_buffered_stages_flush_tail_records_at_end_of_stream() -> None:
     sink = CollectSink()
 
@@ -1693,6 +2010,261 @@ async def test_multiple_buffered_stages_preserve_output_order_with_out_of_order_
 
 
 @pytest.mark.asyncio
+async def test_single_buffered_stage_preserves_suffix_middleware_order() -> None:
+    sink = CollectSink()
+
+    summary = await (
+        Pipeline(IterableSource([0, 1, 2, 3]))
+        .pipe(
+            DelayedBufferedTransformMiddleware(
+                add=10,
+                delays={0: 0.03},
+                name="stage_one",
+                min_concurrency=2,
+            )
+        )
+        .pipe(MapMiddleware(lambda record: record * 10, name="suffix_map"))
+        .build(sink)
+        .run()
+    )
+
+    assert summary.records_consumed == 4
+    assert summary.records_written == 4
+    assert sink.records == [100, 110, 120, 130]
+
+
+@pytest.mark.asyncio
+async def test_sync_builtin_row_middlewares_use_fast_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    sink = CollectSink()
+    add_one = MapMiddleware(lambda record: record + 1, name="add_one")
+    keep_lt_four = FilterMiddleware(lambda record: record < 4, name="keep_lt_four")
+
+    async def _unexpected_map(record, ctx):
+        del record, ctx
+        raise AssertionError("sync MapMiddleware should use the row fast path")
+
+    async def _unexpected_filter(record, ctx):
+        del record, ctx
+        raise AssertionError("sync FilterMiddleware should use the row fast path")
+
+    monkeypatch.setattr(add_one, "process", _unexpected_map)
+    monkeypatch.setattr(keep_lt_four, "process", _unexpected_filter)
+
+    summary = await (
+        Pipeline(IterableSource([1, 2, 3, 4])).pipe(add_one).pipe(keep_lt_four).build(sink).run()
+    )
+
+    assert summary.records_written == 2
+    assert summary.records_dropped == 2
+    assert sink.records == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_sync_builtin_row_middlewares_use_rust_executor_when_noop_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executors: list[object] = []
+
+    class _FakeRustExecutor:
+        def __init__(self, callables: list[object], names: list[str]) -> None:
+            self.callables = callables
+            self.names = names
+            self.calls: list[tuple[int, int, int]] = []
+
+        def process_range(self, start: int, stop: int, record: int, ctx) -> int | None:
+            del ctx
+            self.calls.append((start, stop, record))
+            current: int | None = record
+            for idx in range(start, stop):
+                current = self.callables[idx](current)
+                if current is None:
+                    return None
+            return current
+
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.acceleration_supports",
+        lambda capability, *, mode: capability == "sync_builtin_chain_executor",
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain._rust_sync_builtin_executor_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.make_sync_builtin_chain_executor",
+        lambda callables, names, *, mode: (
+            executors.append(_FakeRustExecutor(callables, names)) or executors[-1]
+        ),
+    )
+
+    chain = MiddlewareChain(
+        [
+            MapMiddleware(lambda record: record + 1, name="add_one"),
+            FilterMiddleware(lambda record: record < 4, name="keep_lt_four"),
+        ]
+    )
+    ctx = PipelineContext(pipeline_id="pipe", metrics=PipelineMetrics())
+
+    value, failure = await chain.process_outcome(1, ctx)
+
+    assert failure is None
+    assert value == 2
+    assert len(executors) == 1
+    assert executors[0].calls == [(0, 2, 1)]
+
+
+@pytest.mark.asyncio
+async def test_sync_builtin_rust_executor_skips_traced_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executors: list[object] = []
+
+    class _FakeRustExecutor:
+        def __init__(self, callables: list[object], names: list[str]) -> None:
+            del callables, names
+            self.calls: list[tuple[int, int, int]] = []
+
+        def process_range(self, start: int, stop: int, record: int, ctx) -> int | None:
+            del ctx
+            self.calls.append((start, stop, record))
+            return record
+
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.acceleration_supports",
+        lambda capability, *, mode: capability == "sync_builtin_chain_executor",
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain._rust_sync_builtin_executor_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.make_sync_builtin_chain_executor",
+        lambda callables, names, *, mode: (
+            executors.append(_FakeRustExecutor(callables, names)) or executors[-1]
+        ),
+    )
+
+    chain = MiddlewareChain(
+        [
+            MapMiddleware(lambda record: record + 1, name="add_one"),
+            FilterMiddleware(lambda record: record < 4, name="keep_lt_four"),
+        ]
+    )
+    tracer = InMemoryTracer()
+    ctx = PipelineContext(pipeline_id="pipe", metrics=PipelineMetrics(), tracer=tracer)
+
+    value, failure = await chain.process_outcome(1, ctx)
+
+    assert failure is None
+    assert value == 2
+    assert len(executors) == 1
+    assert executors[0].calls == []
+    assert [span.name for span in tracer.spans] == ["middleware.process", "middleware.process"]
+
+
+@pytest.mark.asyncio
+async def test_sync_builtin_rust_executor_skips_single_stage_fast_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executors: list[object] = []
+
+    class _FakeRustExecutor:
+        def __init__(self, callables: list[object], names: list[str]) -> None:
+            del callables, names
+            self.calls: list[tuple[int, int, int]] = []
+
+        def process_range(self, start: int, stop: int, record: int, ctx) -> int | None:
+            del ctx
+            self.calls.append((start, stop, record))
+            return record
+
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.acceleration_supports",
+        lambda capability, *, mode: capability == "sync_builtin_chain_executor",
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain._rust_sync_builtin_executor_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.make_sync_builtin_chain_executor",
+        lambda callables, names, *, mode: (
+            executors.append(_FakeRustExecutor(callables, names)) or executors[-1]
+        ),
+    )
+
+    chain = MiddlewareChain([MapMiddleware(lambda record: record + 1, name="add_one")])
+    ctx = PipelineContext(pipeline_id="pipe", metrics=PipelineMetrics())
+
+    value, failure = await chain.process_outcome(1, ctx)
+
+    assert failure is None
+    assert value == 2
+    assert len(executors) == 1
+    assert executors[0].calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_builtin_rust_executor_preserves_on_error_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled: list[tuple[int, str]] = []
+
+    class _FakeRustExecutor:
+        def __init__(self, callables: list[object], names: list[str]) -> None:
+            self.callables = callables
+            self.names = names
+
+        def process_range(self, start: int, stop: int, record: int, ctx) -> int | None:
+            del ctx
+            current: int | None = record
+            for idx in range(start, stop):
+                try:
+                    current = self.callables[idx](current)
+                except Exception as exc:
+                    exc._agora_stage_index = idx
+                    raise
+                if current is None:
+                    return None
+            return current
+
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.acceleration_supports",
+        lambda capability, *, mode: capability == "sync_builtin_chain_executor",
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain._rust_sync_builtin_executor_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.make_sync_builtin_chain_executor",
+        lambda callables, names, *, mode: _FakeRustExecutor(callables, names),
+    )
+
+    add_one = MapMiddleware(lambda record: record + 1, name="add_one")
+    boom_filter = FilterMiddleware(
+        lambda record: (_ for _ in ()).throw(RuntimeError("boom")) if record == 2 else True,
+        name="boom_filter",
+    )
+
+    async def _on_error(record, exc, ctx) -> None:
+        del ctx
+        handled.append((record, str(exc)))
+
+    monkeypatch.setattr(boom_filter, "on_error", _on_error)
+
+    chain = MiddlewareChain([add_one, boom_filter])
+    ctx = PipelineContext(pipeline_id="pipe", metrics=PipelineMetrics())
+
+    value, failure = await chain.process_outcome(1, ctx)
+
+    assert value is None
+    assert failure is not None
+    assert failure.middleware == "boom_filter"
+    assert str(failure.exception) == "boom"
+    assert handled == [(1, "boom")]
+
+
+@pytest.mark.asyncio
 async def test_filter_drops_records():
     source = make_source(10)
     pipeline = Pipeline(source).filter(lambda x: x % 2 == 0, name="even_only").build(StdoutSink())
@@ -1731,10 +2303,18 @@ async def test_map_transforms_records():
 
 @pytest.mark.asyncio
 async def test_run_returns_summary_with_elapsed():
-    pipeline = Pipeline(make_source(3)).build(StdoutSink())
+    pipeline = Pipeline(make_source(3)).build(
+        StdoutSink(),
+        config=DeliveryConfig(acceleration_mode="off", performance_profile="low_latency"),
+    )
     summary = await pipeline.run()
     assert summary.elapsed_seconds >= 0.0
+    assert summary.runtime.acceleration_mode == "off"
+    assert summary.runtime.acceleration_profile == "low_latency"
+    assert summary.runtime.acceleration_available is False
+    assert summary.runtime.direct_flush_inactive_reason == "writer batch size is 1"
     assert str(summary).startswith("PipelineRunSummary(")
+    assert "acceleration=off" in str(summary)
 
 
 @pytest.mark.asyncio

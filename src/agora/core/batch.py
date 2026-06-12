@@ -50,13 +50,11 @@ class BatchableSource(Protocol[T_co]):
     execution lane.  The runtime calls ``stream_batches()`` instead of
     ``stream()`` when this protocol is detected.
 
-    Prefer implementing ``data_plane_spec()`` returning a non-row plane.
-    The older ``supports_batch_emit`` flag remains accepted in 0.3.x as a
-    compatibility bridge.
+    Implement ``data_plane_spec()`` returning a non-row plane so the runtime
+    can plan the batch lane explicitly.
     """
 
     source_name: str
-    supports_batch_emit: bool
 
     def stream_batches(self) -> AsyncGenerator[Any, None]:
         """Yield batches of records.
@@ -182,10 +180,19 @@ class BatchMiddleware(ABC, Generic[T, U]):
 
         Returns a BatchProcessResult on failure, or the updated current list on success.
         """
-        non_none = [r for r in current if r is not None]
         t0 = time.monotonic()
         m_metrics = ctx.metrics.middleware(self.name)
         m_metrics.records_in += len(current)
+        current_has_none = False
+        for record in current:
+            if record is None:
+                current_has_none = True
+                break
+        non_none = (
+            current
+            if not current_has_none
+            else [record for record in current if record is not None]
+        )
         try:
             with ctx.trace_span(
                 "middleware.process_batch",
@@ -214,8 +221,11 @@ class BatchMiddleware(ABC, Generic[T, U]):
                 f"results for {len(non_none)} inputs — lengths must match."
             )
 
-        result_iter = iter(batch_results)
-        updated = [next(result_iter) if r is not None else None for r in current]
+        if not current_has_none:
+            updated = batch_results
+        else:
+            result_iter = iter(batch_results)
+            updated = [next(result_iter) if record is not None else None for record in current]
         dropped = sum(1 for r in updated if r is None) - sum(1 for r in current if r is None)
         m_metrics.records_dropped += max(0, dropped)
         m_metrics.records_out += sum(1 for r in updated if r is not None)
@@ -307,7 +317,7 @@ class ArrowNativeSink(Protocol):
 
 def is_arrow_native_sink(sink: object) -> TypeGuard[ArrowNativeSink]:
     """Return True when *sink* exposes a native Arrow write path."""
-    return isinstance(sink, ArrowNativeSink) and callable(getattr(sink, "write_arrow_batch", None))
+    return callable(getattr(sink, "write_arrow_batch", None))
 
 
 __all__ = [

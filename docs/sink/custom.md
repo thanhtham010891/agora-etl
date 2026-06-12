@@ -99,15 +99,9 @@ For custom sinks, prefer checking `sink_data_plane_spec(sink)` in tests instead
 of asserting only on internal flags. That helper uses the same normalization
 path the runtime planner/writer uses.
 
-Legacy note:
-
-- `batch_writable_native`
-- `arrow_passthrough_native`
-
-still work in `0.3.x`, but Agora now emits `DeprecationWarning` when it has to
-infer sink planes from those booleans. Prefer explicit data planes for new
-code, and prefer `sink_data_plane_spec(sink)` in tests. Legacy bool flags are
-planned for removal in `0.4.0`.
+In `0.4.0`, Agora no longer infers sink planes from legacy bool flags. Declare
+`accepted_data_planes` and `native_data_planes` explicitly, and prefer
+`sink_data_plane_spec(sink)` in tests.
 
 ## Practical advice
 

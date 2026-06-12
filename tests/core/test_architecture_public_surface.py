@@ -163,7 +163,6 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "HotPathMetrics",
         "PendingWrite",
         "ProcessedSourceRecord",
-        "RecordDeliveryCoordinator",
         "RecordDeliveryError",
         "RunState",
         "RuntimeLane",
@@ -192,7 +191,6 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "source_runtime_metrics",
     ),
     "agora.core.sink": (
-        "_WRITE_OK",
         "BaseSink",
         "BatchWritable",
         "ContextBindable",
@@ -221,14 +219,7 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "RetryMiddleware",
         "RouteMiddleware",
     ),
-    "agora.core.context": (
-        "_NOOP_SPAN_SCOPE",
-        "PipelineContext",
-        "_BoundLogger",
-        "_NoopSpanScope",
-        "_PipelineSpanScope",
-        "_normalize_trace_value",
-    ),
+    "agora.core.context": ("PipelineContext",),
     "agora.core.metrics": (
         "AIMetrics",
         "AIMiddlewareMetrics",
@@ -280,22 +271,9 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
     ),
 }
 
-COMPAT_EXPORTS: dict[str, frozenset[str]] = {
-    "agora.core.context": frozenset(
-        {
-            "_NOOP_SPAN_SCOPE",
-            "_BoundLogger",
-            "_NoopSpanScope",
-            "_PipelineSpanScope",
-            "_normalize_trace_value",
-        }
-    ),
-    "agora.core.sink": frozenset({"_WRITE_OK"}),
-}
+COMPAT_EXPORTS: dict[str, frozenset[str]] = {}
 
-DEPRECATED_EXPORTS: dict[str, frozenset[str]] = {
-    "agora.core.runtime": frozenset({"RecordDeliveryCoordinator"}),
-}
+DEPRECATED_EXPORTS: dict[str, frozenset[str]] = {}
 
 DISALLOWED_INTERNAL_IMPORT_PATTERNS = (
     re.compile(r"^\s*from\s+agora\.core(?:\.[A-Za-z0-9]+)*\._[A-Za-z0-9_.]+\s+import\b"),
@@ -319,84 +297,9 @@ class CompatExportPolicy:
     note: str
 
 
-DEPRECATED_EXPORT_POLICIES: dict[str, dict[str, DeprecatedExportPolicy]] = {
-    "agora.core.runtime": {
-        "RecordDeliveryCoordinator": DeprecatedExportPolicy(
-            replacement="DeliveryEngine",
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            note=(
-                "Keep the alias during the 0.3.x facade hardening window so older "
-                "advanced runtime imports keep working while docs and migration "
-                "guidance steer callers to DeliveryEngine."
-            ),
-        ),
-    }
-}
+DEPRECATED_EXPORT_POLICIES: dict[str, dict[str, DeprecatedExportPolicy]] = {}
 
-COMPAT_EXPORT_POLICIES: dict[str, dict[str, CompatExportPolicy]] = {
-    "agora.core.context": {
-        "_NOOP_SPAN_SCOPE": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "Useful only as a test/debug identity hook for the current no-op "
-                "trace fast path. Keep through 0.3.x, but do not carry the "
-                "underscore singleton into the 0.4 public contract."
-            ),
-        ),
-        "_BoundLogger": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "This is an internal wrapper behind PipelineContext.log. External "
-                "callers should depend on PipelineContext, not the concrete helper "
-                "type."
-            ),
-        ),
-        "_NoopSpanScope": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "Internal context-manager implementation detail for NoopTracer. "
-                "Retain only as short-term compatibility while the refactored "
-                "context facade settles."
-            ),
-        ),
-        "_PipelineSpanScope": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "Internal tracing-stack helper. It should remain free to change as "
-                "context/tracing internals evolve in 0.4."
-            ),
-        ),
-        "_normalize_trace_value": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "Normalization policy belongs to tracing internals, not the stable "
-                "facade. Keep temporarily to avoid surprise breakage during 0.3.x."
-            ),
-        ),
-    },
-    "agora.core.sink": {
-        "_WRITE_OK": CompatExportPolicy(
-            retained_through="0.3.x",
-            removal_target="0.4.0",
-            keep_in_0_4=False,
-            note=(
-                "Fast-path singleton for SinkFanOut internals. It is observable in "
-                "tests today, but should not survive into the 0.4 public surface."
-            ),
-        )
-    },
-}
+COMPAT_EXPORT_POLICIES: dict[str, dict[str, CompatExportPolicy]] = {}
 
 
 def _markdown_code_blocks(path: Path) -> list[tuple[int, str]]:

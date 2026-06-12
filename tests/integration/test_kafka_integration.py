@@ -17,6 +17,7 @@ Requirements: 2.16
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -31,11 +32,29 @@ from agora import IterableSource, Pipeline  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _N_RECORDS = 10
+_INTEGRATION_TIMEOUT_S = 30.0
 
 
 def _make_records(n: int, suffix: str) -> list[dict]:
     """Return a list of simple JSON-serialisable dicts."""
     return [{"id": i, "value": f"record_{i}_{suffix}"} for i in range(n)]
+
+
+async def _ensure_topic_exists(bootstrap_servers: str, topic: str) -> None:
+    from aiokafka.admin import AIOKafkaAdminClient, NewTopic
+    from aiokafka.errors import TopicAlreadyExistsError
+
+    admin = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+    await admin.start()
+    try:
+        try:
+            await admin.create_topics(
+                [NewTopic(name=topic, num_partitions=1, replication_factor=1)]
+            )
+        except TopicAlreadyExistsError:
+            return
+    finally:
+        await admin.close()
 
 
 # ---------------------------------------------------------------------------
@@ -55,15 +74,21 @@ async def test_kafka_produce_consume_roundtrip(
     """
     topic = f"agora_test_{unique_suffix}"
     records = _make_records(_N_RECORDS, unique_suffix)
+    await asyncio.wait_for(_ensure_topic_exists(kafka_bootstrap, topic), timeout=10.0)
 
     # --- Produce ---
     sink = agora_kafka.KafkaSink(
         bootstrap_servers=kafka_bootstrap,
         topic=topic,
         serializer=lambda r: json.dumps(r).encode(),
+        enable_idempotence=False,
+        acks=1,
     )
     source_produce = IterableSource(records)
-    summary = await Pipeline(source_produce).build(sink).run()
+    summary = await asyncio.wait_for(
+        Pipeline(source_produce).build(sink).run(),
+        timeout=_INTEGRATION_TIMEOUT_S,
+    )
     assert summary.records_written == _N_RECORDS
 
     # --- Consume ---
@@ -91,10 +116,13 @@ async def test_kafka_produce_consume_roundtrip(
         deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
     )
-    await (
-        Pipeline(consumer_source)
-        .build(CollectSink())  # type: ignore[arg-type]
-        .run(max_records=_N_RECORDS)
+    await asyncio.wait_for(
+        (
+            Pipeline(consumer_source)
+            .build(CollectSink())  # type: ignore[arg-type]
+            .run(max_records=_N_RECORDS)
+        ),
+        timeout=_INTEGRATION_TIMEOUT_S,
     )
 
     assert len(received) == _N_RECORDS
@@ -120,14 +148,21 @@ async def test_kafka_pipeline_end_to_end(
     input_topic = f"agora_e2e_in_{unique_suffix}"
     output_topic = f"agora_e2e_out_{unique_suffix}"
     records = _make_records(_N_RECORDS, unique_suffix)
+    await asyncio.wait_for(_ensure_topic_exists(kafka_bootstrap, input_topic), timeout=10.0)
+    await asyncio.wait_for(_ensure_topic_exists(kafka_bootstrap, output_topic), timeout=10.0)
 
     # --- Step 1: seed the input topic ---
     seed_sink = agora_kafka.KafkaSink(
         bootstrap_servers=kafka_bootstrap,
         topic=input_topic,
         serializer=lambda r: json.dumps(r).encode(),
+        enable_idempotence=False,
+        acks=1,
     )
-    await Pipeline(IterableSource(records)).build(seed_sink).run()
+    await asyncio.wait_for(
+        Pipeline(IterableSource(records)).build(seed_sink).run(),
+        timeout=_INTEGRATION_TIMEOUT_S,
+    )
 
     # --- Step 2: transform pipeline (KafkaSource → add "processed" flag → KafkaSink) ---
     from agora import MapMiddleware
@@ -143,12 +178,17 @@ async def test_kafka_pipeline_end_to_end(
         bootstrap_servers=kafka_bootstrap,
         topic=output_topic,
         serializer=lambda r: json.dumps(r).encode(),
+        enable_idempotence=False,
+        acks=1,
     )
-    transform_summary = await (
-        Pipeline(transform_source)
-        .pipe(MapMiddleware(lambda r: {**r, "processed": True}, name="add_processed"))
-        .build(transform_sink)
-        .run(max_records=_N_RECORDS)
+    transform_summary = await asyncio.wait_for(
+        (
+            Pipeline(transform_source)
+            .pipe(MapMiddleware(lambda r: {**r, "processed": True}, name="add_processed"))
+            .build(transform_sink)
+            .run(max_records=_N_RECORDS)
+        ),
+        timeout=_INTEGRATION_TIMEOUT_S,
     )
     assert transform_summary.records_written == _N_RECORDS
 
@@ -177,10 +217,13 @@ async def test_kafka_pipeline_end_to_end(
         deserializer=lambda b: json.loads(b.decode()),
         auto_offset_reset="earliest",
     )
-    await (
-        Pipeline(output_source)
-        .build(CollectSink())  # type: ignore[arg-type]
-        .run(max_records=_N_RECORDS)
+    await asyncio.wait_for(
+        (
+            Pipeline(output_source)
+            .build(CollectSink())  # type: ignore[arg-type]
+            .run(max_records=_N_RECORDS)
+        ),
+        timeout=_INTEGRATION_TIMEOUT_S,
     )
 
     assert len(received) == _N_RECORDS

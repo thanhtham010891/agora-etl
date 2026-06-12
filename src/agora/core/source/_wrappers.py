@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source._base import BaseSource
-from agora.core.source._contracts import DeliveryHookSource, SourceRuntimeMetrics
+from agora.core.source._contracts import (
+    SourceRuntimeMetrics,
+    source_delivery_success_callback,
+    source_has_delivery_success_callback,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
@@ -81,24 +85,24 @@ class LimitedSource(BaseSource[T]):
     def runtime_metrics(self) -> SourceRuntimeMetrics:
         return self._source.runtime_metrics()
 
-    def runtime_counters(self) -> dict[str, int]:
-        return self._source.runtime_counters()
-
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         upstream = self._source.data_plane_spec()
         return replace(upstream, source_name=self.source_name)
 
     def delivery_success_callback(self) -> Callable[[], Awaitable[None]] | None:
-        if isinstance(self._source, DeliveryHookSource):
-            return self._source.delivery_success_callback()
+        if source_has_delivery_success_callback(self._source):
+            return source_delivery_success_callback(self._source)
         return None
 
     async def stream(self) -> AsyncGenerator[T, None]:
         remaining = self._max_records
         if remaining <= 0:
             return
-        async for record in self._source.stream():
-            if remaining <= 0:
+        upstream = self._source.stream().__aiter__()
+        while remaining > 0:
+            try:
+                record = await anext(upstream)
+            except StopAsyncIteration:
                 break
             yield record
             remaining -= 1
@@ -112,8 +116,11 @@ class LimitedSource(BaseSource[T]):
         remaining = self._max_records
         if remaining <= 0:
             return
-        async for batch in self._source.stream_batches():  # type: ignore[attr-defined]
-            if remaining <= 0:
+        upstream = self._source.stream_batches().__aiter__()  # type: ignore[attr-defined]
+        while remaining > 0:
+            try:
+                batch = await anext(upstream)
+            except StopAsyncIteration:
                 break
             batch_size = len(batch)
             if batch_size <= remaining:
@@ -130,8 +137,11 @@ class LimitedSource(BaseSource[T]):
         remaining = self._max_records
         if remaining <= 0:
             return
-        for item in upstream():
-            if remaining <= 0:
+        iterator = iter(upstream())
+        while remaining > 0:
+            try:
+                item = next(iterator)
+            except StopIteration:
                 break
             yield item
             remaining -= 1

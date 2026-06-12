@@ -133,7 +133,7 @@ def public_entrypoint_group_contracts() -> tuple[EntryPointGroupContract, ...]:
     return PUBLIC_ENTRYPOINT_GROUPS
 
 
-def _load_group(group: str) -> int:
+def _load_group(group: str, *, eager: bool = False) -> int:
     """Load entry-points for a single group. Returns count of plugins loaded."""
     import importlib
 
@@ -146,7 +146,7 @@ def _load_group(group: str) -> int:
     module = importlib.import_module(module_path)
     registry = getattr(module, attr_name)
     before = len(registry)
-    registry.load_entrypoints(group)
+    registry.load_entrypoints(group, eager=eager)
     loaded = len(registry) - before
     if loaded > 0:
         logger.info(

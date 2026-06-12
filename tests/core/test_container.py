@@ -9,6 +9,7 @@ import pytest
 from agora.ai import ai_provider_registry
 from agora.ai.cache import StateBackendLLMCache
 from agora.ai.providers.base import CompletionResponse, EmbeddingResponse
+from agora.core.acceleration import AccelerationMode
 from agora.core.component_factory import config_component_factory
 from agora.core.container import AgoraContainer
 from agora.core.container._assembly import build_tracer_from_config
@@ -88,6 +89,21 @@ def test_container_build_pipeline_requires_at_least_one_sink() -> None:
         ),
     ):
         container.build_pipeline()
+
+
+def test_container_build_pipeline_carries_acceleration_mode() -> None:
+    container = AgoraContainer("test")
+    container.register_singleton("_pipeline_id", "accelerated")
+    container.register_singleton("source", object())
+    container.register_singleton("_middlewares", [])
+    container.register_singleton("_sinks", [object()])
+    container.register_singleton("_acceleration_mode", "off")
+    container.register_singleton("_performance_profile", "throughput")
+
+    bound = container.build_pipeline()
+
+    assert bound._config.acceleration_mode == AccelerationMode.OFF
+    assert bound._config.performance_profile == "throughput"
 
 
 @dataclass

@@ -75,12 +75,8 @@ def test_source_data_plane_spec_warns_once_for_legacy_bool_flags() -> None:
             yield 1
 
     source = _LegacyBatchSource()
-    with pytest.deprecated_call(match="legacy source data-plane bool flags"):
-        first = source.data_plane_spec()
-    second = source.data_plane_spec()
-
-    assert first.emitted_plane is DataPlane.PYTHON_BATCHES
-    assert second.emitted_plane is DataPlane.PYTHON_BATCHES
+    with pytest.raises(TypeError, match="legacy source data-plane bool flags"):
+        source.data_plane_spec()
 
 
 def test_source_data_plane_spec_does_not_warn_for_explicit_contract() -> None:

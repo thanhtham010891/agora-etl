@@ -12,6 +12,7 @@ import csv
 import inspect
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -80,6 +81,54 @@ class TestCsvSource:
     async def test_skips_blank_rows(self, csv_file_with_blank_row: Path) -> None:
         source = CsvSource(path=csv_file_with_blank_row, row_mapper=lambda row: row, batch_size=1)
         records = [record async for record in source.stream()]
+        assert records == [
+            {"id": "1", "name": "Alice"},
+            {"id": "2", "name": "Bob"},
+        ]
+
+    async def test_skip_blank_lines_false_keeps_empty_field_rows(self, tmp_path: Path) -> None:
+        path = tmp_path / "keep-blanks.csv"
+        path.write_text("id,name\n1,Alice\n,\n2,Bob\n", encoding="utf-8")
+
+        source = CsvSource(
+            path=path,
+            row_mapper=lambda row: row,
+            batch_size=1,
+            skip_blank_lines=False,
+        )
+        records = [record async for record in source.stream()]
+
+        assert records == [
+            {"id": "1", "name": "Alice"},
+            {"id": "", "name": ""},
+            {"id": "2", "name": "Bob"},
+        ]
+
+    async def test_handles_short_and_long_rows_like_dict_reader(self, tmp_path: Path) -> None:
+        path = tmp_path / "ragged.csv"
+        path.write_text("id,name\n1\n2,Bob,extra\n", encoding="utf-8")
+
+        source = CsvSource(path=path, row_mapper=lambda row: row, batch_size=1)
+        records = [record async for record in source.stream()]
+
+        assert records == [
+            {"id": "1", "name": None},
+            {"id": "2", "name": "Bob", None: ["extra"]},
+        ]
+
+    async def test_uses_explicit_fieldnames_when_header_is_disabled(self, tmp_path: Path) -> None:
+        path = tmp_path / "no-header.csv"
+        path.write_text("1,Alice\n2,Bob\n", encoding="utf-8")
+
+        source = CsvSource(
+            path=path,
+            row_mapper=lambda row: row,
+            has_header=False,
+            fieldnames=["id", "name"],
+            batch_size=1,
+        )
+        records = [record async for record in source.stream()]
+
         assert records == [
             {"id": "1", "name": "Alice"},
             {"id": "2", "name": "Bob"},
@@ -735,6 +784,13 @@ class TestArrowCsvSource:
         assert len(batches) == 1
         assert isinstance(batches[0], pa.RecordBatch)
         assert batches[0].num_rows == 3
+        metrics = src.runtime_metrics()
+        assert metrics.arrow_batch_count == 1
+        assert metrics.arrow_max_batch_rows == 3
+        assert metrics.arrow_read_time_ms >= 0.0
+        assert metrics.arrow_batch_materialize_time_ms >= 0.0
+        assert metrics.arrow_total_load_time_ms >= 0.0
+        assert metrics.arrow_resolved_read_block_size == 0
 
     async def test_emits_arrow_batches_flag(self, tmp_path: Path) -> None:
         from agora.core.batch import is_batch_capable_source
@@ -792,6 +848,65 @@ class TestArrowCsvSource:
         assert summary.records_consumed == 3
         assert summary.records_written == 2  # score=0 filtered out
         assert sink.batches[0].num_rows == 2
+        assert summary.runtime.source_arrow_batch_count == 1
+        assert summary.runtime.source_arrow_max_batch_rows == 3
+        assert summary.runtime.source_arrow_read_time_ms >= 0.0
+        assert summary.runtime.source_arrow_batch_materialize_time_ms >= 0.0
+        assert summary.runtime.source_arrow_total_load_time_ms >= 0.0
+
+    async def test_read_block_size_is_forwarded_to_pyarrow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("pyarrow")
+        path = tmp_path / "data.csv"
+        path.write_text("id,name\n1,Alice\n2,Bob\n")
+
+        from agora.sources.file.csv import ArrowCsvSource
+
+        class _FakeBatch:
+            def __init__(self, rows: int) -> None:
+                self.num_rows = rows
+
+        calls: dict[str, Any] = {}
+
+        class _FakeTable:
+            def to_batches(self, *, max_chunksize: int) -> list[_FakeBatch]:
+                calls["max_chunksize"] = max_chunksize
+                return [_FakeBatch(2)]
+
+        class _FakeSource:
+            def close(self) -> None:
+                calls["source_closed"] = True
+
+        def _fake_input_stream(csv_path: str) -> _FakeSource:
+            calls["path"] = csv_path
+            return _FakeSource()
+
+        def _fake_read_csv(csv_path: Any, read_options: Any = None) -> _FakeTable:
+            calls["source_type"] = type(csv_path).__name__
+            calls["block_size"] = 0 if read_options is None else int(read_options.block_size)
+            return _FakeTable()
+
+        monkeypatch.setattr("pyarrow.input_stream", _fake_input_stream)
+        monkeypatch.setattr("pyarrow.csv.read_csv", _fake_read_csv)
+
+        src = ArrowCsvSource(path=path, batch_size=32, read_block_size=4096)
+        batches = [batch async for batch in src.stream_batches()]
+
+        assert len(batches) == 1
+        assert calls == {
+            "path": str(path),
+            "source_type": "_FakeSource",
+            "block_size": 4096,
+            "max_chunksize": 32,
+            "source_closed": True,
+        }
+        metrics = src.runtime_metrics()
+        assert metrics.arrow_batch_count == 1
+        assert metrics.arrow_max_batch_rows == 2
+        assert metrics.arrow_batch_materialize_time_ms >= 0.0
+        assert metrics.arrow_total_load_time_ms >= 0.0
+        assert metrics.arrow_resolved_read_block_size == 4096
 
 
 class TestArrowJsonLinesSource:
@@ -828,3 +943,90 @@ class TestArrowJsonLinesSource:
         rows = [r async for r in src.stream()]
         assert len(rows) == 2
         assert rows[0]["id"] == 1
+
+    async def test_uses_rust_batches_when_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"id":1}\n{"id":2}\n')
+
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
+        class _FakeBatch:
+            def __init__(self, rows: int) -> None:
+                self.num_rows = rows
+
+        calls: list[tuple[str, int, str]] = []
+
+        monkeypatch.setattr(
+            "agora.sources.file.jsonlines.acceleration_supports",
+            lambda capability, *, mode: (
+                capability == "jsonl_arrow_reader" and str(mode) == "required"
+            ),
+        )
+        monkeypatch.setattr(
+            "agora.sources.file.jsonlines.read_jsonl_arrow_batches",
+            lambda path_str, batch_size, *, mode: (
+                calls.append((path_str, batch_size, str(mode))) or [_FakeBatch(2)]
+            ),
+        )
+
+        src = ArrowJsonLinesSource(path=path, acceleration_mode="required")
+        batches = [batch async for batch in src.stream_batches()]
+
+        assert len(batches) == 1
+        assert batches[0].num_rows == 2
+        assert calls == [(str(path), 65_536, "required")]
+        assert src.current_checkpoint() == {"rows": 2}
+
+    async def test_auto_mode_skips_rust_batches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"id":1}\n')
+
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
+        monkeypatch.setattr(
+            "agora.sources.file.jsonlines.acceleration_supports",
+            lambda capability, *, mode: (_ for _ in ()).throw(
+                AssertionError("should not probe rust")
+            ),
+        )
+        monkeypatch.setattr(
+            "agora.sources.file.jsonlines.read_jsonl_arrow_batches",
+            lambda path_str, batch_size, *, mode: (_ for _ in ()).throw(
+                AssertionError("should not run")
+            ),
+        )
+
+        src = ArrowJsonLinesSource(path=path, acceleration_mode="auto")
+
+        assert await src._read_batches_via_rust() is None
+
+    async def test_off_mode_skips_rust_batches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"id":1}\n')
+
+        from agora.sources.file.jsonlines import ArrowJsonLinesSource
+
+        calls: list[str] = []
+
+        def _supports(capability: str, *, mode: object) -> bool:
+            calls.append(f"{capability}:{mode}")
+            return False
+
+        monkeypatch.setattr("agora.sources.file.jsonlines.acceleration_supports", _supports)
+        monkeypatch.setattr(
+            "agora.sources.file.jsonlines.read_jsonl_arrow_batches",
+            lambda path_str, batch_size, *, mode: (_ for _ in ()).throw(
+                AssertionError("should not run")
+            ),
+        )
+
+        src = ArrowJsonLinesSource(path=path, acceleration_mode="off")
+
+        assert await src._read_batches_via_rust() is None
+        assert calls == []

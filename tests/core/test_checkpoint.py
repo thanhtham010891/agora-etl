@@ -311,6 +311,34 @@ async def test_pipeline_batch_writer_coalesces_checkpoint_saves_per_flush() -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_batch_writer_preserves_checkpoint_every_cadence_on_success_flushes() -> (
+    None
+):
+    store = _CountingCheckpointStore()
+
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30, 40, 50]))
+        .build(
+            _CollectSink(),  # type: ignore[arg-type]
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_every=2,
+                batch_size=2,
+            ),
+        )
+        .run()
+    )
+
+    assert summary.records_written == 5
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 3}
+    assert store.save_calls == 2
+    assert store.saved_values == [{"index": 1}, {"index": 3}]
+    assert summary.runtime.checkpoint_save_count == 2
+    assert summary.runtime.checkpoint_save_max_batch_size == 1
+
+
+@pytest.mark.asyncio
 async def test_pipeline_fails_closed_on_checkpoint_save_failure_by_default() -> None:
     with pytest.raises(RuntimeError, match="checkpoint broke"):
         await (

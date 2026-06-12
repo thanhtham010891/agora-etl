@@ -5,10 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agora.core.acceleration import (
+    AccelerationMode,
+    acceleration_available,
+    acceleration_status,
+    linear_batch_buffer_class,
+    make_linear_batch_buffer,
+    normalize_acceleration_mode,
+)
 from agora.core.runtime._buffered_backpressure import AdaptiveBackpressureController
 from agora.core.runtime._buffered_resolver import dispatch_resolved_buffered_record
-from agora.core.runtime._buffered_rust import RUST_AVAILABLE as _RUST_AVAILABLE
-from agora.core.runtime._buffered_rust import LinearBatchBuffer
 from agora.core.runtime._lanes import BatchLaneStrategy, BufferedLaneStrategy, LinearLaneStrategy
 from agora.core.runtime._plan import RuntimeLane, RuntimePlan
 from agora.core.runtime._source_adapter import SourceRuntimeAdapter
@@ -19,6 +25,9 @@ __all__ = [
     "ExecutionCoordinator",
     "LinearBatchBuffer",
 ]
+
+_RUST_AVAILABLE = acceleration_available()
+LinearBatchBuffer = linear_batch_buffer_class()
 
 
 if TYPE_CHECKING:
@@ -40,18 +49,23 @@ class ExecutionCoordinator:
     plan: RuntimePlan
     max_buffer_size: int | None = None
     backpressure: Backpressure | None = None
+    acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO
+    performance_profile: str = "balanced"
     _linear_lane: LinearLaneStrategy = field(init=False, repr=False)
     _buffered_lane: BufferedLaneStrategy = field(init=False, repr=False)
     _batch_lane: BatchLaneStrategy = field(init=False, repr=False)
     _source_adapter: SourceRuntimeAdapter = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.acceleration_mode = normalize_acceleration_mode(self.acceleration_mode)
         self._linear_lane = LinearLaneStrategy(self)
         self._buffered_lane = BufferedLaneStrategy(self)
         self._batch_lane = BatchLaneStrategy(self)
         self._source_adapter = SourceRuntimeAdapter(
             source=self.source,
             has_buffered_stages=bool(self.plan.buffered_stages),
+            acceleration_mode=self.acceleration_mode,
+            performance_profile=self.performance_profile,
         )
 
     def _build_adaptive_backpressure_controller(
@@ -104,15 +118,15 @@ class ExecutionCoordinator:
     def sync_source_runtime_metrics(self, ctx: PipelineContext) -> None:
         self._source_adapter.sync_runtime_metrics(ctx)
 
-    @staticmethod
-    def rust_available() -> bool:
-        return _RUST_AVAILABLE
+    def rust_available(self) -> bool:
+        return acceleration_status(self.acceleration_mode).enabled
 
-    @staticmethod
-    def make_linear_batch_buffer(batch_size: int, flush_interval: int) -> Any:
-        if not _RUST_AVAILABLE:
-            raise RuntimeError("Rust extension unavailable — cannot create LinearBatchBuffer")
-        return LinearBatchBuffer(batch_size, flush_interval)
+    def make_linear_batch_buffer(self, batch_size: int, flush_interval: int) -> Any:
+        return make_linear_batch_buffer(
+            batch_size,
+            flush_interval,
+            mode=self.acceleration_mode,
+        )
 
     @staticmethod
     def make_metrics_accumulator(flush_interval: int) -> Any:

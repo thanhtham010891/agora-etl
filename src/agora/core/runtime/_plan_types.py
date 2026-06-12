@@ -79,6 +79,9 @@ class RuntimePlan:
     source_name: str
     batch_source: bool
     has_delivery_hooks: bool
+    source_prefetch_limit: int = 0
+    source_supports_rust_prefetch: bool = False
+    source_has_sync_prefetch_path: bool = False
     source: SourceDataPlaneSpec = field(
         default_factory=lambda: SourceDataPlaneSpec(
             source_name="source",

@@ -17,6 +17,9 @@ Requirements: 2.17
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 # Skip entire module when the Redis plugin is not installed.
@@ -31,6 +34,7 @@ from agora.middlewares.dedup.middleware import DedupMiddleware  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _N_RECORDS = 8
+_INTEGRATION_TIMEOUT_S = 20.0
 
 
 def _make_records(n: int, suffix: str) -> list[dict]:
@@ -60,13 +64,15 @@ async def test_redis_sink_write_and_read(
     sink = agora_redis.RedisSink(
         url=redis_url,
         key_fn=lambda r: f"{key_prefix}:{r['id']}",
+        serializer=lambda record: json.dumps(record),
     )
-    summary = await Pipeline(IterableSource(records)).build(sink).run()
+    summary = await asyncio.wait_for(
+        Pipeline(IterableSource(records)).build(sink).run(),
+        timeout=_INTEGRATION_TIMEOUT_S,
+    )
     assert summary.records_written == _N_RECORDS
 
     # --- Read back directly via Redis client ---
-    import json
-
     client = aioredis.from_url(redis_url)
     try:
         for record in records:
@@ -96,15 +102,9 @@ async def test_redis_stream_source(
     stream_key = f"agora_stream_{unique_suffix}"
     records = _make_records(_N_RECORDS, unique_suffix)
 
-    # --- Produce to Redis stream via RedisSink (stream mode) ---
-    stream_sink = agora_redis.RedisSink(
-        url=redis_url,
-        key_fn=lambda _: stream_key,
-        serializer=lambda record: record,
-        mode="xadd",
-    )
-    produce_summary = await Pipeline(IterableSource(records)).build(stream_sink).run()
-    assert produce_summary.records_written == _N_RECORDS
+    client = aioredis.from_url(redis_url)
+    group = f"agora_group_{unique_suffix}"
+    consumer = f"agora_consumer_{unique_suffix}"
 
     # --- Consume via RedisStreamSource ---
     received: list[dict] = []
@@ -127,20 +127,43 @@ async def test_redis_stream_source(
     stream_source = agora_redis.RedisStreamSource(
         url=redis_url,
         stream=stream_key,
-        group=f"agora_group_{unique_suffix}",
-        consumer=f"agora_consumer_{unique_suffix}",
-        start_id="0",
+        group=group,
+        consumer=consumer,
     )
-    await (
-        Pipeline(stream_source)
-        .build(CollectSink())  # type: ignore[arg-type]
-        .run(max_records=_N_RECORDS)
+    consumer_task = asyncio.create_task(
+        asyncio.wait_for(
+            (
+                Pipeline(stream_source)
+                .build(CollectSink())  # type: ignore[arg-type]
+                .run(max_records=_N_RECORDS)
+            ),
+            timeout=_INTEGRATION_TIMEOUT_S,
+        )
     )
+
+    await asyncio.sleep(0.5)
+
+    # --- Produce to Redis stream via RedisSink (stream mode) ---
+    stream_sink = agora_redis.RedisSink(
+        url=redis_url,
+        key_fn=lambda _: stream_key,
+        serializer=lambda record: record,
+        mode="xadd",
+    )
+    produce_summary = await asyncio.wait_for(
+        Pipeline(IterableSource(records)).build(stream_sink).run(),
+        timeout=_INTEGRATION_TIMEOUT_S,
+    )
+    assert produce_summary.records_written == _N_RECORDS
+
+    await consumer_task
 
     assert len(received) == _N_RECORDS
     received_ids = {r["id"] for r in received}
-    expected_ids = {r["id"] for r in records}
+    expected_ids = {str(r["id"]) for r in records}
     assert received_ids == expected_ids
+    await client.delete(stream_key)
+    await client.aclose()
 
 
 @pytest.mark.integration
@@ -178,7 +201,7 @@ async def test_redis_dedup_store(
 
     redis_store = agora_redis.RedisStore(
         url=redis_url,
-        prefix=f"dedup_{unique_suffix}",
+        key_prefix=f"dedup_{unique_suffix}",
         ttl_seconds=60,
     )
 
@@ -187,11 +210,14 @@ async def test_redis_dedup_store(
         store=redis_store,
     )
 
-    summary = await (
-        Pipeline(IterableSource(all_records))
-        .pipe(dedup)
-        .build(CollectSink())  # type: ignore[arg-type]
-        .run()
+    summary = await asyncio.wait_for(
+        (
+            Pipeline(IterableSource(all_records))
+            .pipe(dedup)
+            .build(CollectSink())  # type: ignore[arg-type]
+            .run()
+        ),
+        timeout=_INTEGRATION_TIMEOUT_S,
     )
 
     # 5 unique records should pass through; 2 duplicates should be dropped

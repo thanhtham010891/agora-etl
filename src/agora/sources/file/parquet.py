@@ -72,6 +72,10 @@ class ParquetSource(FileSource[T], Generic[T]):
         self._record_drop_count = 0
         self._use_arrow_batches = use_arrow_batches
         self._arrow_batch_size = 65536 if use_arrow_batches else self._batch_size
+        # Already Arrow-native when use_arrow_batches=True; otherwise hint at it.
+        self.arrow_alternative_hint = (
+            None if use_arrow_batches else "ParquetSource(use_arrow_batches=True)"
+        )
         self.supports_prefetch: bool = False
         self.supports_rust_prefetch: bool = True
         self.prefetch_limit: int = 10  # larger buffer for Parquet — to_pylist() is CPU-heavy
@@ -114,12 +118,13 @@ class ParquetSource(FileSource[T], Generic[T]):
         JsonLinesSource. Avoids asyncio.to_thread() overhead per batch.
         """
         try:
-            import pyarrow.parquet as pq
+            import pyarrow.parquet as _pq
         except ImportError as exc:
             raise ImportError(
                 "PyArrow is required for ParquetSource. Install via: pip install 'agora-etl[file]'"
             ) from exc
 
+        pq = cast("Any", _pq)
         self._record_error_count = 0
         self._record_drop_count = 0
 
@@ -205,8 +210,9 @@ class ParquetSource(FileSource[T], Generic[T]):
 
         def _producer() -> None:
             try:
-                import pyarrow.dataset as ds
+                import pyarrow.dataset as _ds
 
+                ds = cast("Any", _ds)
                 dataset = ds.dataset(str(self._path), format="parquet")
                 scanner = dataset.scanner(batch_size=self._arrow_batch_size)
 
@@ -296,12 +302,13 @@ class ParquetSource(FileSource[T], Generic[T]):
 
     async def read_records(self) -> AsyncIterator[T]:
         try:
-            import pyarrow.parquet as pq
+            import pyarrow.parquet as _pq
         except ImportError as exc:
             raise ImportError(
                 "PyArrow is required for ParquetSource. Install via: pip install 'agora-etl[file]'"
             ) from exc
 
+        pq = cast("Any", _pq)
         self._record_error_count = 0
         self._record_drop_count = 0
 

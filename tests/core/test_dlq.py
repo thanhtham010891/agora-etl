@@ -21,6 +21,7 @@ from agora.core.runtime._delivery import DeliveryEngine, RunState, make_checkpoi
 from agora.core.runtime._writer_transport import WriterTransport
 from agora.core.source import BaseSource
 from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy, SinkFailurePolicy
+from agora.core.writer import WriteResult
 
 
 class _CollectDLQSink:
@@ -361,6 +362,105 @@ async def test_direct_flush_log_and_continue_transport_error_without_dlq_does_no
     assert ctx.metrics.records_written == 0
     assert ctx.metrics.records_errored == 2
     assert acknowledged == []
+
+
+@pytest.mark.asyncio
+async def test_direct_flush_partial_failure_routes_failed_records_to_dlq() -> None:
+    """A direct-flush batch with a mid-batch failure routes only the failed
+    record to the DLQ, acknowledges the rest, and advances the checkpoint."""
+    dlq = _CollectDLQSink()
+    acknowledged: list[str] = []
+
+    class _PartialWriter:
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record) -> WriteResult:
+            del record
+            raise AssertionError("single-record path should not be used")
+
+        async def write_batch(self, records):
+            # Second record fails, the other two succeed.
+            return [
+                WriteResult(written=True, errors=[])
+                if record["id"] != 2
+                else WriteResult(written=False, errors=[RuntimeError("row 2 broke")])
+                for record in records
+            ]
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    ctx = SimpleNamespace(
+        pipeline_id="orders",
+        run_id="run-1",
+        metrics=SimpleNamespace(
+            records_written=0,
+            records_errored=0,
+            records_dropped=0,
+            runtime=SimpleNamespace(
+                dlq_failure_count=0,
+                checkpoint_failure_count=0,
+                checkpoint_save_time_ms=0.0,
+                checkpoint_save_count=0,
+                checkpoint_save_max_batch_size=0,
+                writer_flush_count=0,
+                writer_flush_time_ms=0.0,
+                writer_flush_max_batch_size=0,
+            ),
+            last_checkpoint=None,
+        ),
+        log=SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+        trace_span=lambda *args, **kwargs: nullcontext(),
+    )
+
+    engine = DeliveryEngine(
+        transport=WriterTransport(writer=_PartialWriter()),  # type: ignore[arg-type]
+        source_name="orders",
+        current_checkpoint=lambda: {"id": 3},
+        dlq_sink=dlq,  # type: ignore[arg-type]
+        dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
+        sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
+        checkpoint_store=None,
+        checkpoint_failure_policy=CheckpointFailurePolicy.FAIL_CLOSED,
+        checkpoint_key="orders",
+        checkpoint_every=1,
+    )
+    state = RunState(
+        ctx=ctx,
+        checkpoint_state=make_checkpoint_state(),
+        pending_writes=[],
+    )
+
+    async def _ack(label: str):
+        async def _inner() -> None:
+            acknowledged.append(label)
+
+        return _inner
+
+    await engine.flush_batch_direct(
+        state,
+        processed_list=[{"id": 1}, {"id": 2}, {"id": 3}],
+        raw_list=[{"id": 1}, {"id": 2}, {"id": 3}],
+        checkpoint_list=[{"id": 1}, {"id": 2}, {"id": 3}],
+        on_success_list=[await _ack("a"), await _ack("b"), await _ack("c")],
+    )
+
+    assert ctx.metrics.records_written == 2
+    assert ctx.metrics.records_errored == 1
+    # The failed row is acknowledged because it was successfully routed to the DLQ.
+    assert acknowledged == ["a", "b", "c"]
+    assert len(dlq.records) == 1
+    assert dlq.records[0].record == {"id": 2}
+    assert dlq.records[0].processed_record == {"id": 2}
+    assert dlq.records[0].stage == "sink_write"
 
 
 @pytest.mark.asyncio

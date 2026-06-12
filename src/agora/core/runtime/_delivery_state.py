@@ -5,20 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agora.core.acceleration import make_checkpoint_state as _make_accelerated_checkpoint_state
+
 if TYPE_CHECKING:
+    from agora.core.acceleration import AccelerationMode
     from agora.core.checkpoint import CheckpointValue
-
-try:
-    from agora_rs import CheckpointState as _RustCheckpointState
-
-    try:
-        _test = _RustCheckpointState()
-        del _test
-        _RUST_CHECKPOINT = True
-    except Exception:
-        _RUST_CHECKPOINT = False
-except ImportError:
-    _RUST_CHECKPOINT = False
 
 
 @dataclass
@@ -43,8 +34,6 @@ class CheckpointState:
         self.last_saved_value = value
 
 
-def make_checkpoint_state() -> Any:
+def make_checkpoint_state(mode: AccelerationMode | str = "auto") -> Any:
     """Return a Rust-backed ``CheckpointState`` when available, Python otherwise."""
-    if _RUST_CHECKPOINT:
-        return _RustCheckpointState()
-    return CheckpointState()
+    return _make_accelerated_checkpoint_state(CheckpointState, mode=mode)

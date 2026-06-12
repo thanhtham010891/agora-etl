@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agora.core.acceleration import AccelerationMode
 from agora.core.types._policies import (
     CheckpointFailurePolicy,
     DLQFailurePolicy,
@@ -54,6 +55,8 @@ class Backpressure:
 class DeliveryConfig:
     """Delivery-side pipeline config."""
 
+    acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO
+    performance_profile: str = "balanced"
     dlq: BaseSink[DLQRecord] | None = None
     dlq_failure_policy: DLQFailurePolicy = DLQFailurePolicy.LOG_ONLY
     checkpoint: CheckpointStore | None = None
@@ -67,3 +70,31 @@ class DeliveryConfig:
     max_buffer_size: int | None = None
     backpressure: Backpressure | None = None
     tracer: PipelineTracer | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceProfileSettings:
+    """Resolved runtime knobs represented by a performance profile."""
+
+    profile: str
+    writer_batch_size: int
+    flush_cadence_ms: int | None
+    prefetch_limit: int | None
+    max_in_flight_batches: int | None
+    backpressure_min_buffer_size: int | None
+    backpressure_max_buffer_size: int | None
+    backpressure_writer_slow_ms: float | None
+    backpressure_checkpoint_slow_ms: float | None
+
+    def to_dict(self) -> dict[str, int | float | str | None]:
+        return {
+            "profile": self.profile,
+            "writer_batch_size": self.writer_batch_size,
+            "flush_cadence_ms": self.flush_cadence_ms,
+            "prefetch_limit": self.prefetch_limit,
+            "max_in_flight_batches": self.max_in_flight_batches,
+            "backpressure_min_buffer_size": self.backpressure_min_buffer_size,
+            "backpressure_max_buffer_size": self.backpressure_max_buffer_size,
+            "backpressure_writer_slow_ms": self.backpressure_writer_slow_ms,
+            "backpressure_checkpoint_slow_ms": self.backpressure_checkpoint_slow_ms,
+        }

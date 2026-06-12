@@ -163,7 +163,7 @@ def test_c04_matching_manifest_version_loads_plugin() -> None:
         patch.dict(sys.modules, {"test_pkg": mock_module}),
         patch("importlib.metadata.entry_points", return_value=[mock_ep]),
     ):
-        registry.load_entrypoints("agora.test")
+        registry.load_entrypoints("agora.test", eager=True)
 
     assert "test_plugin" in registry, (
         "[CONTRACT-04] compatible plugin must be in the active registry"
@@ -210,7 +210,7 @@ def test_c05_mismatching_manifest_version_excludes_plugin() -> None:
         patch.dict(sys.modules, {"old_pkg": mock_module}),
         patch("importlib.metadata.entry_points", return_value=[mock_ep]),
     ):
-        registry.load_entrypoints("agora.test")
+        registry.load_entrypoints("agora.test", eager=True)
 
     assert "old_plugin" not in registry, (
         "[CONTRACT-05] incompatible plugin must NOT be in the active registry"
@@ -253,7 +253,7 @@ def test_c06_no_manifest_loads_plugin_with_compatible_none() -> None:
         patch.dict(sys.modules, {"no_manifest_pkg": mock_module}),
         patch("importlib.metadata.entry_points", return_value=[mock_ep]),
     ):
-        registry.load_entrypoints("agora.test")
+        registry.load_entrypoints("agora.test", eager=True)
 
     assert "no_manifest_plugin" in registry, (
         "[CONTRACT-06] plugin without MANIFEST must be in the active registry"
@@ -310,7 +310,7 @@ def test_c07_incompatible_plugin_does_not_abort_discovery() -> None:
         patch.dict(sys.modules, {"bad_pkg": bad_module, "good_pkg": good_module}),
         patch("importlib.metadata.entry_points", return_value=[bad_ep, good_ep]),
     ):
-        registry.load_entrypoints("agora.test")
+        registry.load_entrypoints("agora.test", eager=True)
 
     assert "bad_plugin" not in registry
     assert "good_plugin" in registry, (

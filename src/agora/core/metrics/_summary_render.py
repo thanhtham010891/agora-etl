@@ -24,6 +24,22 @@ def render_pipeline_run_summary(summary: PipelineRunSummary) -> str:
         parts.append(f"source_plane={runtime.source_data_plane}")
     if runtime.writer_input_data_plane:
         parts.append(f"writer_plane={runtime.writer_input_data_plane}")
+    if runtime.acceleration_mode:
+        parts.append(f"acceleration={runtime.acceleration_mode}")
+    if runtime.acceleration_package_version:
+        parts.append(f"agora_etl_rs={runtime.acceleration_package_version}")
+    if runtime.rust_checkpoint_state_active:
+        parts.append("rust_checkpoint_state=on")
+    if runtime.rust_metrics_accumulator_active:
+        parts.append("rust_metrics_accumulator=on")
+    if runtime.rust_linear_batch_buffer_active:
+        parts.append("rust_linear_batch_buffer=on")
+    if runtime.rust_record_buffer_active:
+        parts.append("rust_record_buffer=on")
+    if runtime.direct_flush_active:
+        parts.append("direct_flush=on")
+    elif runtime.direct_flush_inactive_reason:
+        parts.append(f"direct_flush_reason={runtime.direct_flush_inactive_reason}")
     if runtime.arrow_chain_active:
         parts.append("arrow_chain=on")
     if runtime.arrow_fast_path_active:

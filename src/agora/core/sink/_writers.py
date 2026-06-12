@@ -6,6 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from agora.core.batch import is_arrow_native_sink
+from agora.core.data_plane import SinkDataPlaneSpec
 from agora.core.sink._support import (
     BatchWritable,
     SinkCapabilities,
@@ -82,6 +83,14 @@ class SinkFanOut(Generic[T]):
         self._max_concurrency = max_concurrency
         self._open_rolled_back = False
         self._sink_capabilities = [sink_capabilities(s) for s in sinks]
+        self._sink_data_plane_specs = tuple(
+            SinkDataPlaneSpec(
+                sink_name=str(getattr(sink, "sink_name", type(sink).__name__)),
+                accepted_planes=cap.accepted_data_planes,
+                native_planes=cap.native_data_planes,
+            )
+            for sink, cap in zip(sinks, self._sink_capabilities, strict=True)
+        )
         self._sink_batch_writable = [
             cap.batch_writable_native and isinstance(s, BatchWritable)
             for s, cap in zip(sinks, self._sink_capabilities, strict=True)
@@ -316,6 +325,52 @@ class SinkFanOut(Generic[T]):
         ]
 
     async def write_arrow_batch(self, batch: Any) -> None:
+        if len(self._sinks) == 1 and not self._concurrent_writes:
+            sink = self._sinks[0]
+            if self._sink_arrow_writable[0]:
+                arrow_sink = cast("Any", sink)
+                await arrow_sink.write_arrow_batch(batch)
+                return
+
+            batch_rows = await asyncio.to_thread(batch.to_pylist)
+            chunk_size = self._arrow_fallback_chunk_size(sink)
+            if chunk_size >= len(batch_rows):
+                result = await self._write_batch_to_sink(
+                    sink,
+                    batch_rows,
+                    batch_writable=self._sink_batch_writable[0],
+                    capabilities=self._sink_capabilities[0],
+                )
+                if isinstance(result, list):
+                    if all(isinstance(item, WriteResult) for item in result):
+                        for write_result in result:
+                            if write_result.errors:
+                                raise write_result.errors[0]
+                    else:
+                        for error in cast("list[Exception | None]", result):
+                            if error is not None:
+                                raise error
+                return
+
+            for start in range(0, len(batch_rows), chunk_size):
+                chunk = batch_rows[start : start + chunk_size]
+                result = await self._write_batch_to_sink(
+                    sink,
+                    chunk,
+                    batch_writable=self._sink_batch_writable[0],
+                    capabilities=self._sink_capabilities[0],
+                )
+                if isinstance(result, list):
+                    if all(isinstance(item, WriteResult) for item in result):
+                        for write_result in result:
+                            if write_result.errors:
+                                raise write_result.errors[0]
+                    else:
+                        for error in cast("list[Exception | None]", result):
+                            if error is not None:
+                                raise error
+            return
+
         rows: list[Any] | None = None
         sink_calls: list[tuple[BaseSink[T], Awaitable[object]]] = []
 

@@ -101,3 +101,4 @@ class RunState:
     pending_write_flushed: asyncio.Event | None = None
     pending_write_owner_task: asyncio.Task[None] | None = None
     pending_write_error: BaseException | None = None
+    pending_write_uses_owner: bool | None = None

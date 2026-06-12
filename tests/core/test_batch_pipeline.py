@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -119,6 +120,31 @@ class _BatchSource(BaseSource[int]):
         for batch in self._batches:
             for record in batch:
                 yield record
+
+
+class _BlockingBatchSource(BaseSource[int]):
+    source_name = "blocking_batch_source"
+
+    def __init__(self, batch: list[int]) -> None:
+        self._batch = batch
+        self.blocked = False
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
+
+    async def stream_batches(self):  # type: ignore[override]
+        yield self._batch
+        self.blocked = True
+        await asyncio.Future()
+
+    async def stream(self):
+        for record in self._batch:
+            yield record
 
 
 class _DoubleAllBatchMiddleware(BatchMiddleware[int, int]):
@@ -450,6 +476,39 @@ async def test_b09_no_middleware_batch_pipeline_writes_all_records() -> None:
     assert summary.records_consumed == 5
 
 
+@pytest.mark.asyncio
+async def test_b09_arrow_no_middleware_pipeline_bypasses_chain_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arrow no-middleware path writes batches directly without chain boxing."""
+    pytest.importorskip("pyarrow")
+
+    src = _ArrowBatchSource([{"id": 1, "v": 10}, {"id": 2, "v": 20}])
+    sink = _ArrowNativeSink()
+
+    async def _unexpected_process_arrow_batch(self, batch, ctx):
+        del self, batch, ctx
+        raise AssertionError("process_arrow_batch() should be bypassed for empty arrow chains")
+
+    monkeypatch.setattr(
+        "agora.core.middleware._chain.MiddlewareChain.process_arrow_batch",
+        _unexpected_process_arrow_batch,
+    )
+
+    summary = await (
+        Pipeline(src)
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert len(sink.batches) == 1
+    assert sink.batches[0].num_rows == 2
+    assert summary.records_consumed == 2
+    assert summary.records_written == 2
+    assert summary.runtime.arrow_fast_path_active is True
+    assert summary.runtime.arrow_chain_active is True
+
+
 # ======================================================================
 # [BATCH-10] max_records respected in batch mode
 # ======================================================================
@@ -470,6 +529,23 @@ async def test_b10_max_records_respected_in_batch_mode() -> None:
     assert summary.records_consumed == 4
     assert summary.records_written == 4
     assert sink.records == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_b10_max_records_does_not_pull_blocking_next_batch() -> None:
+    sink = _CollectSink()
+    source = _BlockingBatchSource([1, 2, 3])
+
+    summary = await (
+        Pipeline(source)
+        .build(sink)  # type: ignore[arg-type]
+        .run(max_records=3)
+    )
+
+    assert summary.records_consumed == 3
+    assert summary.records_written == 3
+    assert sink.records == [1, 2, 3]
+    assert source.blocked is False
 
 
 # ======================================================================

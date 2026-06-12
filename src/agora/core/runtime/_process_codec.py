@@ -146,15 +146,17 @@ class ArrowBatchCodec:
         import pyarrow as pa
         import pyarrow.ipc as ipc
 
+        ipc_module = cast("Any", ipc)
         sink = pa.BufferOutputStream()
-        with ipc.new_stream(sink, batch.schema) as writer:
+        with ipc_module.new_stream(sink, batch.schema) as writer:
             writer.write_batch(batch)
         return cast("bytes", sink.getvalue().to_pybytes())
 
     def _ipc_bytes_to_record_batch(self, payload: bytes) -> Any:
         import pyarrow.ipc as ipc
 
-        with ipc.open_stream(payload) as reader:
+        ipc_module = cast("Any", ipc)
+        with ipc_module.open_stream(payload) as reader:
             return reader.read_next_batch()
 
 

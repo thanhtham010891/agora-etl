@@ -17,9 +17,11 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import textwrap
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +31,7 @@ from agora.cli.commands.doctor import (
     DoctorCommand,
     DoctorReport,
     Status,
+    check_acceleration,
     check_agora_importable,
     check_config_import_refs,
     check_config_pipeline_build,
@@ -40,6 +43,7 @@ from agora.cli.commands.doctor import (
     check_python_version,
     check_recovery_posture,
 )
+from agora.core.acceleration import AccelerationCapability, AccelerationMode
 
 # ======================================================================
 # DoctorReport
@@ -69,6 +73,18 @@ def test_report_warned_false_when_all_pass() -> None:
     report = DoctorReport()
     report.add(CheckResult("a", Status.PASS, "ok"))
     assert report.warned is False
+
+
+def test_report_to_dict_serializes_results() -> None:
+    report = DoctorReport()
+    report.add(CheckResult("agora-etl-rs acceleration", Status.PASS, "ready", "version=0.2.0"))
+
+    payload = report.to_dict()
+
+    assert payload["failed"] is False
+    assert payload["warned"] is False
+    assert payload["results"][0]["name"] == "agora-etl-rs acceleration"
+    assert payload["results"][0]["status"] == "pass"
 
 
 # ======================================================================
@@ -120,6 +136,110 @@ def test_plugins_not_installed_returns_warn() -> None:
     with patch("importlib.import_module", side_effect=ImportError("not installed")):
         result = check_plugins_importable()
     assert result.status == Status.WARN
+
+
+def test_acceleration_auto_available_passes() -> None:
+    status = SimpleNamespace(
+        mode=AccelerationMode.AUTO,
+        enabled=True,
+        compatible=True,
+        version="0.2.0",
+        capabilities=frozenset(
+            {
+                AccelerationCapability.RECORD_BUFFER,
+                AccelerationCapability.CHECKPOINT_STATE,
+            }
+        ),
+        reason=None,
+    )
+    with patch("agora.cli.commands.doctor.acceleration_status", return_value=status):
+        result = check_acceleration()
+
+    assert result.status == Status.PASS
+    assert result.message == "agora-etl-rs acceleration available"
+    assert "version=0.2.0" in (result.detail or "")
+    assert "compatible=True" in (result.detail or "")
+    assert "checkpoint_state" in (result.detail or "")
+    assert "record_buffer" in (result.detail or "")
+
+
+def test_acceleration_auto_missing_warns() -> None:
+    status = SimpleNamespace(
+        mode=AccelerationMode.AUTO,
+        enabled=False,
+        version=None,
+        capabilities=frozenset(),
+        reason="agora-etl-rs is not installed",
+    )
+    with patch("agora.cli.commands.doctor.acceleration_status", return_value=status):
+        result = check_acceleration()
+
+    assert result.status == Status.WARN
+    assert "pure Python fallback" in result.message
+
+
+def test_acceleration_off_passes_when_disabled(tmp_path) -> None:
+    config_path = tmp_path / "pipeline.toml"
+    config_path.write_text(
+        """
+format = "agora/v1"
+
+[performance]
+acceleration = "off"
+
+[pipelines.main.source]
+type = "iterable"
+records = [1]
+
+[[pipelines.main.sinks]]
+type = "stdout"
+""".strip(),
+        encoding="utf-8",
+    )
+    status = SimpleNamespace(
+        mode=AccelerationMode.OFF,
+        enabled=False,
+        version=None,
+        capabilities=frozenset(),
+        reason="acceleration disabled by policy",
+    )
+    with patch("agora.cli.commands.doctor.acceleration_status", return_value=status):
+        result = check_acceleration(str(config_path))
+
+    assert result.status == Status.PASS
+    assert result.message == "Acceleration disabled by config"
+
+
+def test_acceleration_required_missing_fails(tmp_path) -> None:
+    config_path = tmp_path / "pipeline.toml"
+    config_path.write_text(
+        """
+format = "agora/v1"
+
+[performance]
+acceleration = "required"
+
+[pipelines.main.source]
+type = "iterable"
+records = [1]
+
+[[pipelines.main.sinks]]
+type = "stdout"
+""".strip(),
+        encoding="utf-8",
+    )
+    status = SimpleNamespace(
+        mode=AccelerationMode.REQUIRED,
+        enabled=False,
+        version=None,
+        capabilities=frozenset({AccelerationCapability.RECORD_BUFFER}),
+        reason="agora-etl-rs is not installed",
+    )
+    with patch("agora.cli.commands.doctor.acceleration_status", return_value=status):
+        result = check_acceleration(str(config_path))
+
+    assert result.status == Status.FAIL
+    assert "required" in result.message.lower()
 
 
 # ======================================================================
@@ -517,6 +637,51 @@ def test_command_execute_returns_0_on_healthy_install() -> None:
     assert exit_code in (0, 1)
 
 
+def test_command_execute_can_emit_json_report() -> None:
+    import argparse
+
+    emitted: list[str] = []
+    cmd = DoctorCommand()
+    args = argparse.Namespace(
+        config=None,
+        pipeline=None,
+        profile=None,
+        environment=None,
+        json=True,
+    )
+    ctx = MagicMock()
+
+    with (
+        patch("agora.cli.commands.doctor.console.out", side_effect=emitted.append),
+        patch(
+            "agora.cli.commands.doctor.check_python_version",
+            return_value=CheckResult("python", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_agora_importable",
+            return_value=CheckResult("agora", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_plugins_importable",
+            return_value=CheckResult("plugins", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_acceleration",
+            return_value=CheckResult("agora-etl-rs acceleration", Status.PASS, "ready"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_entrypoint_plugins",
+            return_value=CheckResult("entrypoints", Status.PASS, "ok"),
+        ),
+    ):
+        exit_code = cmd.execute(args, ctx)
+
+    payload = json.loads(emitted[0])
+    assert exit_code == 0
+    assert payload["failed"] is False
+    assert payload["results"][3]["name"] == "agora-etl-rs acceleration"
+
+
 def test_command_execute_ignores_non_pathlike_ctx_cwd() -> None:
     import os
 
@@ -632,9 +797,11 @@ def test_command_setup_parser() -> None:
     args = sub.parse_args([])
     assert args.config is None
     assert args.pipeline is None
+    assert args.json is False
 
-    args2 = sub.parse_args(["--config", "agora.toml"])
+    args2 = sub.parse_args(["--config", "agora.toml", "--json"])
     assert args2.config == "agora.toml"
+    assert args2.json is True
 
 
 def test_command_setup_parser_with_pipeline_selection() -> None:

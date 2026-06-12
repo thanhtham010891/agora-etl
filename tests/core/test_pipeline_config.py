@@ -123,6 +123,29 @@ def test_validate_pipeline_config_includes_tracing_defaults() -> None:
     }
 
 
+def test_validate_pipeline_config_normalizes_performance_acceleration() -> None:
+    validated = validate_pipeline_config(
+        {
+            "source": {"type": "iterable", "records": [1]},
+            "sinks": [{"type": "stdout"}],
+            "performance": {"acceleration": "OFF", "profile": "THROUGHPUT"},
+        }
+    )
+
+    assert validated["performance"] == {"acceleration": "off", "profile": "throughput"}
+
+
+def test_validate_pipeline_config_rejects_unknown_acceleration_mode() -> None:
+    with pytest.raises(ConfigError, match=r"performance\.acceleration"):
+        validate_pipeline_config(
+            {
+                "source": {"type": "iterable", "records": [1]},
+                "sinks": [{"type": "stdout"}],
+                "performance": {"acceleration": "turbo"},
+            }
+        )
+
+
 def test_validate_pipeline_config_requires_at_least_one_sink() -> None:
     with pytest.raises(ConfigError, match=r"sinks: At least one sink must be defined\."):
         validate_pipeline_config(
@@ -146,6 +169,47 @@ def test_resolve_config_document_rejects_unknown_environment() -> None:
             pipeline_name="events",
             environment_name="qa",
         )
+
+
+def test_resolve_config_document_applies_top_level_performance_default() -> None:
+    resolved = resolve_config_document(
+        {
+            "format": "agora/v1",
+            "performance": {"acceleration": "required", "profile": "throughput"},
+            "pipelines": {
+                "events": {
+                    "source": {"type": "iterable", "records": [1]},
+                    "sinks": [{"type": "stdout"}],
+                }
+            },
+        }
+    )
+
+    assert resolved.pipeline_config["performance"] == {
+        "acceleration": "required",
+        "profile": "throughput",
+    }
+
+
+def test_resolve_config_document_allows_pipeline_performance_override() -> None:
+    resolved = resolve_config_document(
+        {
+            "format": "agora/v1",
+            "performance": {"acceleration": "required", "profile": "throughput"},
+            "pipelines": {
+                "events": {
+                    "source": {"type": "iterable", "records": [1]},
+                    "performance": {"acceleration": "off", "profile": "low_latency"},
+                    "sinks": [{"type": "stdout"}],
+                }
+            },
+        }
+    )
+
+    assert resolved.pipeline_config["performance"] == {
+        "acceleration": "off",
+        "profile": "low_latency",
+    }
 
 
 def test_describe_pipeline_config_requires_at_least_one_sink() -> None:
@@ -195,6 +259,19 @@ def test_describe_pipeline_config_includes_tracing_summary() -> None:
         "auto_configure": True,
         "service_name": "with-tracing",
     }
+
+
+def test_describe_pipeline_config_includes_performance_summary() -> None:
+    plan = describe_pipeline_config(
+        {
+            "pipeline_id": "throughput",
+            "source": {"type": "iterable", "records": [1]},
+            "performance": {"acceleration": "required", "profile": "throughput"},
+            "sinks": [{"type": "stdout"}],
+        }
+    )
+
+    assert plan["performance"] == {"acceleration": "required", "profile": "throughput"}
 
 
 def test_describe_pipeline_config_marks_disabled_tracing() -> None:

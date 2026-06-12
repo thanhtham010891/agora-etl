@@ -26,6 +26,7 @@ def populate_container_from_config(container: AgoraContainer, config: dict[str, 
     build_sinks(container, config)
     build_dlq(container, config)
     build_tracing(container, config, pipeline_id)
+    build_performance(container, config)
     container.register_singleton("_pipeline_id", pipeline_id)
 
     container._logger.info(
@@ -37,6 +38,14 @@ def populate_container_from_config(container: AgoraContainer, config: dict[str, 
         dlq=(container.resolve("_dlq_sink_type") if container.has("_dlq_sink_type") else None),
         tracing=(
             container.resolve("_tracing_backend") if container.has("_tracing_backend") else None
+        ),
+        acceleration_mode=(
+            container.resolve("_acceleration_mode") if container.has("_acceleration_mode") else None
+        ),
+        performance_profile=(
+            container.resolve("_performance_profile")
+            if container.has("_performance_profile")
+            else None
         ),
     )
 
@@ -96,6 +105,16 @@ def build_tracing(container: AgoraContainer, config: dict[str, Any], pipeline_id
     tracer, tracing_backend = build_tracer_from_config(tracing_cfg, pipeline_id=pipeline_id)
     container.register_singleton("_tracer", tracer)
     container.register_singleton("_tracing_backend", tracing_backend)
+
+
+def build_performance(container: AgoraContainer, config: dict[str, Any]) -> None:
+    performance_cfg = config.get("performance")
+    if not isinstance(performance_cfg, dict):
+        return
+    acceleration_mode = str(performance_cfg.get("acceleration", "auto")).strip().lower()
+    profile = str(performance_cfg.get("profile", "balanced")).strip().lower()
+    container.register_singleton("_acceleration_mode", acceleration_mode)
+    container.register_singleton("_performance_profile", profile)
 
 
 def build_tracer_from_config(

@@ -7,6 +7,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+from agora.core.acceleration import (
+    AccelerationMode,
+    acceleration_status,
+    make_metrics_accumulator,
+    make_record_buffer,
+    normalize_acceleration_mode,
+)
 from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.constants import (
     DEFAULT_PREFETCH_LIMIT,
@@ -15,37 +22,11 @@ from agora.core.constants import (
 )
 from agora.core.runtime._delivery import SourceQueueError, SourceRecord
 from agora.core.source import (
-    DeliveryHookSource,
     prefetch_limit_for,
     source_delivery_success_callback,
     source_runtime_metrics,
 )
-
-try:
-    from agora_rs import MetricsAccumulator, RecordBuffer
-
-    try:
-        _test_ma = MetricsAccumulator()
-        _test_rb = RecordBuffer(1)
-        del _test_ma, _test_rb
-        _RUST_AVAILABLE = True
-    except Exception:
-        _RUST_AVAILABLE = False
-except ImportError:
-    _RUST_AVAILABLE = False
-
-    class RecordBuffer:  # type: ignore[no-redef]
-        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
-
-        def __init__(self, capacity: int) -> None:
-            raise ImportError("agora-etl-rs is not installed.")
-
-    class MetricsAccumulator:  # type: ignore[no-redef]
-        """Placeholder — agora-rs not installed. Allows monkeypatching in tests."""
-
-        def __init__(self, flush_interval: int = 100) -> None:
-            raise ImportError("agora-etl-rs is not installed.")
-
+from agora.core.source._contracts import source_has_delivery_success_callback
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -67,46 +48,57 @@ class SourceRuntimeAdapter:
 
     source: BaseSource[Any]
     has_buffered_stages: bool
+    acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO
+    performance_profile: str = "balanced"
+
+    def __post_init__(self) -> None:
+        self.acceleration_mode = normalize_acceleration_mode(self.acceleration_mode)
 
     def sync_runtime_metrics(self, ctx: PipelineContext) -> None:
         metrics = source_runtime_metrics(self.source)
         ctx.metrics.runtime.source_record_error_count = metrics.record_error_count
         ctx.metrics.runtime.source_record_drop_count = metrics.record_drop_count
+        ctx.metrics.runtime.source_arrow_batch_count = metrics.arrow_batch_count
+        ctx.metrics.runtime.source_arrow_max_batch_rows = metrics.arrow_max_batch_rows
+        ctx.metrics.runtime.source_arrow_read_time_ms = metrics.arrow_read_time_ms
+        ctx.metrics.runtime.source_arrow_batch_materialize_time_ms = (
+            metrics.arrow_batch_materialize_time_ms
+        )
+        ctx.metrics.runtime.source_arrow_total_load_time_ms = metrics.arrow_total_load_time_ms
+        ctx.metrics.runtime.source_arrow_read_block_size_bytes = (
+            metrics.arrow_resolved_read_block_size
+        )
 
     def _make_source_record(
         self,
         record: Any,
         *,
         checkpoint_capable: bool,
-        has_delivery_hook: bool,
+        on_success: Any,
     ) -> SourceRecord:
         return SourceRecord(
             raw=record,
             checkpoint=self.source.current_checkpoint() if checkpoint_capable else None,
-            on_success=source_delivery_success_callback(self.source) if has_delivery_hook else None,
+            on_success=on_success,
         )
 
     async def iter_source_records(self, ctx: PipelineContext) -> AsyncGenerator[SourceRecord, None]:
         prefetch_limit = prefetch_limit_for(self.source)
         checkpoint_capable = is_checkpoint_capable(self.source)
-        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
+        has_delivery_hook = source_has_delivery_success_callback(self.source)
 
-        # Rust prefetch is an explicit source capability. Buffered pipelines may
-        # use it when the extension is installed, but async-only sources must
-        # stay on the Python queue path even if Rust is available globally.
-        use_rust_prefetch = (
-            _RUST_AVAILABLE
-            and getattr(self.source, "supports_rust_prefetch", False)
-            and self.has_buffered_stages
-        )
+        use_rust_prefetch, rust_prefetch_reason = self._rust_prefetch_decision()
         if use_rust_prefetch:
             ctx.metrics.runtime.source_prefetch_enabled = True
             ctx.metrics.runtime.source_prefetch_limit = prefetch_limit or DEFAULT_PREFETCH_LIMIT
             ctx.metrics.runtime.rust_prefetch_active = True
+            ctx.metrics.runtime.rust_record_buffer_active = True
+            ctx.metrics.runtime.rust_prefetch_inactive_reason = ""
             ctx.log.info(
                 "pipeline_source_prefetch_enabled",
                 source=self.source.source_name,
                 prefetch_limit=prefetch_limit or DEFAULT_PREFETCH_LIMIT,
+                prefetch_runtime="rust",
             )
             async for record in self._iter_prefetched_rust(
                 ctx, prefetch_limit or DEFAULT_PREFETCH_LIMIT
@@ -114,13 +106,18 @@ class SourceRuntimeAdapter:
                 yield record
             return
 
+        ctx.metrics.runtime.rust_prefetch_inactive_reason = rust_prefetch_reason
+
         if prefetch_limit <= 0:
             if checkpoint_capable or has_delivery_hook:
                 async for record in self.source.stream():
+                    on_success = (
+                        source_delivery_success_callback(self.source) if has_delivery_hook else None
+                    )
                     yield self._make_source_record(
                         record,
                         checkpoint_capable=checkpoint_capable,
-                        has_delivery_hook=has_delivery_hook,
+                        on_success=on_success,
                     )
             else:
                 async for record in self.source.stream():
@@ -133,6 +130,7 @@ class SourceRuntimeAdapter:
             "pipeline_source_prefetch_enabled",
             source=self.source.source_name,
             prefetch_limit=prefetch_limit,
+            prefetch_runtime="python",
         )
         # Non-buffered pipelines with prefetch_limit > 0 use the Python path only.
         if use_rust_prefetch:
@@ -149,10 +147,10 @@ class SourceRuntimeAdapter:
     ) -> AsyncGenerator[SourceRecord, None]:
         import threading
 
-        buf = RecordBuffer(prefetch_limit)
+        buf = make_record_buffer(prefetch_limit, mode=self.acceleration_mode)
         _stream_sync = getattr(self.source, "stream_sync_batches", None)
         checkpoint_capable = is_checkpoint_capable(self.source)
-        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
+        has_delivery_hook = source_has_delivery_success_callback(self.source)
         error_holder: list[Exception] = []
 
         def _producer() -> None:
@@ -171,10 +169,15 @@ class SourceRuntimeAdapter:
             try:
                 if _stream_sync is not None:
                     for record in _stream_sync():
+                        on_success = (
+                            source_delivery_success_callback(self.source)
+                            if has_delivery_hook
+                            else None
+                        )
                         sr = self._make_source_record(
                             record,
                             checkpoint_capable=checkpoint_capable,
-                            has_delivery_hook=has_delivery_hook,
+                            on_success=on_success,
                         )
                         pending_batch.append(sr)
                         if len(pending_batch) >= prefetch_limit and not _flush_pending_batch():
@@ -233,18 +236,21 @@ class SourceRuntimeAdapter:
     ) -> AsyncGenerator[SourceRecord, None]:
         source_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=prefetch_limit)
         checkpoint_capable = is_checkpoint_capable(self.source)
-        has_delivery_hook = isinstance(self.source, DeliveryHookSource)
+        has_delivery_hook = source_has_delivery_success_callback(self.source)
 
         async def _pump_source() -> None:
             try:
                 async for record in self.source.stream():
+                    on_success = (
+                        source_delivery_success_callback(self.source) if has_delivery_hook else None
+                    )
                     if source_queue.full():
                         ctx.metrics.runtime.source_prefetch_block_count += 1
                     await source_queue.put(
                         self._make_source_record(
                             record,
                             checkpoint_capable=checkpoint_capable,
-                            has_delivery_hook=has_delivery_hook,
+                            on_success=on_success,
                         )
                     )
                     ctx.metrics.runtime.source_prefetch_max_depth = max(
@@ -278,8 +284,26 @@ class SourceRuntimeAdapter:
 
     @staticmethod
     def make_metrics_accumulator(flush_interval: int) -> Any:
-        return MetricsAccumulator(flush_interval=flush_interval)
+        return make_metrics_accumulator(flush_interval=flush_interval)
 
-    @staticmethod
-    def rust_available() -> bool:
-        return _RUST_AVAILABLE
+    def rust_available(self) -> bool:
+        if self.acceleration_mode == AccelerationMode.OFF:
+            return False
+        return acceleration_status(self.acceleration_mode).enabled
+
+    def _rust_prefetch_decision(self) -> tuple[bool, str]:
+        status = acceleration_status(self.acceleration_mode)
+        if self.acceleration_mode == AccelerationMode.OFF:
+            return False, "acceleration off"
+        if not status.enabled:
+            return False, status.reason or "Rust unavailable"
+        if not getattr(self.source, "supports_rust_prefetch", False):
+            return False, "source has no sync prefetch path"
+        stream_sync_batches = getattr(self.source, "stream_sync_batches", None)
+        if not callable(stream_sync_batches):
+            return False, "async-only source"
+        if self.has_buffered_stages:
+            return True, ""
+        if self.performance_profile == "throughput":
+            return True, ""
+        return False, "benchmark gate not enabled for that lane"

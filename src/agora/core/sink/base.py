@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from agora.core.data_plane import DataPlane, SinkDataPlaneSpec
 from agora.core.sink._support import (
     SinkCapabilities,
+    _raise_legacy_sink_flag_error,
     normalized_sink_capabilities,
     sink_data_plane_spec,
-    warn_legacy_sink_flags_once,
 )
 
 if TYPE_CHECKING:
@@ -23,8 +23,6 @@ class BaseSink(ABC, Generic[T]):
     """Abstract async sink."""
 
     sink_name: str = "sink"
-    batch_writable_native: bool = False
-    arrow_passthrough_native: bool = False
     parallel_writes_safe: bool = False
     ordered_writes_required: bool = True
     accepted_data_planes: tuple[DataPlane, ...] = ()
@@ -47,10 +45,10 @@ class BaseSink(ABC, Generic[T]):
         batch_writable_native = DataPlane.PYTHON_BATCHES in native_planes
         arrow_passthrough_native = DataPlane.ARROW_BATCHES in native_planes
         if not accepted_planes and not native_planes:
-            batch_writable_native = self.batch_writable_native
-            arrow_passthrough_native = self.arrow_passthrough_native
+            batch_writable_native = bool(getattr(self, "batch_writable_native", False))
+            arrow_passthrough_native = bool(getattr(self, "arrow_passthrough_native", False))
             if batch_writable_native or arrow_passthrough_native:
-                warn_legacy_sink_flags_once(self)
+                _raise_legacy_sink_flag_error(self)
         if not batch_writable_native and type(self).write_batch is not BaseSink.write_batch:
             batch_writable_native = True
         return normalized_sink_capabilities(

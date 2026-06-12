@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,9 +15,6 @@ from agora.sinks.file.csv import CsvSink
 from agora.sinks.file.jsonlines import JsonLinesSink
 from agora.sinks.file.parquet import ParquetSink
 from agora.sinks.io.log import LogSink
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # ============================================================================
 # CsvSink Tests
@@ -242,7 +240,10 @@ async def test_csv_arrow_batch_falls_back_when_pyarrow_csv_rejects_payload(tmp_p
     sink = CsvSink(path=output, row_mapper=lambda r: {"id": r["id"], "value": r["value"]})
     batch = pa.RecordBatch.from_pylist([{"id": 1, "value": "ok"}])
 
-    with patch("pyarrow.csv.write_csv", side_effect=pa.ArrowInvalid("Invalid UTF8 payload")):
+    with (
+        patch("agora.sinks.file.csv.acceleration_supports", return_value=False),
+        patch("pyarrow.csv.write_csv", side_effect=pa.ArrowInvalid("Invalid UTF8 payload")),
+    ):
         await sink.write_arrow_batch(batch)
     await sink.close()
 
@@ -270,6 +271,69 @@ async def test_csv_arrow_batch_records_runtime_native_metrics(tmp_path: Path) ->
     assert runtime.csv_arrow_native_row_count == 2
     assert runtime.csv_arrow_downgrade_batch_count == 0
     assert runtime.csv_arrow_downgrade_row_count == 0
+
+
+def test_csv_arrow_writer_matches_pyarrow_byte_for_byte(tmp_path: Path) -> None:
+    """Rust CSV writer should match pyarrow.csv.write_csv output exactly."""
+    pa = pytest.importorskip("pyarrow")
+    pa_csv = pytest.importorskip("pyarrow.csv")
+    agora_rs = pytest.importorskip("agora_rs")
+
+    cases: list[tuple[str, object, bool, str]] = [
+        ("simple", pa.RecordBatch.from_pylist([{"id": 1, "value": "ok"}]), True, ","),
+        ("bool_float", pa.RecordBatch.from_pylist([{"flag": True, "f": 1.0}]), True, ","),
+        (
+            "null_empty",
+            pa.RecordBatch.from_pylist(
+                [
+                    {"id": 1, "value": "", "note": None},
+                    {"id": 2, "value": None, "note": ""},
+                ]
+            ),
+            True,
+            ",",
+        ),
+        (
+            "quotes_newline",
+            pa.RecordBatch.from_pylist(
+                [
+                    {"id": 1, "value": 'x"y'},
+                    {"id": 2, "value": "line1\nline2"},
+                ]
+            ),
+            True,
+            ",",
+        ),
+        (
+            "empty_with_schema",
+            pa.RecordBatch.from_pylist(
+                [],
+                schema=pa.schema([("id", pa.int64()), ("value", pa.string())]),
+            ),
+            True,
+            ",",
+        ),
+        ("no_header", pa.RecordBatch.from_pylist([{"id": 7, "value": "ok"}]), False, ";"),
+    ]
+
+    for name, batch, include_header, delimiter in cases:
+        output = tmp_path / f"{name}.csv"
+        writer = agora_rs.CsvArrowWriter(str(output), append=False)
+        writer.write_record_batch(batch, include_header=include_header, delimiter=delimiter)
+        writer.close()
+
+        rust_bytes = output.read_bytes() if output.exists() else b""
+        expected = io.BytesIO()
+        pa_csv.write_csv(
+            batch,
+            expected,
+            write_options=pa_csv.WriteOptions(
+                include_header=include_header,
+                delimiter=delimiter,
+            ),
+        )
+
+        assert rust_bytes == expected.getvalue(), name
 
 
 async def test_csv_arrow_append_mode_no_duplicate_header(tmp_path: Path) -> None:
@@ -409,6 +473,95 @@ async def test_jsonl_second_flush_appends_to_file(tmp_path: Path) -> None:
 
     lines = output.read_text().strip().split("\n")
     assert len(lines) == 2
+
+
+async def test_jsonl_arrow_batch_uses_native_writer_without_to_pylist(tmp_path: Path) -> None:
+    """Arrow-native JSONL path should avoid Python row materialization."""
+    output = tmp_path / "native-output.jsonl"
+
+    class ExplodingBatch:
+        def __len__(self) -> int:
+            return 1
+
+        def to_pylist(self) -> list[dict[str, object]]:
+            raise AssertionError("to_pylist should not run on native Arrow->JSONL path")
+
+    class FakeJsonlWriter:
+        def __init__(self, path: str, append: bool = False) -> None:
+            self.path = path
+            self.append = append
+            self.calls: list[object] = []
+
+        def write_record_batch(self, batch: object) -> int:
+            self.calls.append(batch)
+            Path(self.path).write_bytes(b'{"id":1}\n')
+            return 9
+
+        def close(self) -> None:
+            return None
+
+    writer = FakeJsonlWriter(str(output))
+    sink = JsonLinesSink(path=output)
+
+    with (
+        patch("agora.sinks.file.jsonlines.acceleration_supports", return_value=True),
+        patch("agora.sinks.file.jsonlines.make_jsonl_arrow_writer", return_value=writer),
+    ):
+        batch = ExplodingBatch()
+        await sink.write_arrow_batch(batch)
+        await sink.close()
+
+    assert writer.calls == [batch]
+    assert json.loads(output.read_text().strip()) == {"id": 1}
+
+
+async def test_jsonl_arrow_batch_native_writer_appends_after_python_rows(tmp_path: Path) -> None:
+    """Native Arrow writes must append after earlier Python-row flushes."""
+    output = tmp_path / "mixed-output.jsonl"
+    created_writer: FakeJsonlWriter | None = None
+
+    class FakeBatch:
+        def __len__(self) -> int:
+            return 1
+
+    class FakeJsonlWriter:
+        def __init__(self, path: str, append: bool = False) -> None:
+            self.path = Path(path)
+            self.append = append
+
+        def write_record_batch(self, batch: object) -> int:
+            mode = "ab" if self.append else "wb"
+            with open(self.path, mode) as file_obj:
+                file_obj.write(b'{"id":2}\n')
+            return 9
+
+        def close(self) -> None:
+            return None
+
+    sink = JsonLinesSink(path=output)
+    await sink.write({"id": 1})
+    await sink.flush()
+
+    def make_writer(path: str, append: bool, mode: str) -> FakeJsonlWriter:
+        nonlocal created_writer
+        del mode
+        created_writer = FakeJsonlWriter(path, append)
+        return created_writer
+
+    with (
+        patch("agora.sinks.file.jsonlines.acceleration_supports", return_value=True),
+        patch(
+            "agora.sinks.file.jsonlines.make_jsonl_arrow_writer",
+            side_effect=make_writer,
+        ),
+    ):
+        await sink.write_arrow_batch(FakeBatch())
+        await sink.close()
+
+    lines = [json.loads(line) for line in output.read_text().strip().splitlines()]
+    assert lines == [{"id": 1}, {"id": 2}]
+    assert created_writer is not None
+    assert created_writer.append is True
 
 
 # ============================================================================

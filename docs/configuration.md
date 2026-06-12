@@ -227,6 +227,44 @@ For `opentelemetry`, `auto_configure = true` tells Agora to reuse an existing
 global tracer provider when one is already configured, or to auto-configure an
 OTLP exporter when the optional OTel SDK/exporter packages are installed.
 
+## Performance section
+
+Use `[performance]` at the document level to set defaults for every pipeline:
+
+```toml
+[performance]
+acceleration = "auto"
+profile = "balanced"
+```
+
+Use `[pipelines.<name>.performance]` to override one pipeline:
+
+```toml
+[pipelines.orders.performance]
+acceleration = "required"
+profile = "throughput"
+```
+
+Acceleration modes:
+
+- `auto`: use compatible `agora-etl-rs` paths when installed
+- `off`: force pure Python paths
+- `required`: fail before source/sink open if acceleration is missing or
+  incompatible
+
+Profiles:
+
+- `balanced`: keep explicit runtime settings as-is
+- `throughput`: apply larger default writer batches, flush cadence, buffer
+  limits, adaptive backpressure, and opt into Rust source prefetch outside
+  buffered lanes
+- `low_latency`: apply tighter buffer limits and faster flush cadence
+
+Manual code-level settings win over profile defaults. `agora run --config
+pipelines.toml --plan`, `Pipeline.explain()`, run summaries, and
+`agora doctor --config pipelines.toml` show the resolved acceleration mode,
+profile, compatibility state, and concrete profile settings.
+
 ## Scheduled worker config
 
 The same `agora/v1` file can now define a `WorkerPool` without a custom

@@ -14,6 +14,7 @@ from agora.core._executor_support import (
     source_stream_trace_attrs,
 )
 from agora.core._executor_types import PipelineRuntimeSpec
+from agora.core.acceleration import AccelerationCapability, acceleration_supports
 from agora.core.errors import PipelineError
 from agora.core.runtime import (
     DeliveryEngine,
@@ -70,7 +71,11 @@ class PipelineExecutor:
         *,
         source: BaseSource[Any],
     ) -> None:
-        checkpoint_state = make_checkpoint_state()
+        checkpoint_state = make_checkpoint_state(mode=self._spec.config.acceleration_mode)
+        state.ctx.metrics.runtime.rust_checkpoint_state_active = acceleration_supports(
+            AccelerationCapability.CHECKPOINT_STATE,
+            mode=self._spec.config.acceleration_mode,
+        )
         source_opened = False
         stream_error: BaseException | None = None
 

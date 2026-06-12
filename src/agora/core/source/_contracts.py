@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -17,20 +17,47 @@ class SourceRuntimeMetrics:
 
     record_error_count: int = 0
     record_drop_count: int = 0
+    arrow_batch_count: int = 0
+    arrow_max_batch_rows: int = 0
+    arrow_read_time_ms: float = 0.0
+    arrow_batch_materialize_time_ms: float = 0.0
+    arrow_total_load_time_ms: float = 0.0
+    arrow_resolved_read_block_size: int = 0
 
     @classmethod
-    def from_mapping(cls, counters: dict[str, int] | None) -> SourceRuntimeMetrics:
+    def from_mapping(cls, counters: Mapping[str, int | float] | None) -> SourceRuntimeMetrics:
         counters = counters or {}
         return cls(
             record_error_count=int(counters.get("record_error_count", 0)),
             record_drop_count=int(counters.get("record_drop_count", 0)),
+            arrow_batch_count=int(counters.get("arrow_batch_count", 0)),
+            arrow_max_batch_rows=int(counters.get("arrow_max_batch_rows", 0)),
+            arrow_read_time_ms=float(counters.get("arrow_read_time_ms", 0.0)),
+            arrow_batch_materialize_time_ms=float(
+                counters.get("arrow_batch_materialize_time_ms", 0.0)
+            ),
+            arrow_total_load_time_ms=float(counters.get("arrow_total_load_time_ms", 0.0)),
+            arrow_resolved_read_block_size=int(counters.get("arrow_resolved_read_block_size", 0)),
         )
 
-    def to_dict(self) -> dict[str, int]:
-        return {
+    def to_dict(self) -> dict[str, int | float]:
+        metrics: dict[str, int | float] = {
             "record_error_count": self.record_error_count,
             "record_drop_count": self.record_drop_count,
         }
+        if self.arrow_batch_count:
+            metrics["arrow_batch_count"] = self.arrow_batch_count
+        if self.arrow_max_batch_rows:
+            metrics["arrow_max_batch_rows"] = self.arrow_max_batch_rows
+        if self.arrow_read_time_ms:
+            metrics["arrow_read_time_ms"] = self.arrow_read_time_ms
+        if self.arrow_batch_materialize_time_ms:
+            metrics["arrow_batch_materialize_time_ms"] = self.arrow_batch_materialize_time_ms
+        if self.arrow_total_load_time_ms:
+            metrics["arrow_total_load_time_ms"] = self.arrow_total_load_time_ms
+        if self.arrow_resolved_read_block_size:
+            metrics["arrow_resolved_read_block_size"] = self.arrow_resolved_read_block_size
+        return metrics
 
 
 @runtime_checkable
@@ -60,8 +87,8 @@ class DeliveryHookSource(Protocol):
 
 def is_prefetch_capable(source: object) -> TypeGuard[PrefetchCapableSource[Any]]:
     """Return True when *source* explicitly enables prefetch support."""
-    return isinstance(source, PrefetchCapableSource) and bool(
-        getattr(source, "supports_prefetch", False)
+    return bool(getattr(source, "supports_prefetch", False)) and callable(
+        getattr(source, "stream", None)
     )
 
 
@@ -77,6 +104,11 @@ def source_runtime_metrics(source: object) -> SourceRuntimeMetrics:
     if isinstance(source, RuntimeMetricsSource):
         return source.runtime_metrics()
     return SourceRuntimeMetrics()
+
+
+def source_has_delivery_success_callback(source: object) -> bool:
+    """Return True when *source* exposes a delivery-success callback hook."""
+    return isinstance(source, DeliveryHookSource)
 
 
 def source_delivery_success_callback(

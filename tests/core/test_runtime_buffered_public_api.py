@@ -31,10 +31,18 @@ def test_make_linear_batch_buffer_uses_module_alias(
             self.batch_size = batch_size
             self.metrics_flush_interval = metrics_flush_interval
 
-    monkeypatch.setattr(module, "_RUST_AVAILABLE", True)
-    monkeypatch.setattr(module, "LinearBatchBuffer", _FakeLinearBatchBuffer)
+    monkeypatch.setattr(
+        module,
+        "make_linear_batch_buffer",
+        lambda batch_size, flush_interval, *, mode: _FakeLinearBatchBuffer(
+            batch_size,
+            flush_interval,
+        ),
+    )
 
-    buffer = module.ExecutionCoordinator.make_linear_batch_buffer(7, 11)
+    coordinator = object.__new__(module.ExecutionCoordinator)
+    coordinator.acceleration_mode = "auto"
+    buffer = coordinator.make_linear_batch_buffer(7, 11)
 
     assert isinstance(buffer, _FakeLinearBatchBuffer)
     assert buffer.batch_size == 7

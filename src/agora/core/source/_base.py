@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from agora.core.source._contracts import SourceRuntimeMetrics
-from agora.core.source._data_plane import source_data_plane_spec_from_legacy_flags
+from agora.core.source._data_plane import default_source_data_plane_spec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -46,23 +45,11 @@ class BaseSource(ABC, Generic[T]):
 
     def runtime_metrics(self) -> SourceRuntimeMetrics:
         """Return typed source-side counters for dropped/error records."""
-        if type(self).runtime_counters is not BaseSource.runtime_counters:
-            warnings.warn(
-                f"{type(self).__name__} overrides runtime_counters(); this is deprecated. "
-                "Override runtime_metrics() returning SourceRuntimeMetrics instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return SourceRuntimeMetrics.from_mapping(self.runtime_counters())
         return SourceRuntimeMetrics()
-
-    def runtime_counters(self) -> dict[str, int]:
-        """Deprecated compatibility shim for older source implementations."""
-        return {}
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         """Return the source-side data-plane contract used by runtime planning."""
-        return source_data_plane_spec_from_legacy_flags(self, warn=True)
+        return default_source_data_plane_spec(self)
 
     @property
     def emitted_data_plane(self) -> DataPlane:

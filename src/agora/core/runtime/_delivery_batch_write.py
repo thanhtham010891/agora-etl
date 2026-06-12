@@ -132,13 +132,25 @@ async def write_batch_filtered(
     resolve_write_result: Callable[..., Awaitable[CommitOutcome]],
 ) -> None:
     """Write a batch where middleware may have dropped some records."""
-    active_items = [
-        (raw_record, processed_record)
-        for raw_record, processed_record in zip(raw_batch, results, strict=True)
-        if processed_record is not None
-    ]
-    to_write = [processed for _raw, processed in active_items]
-    dropped = len(results) - len(to_write)
+    has_drops = False
+    for processed_record in results:
+        if processed_record is None:
+            has_drops = True
+            break
+
+    active_items: list[tuple[Any, Any]] | None
+    if not has_drops:
+        active_items = None
+        to_write = results
+        dropped = 0
+    else:
+        active_items = [
+            (raw_record, processed_record)
+            for raw_record, processed_record in zip(raw_batch, results, strict=True)
+            if processed_record is not None
+        ]
+        to_write = [processed for _raw, processed in active_items]
+        dropped = len(results) - len(to_write)
     state.ctx.metrics.records_dropped += dropped
 
     if not to_write:
@@ -150,7 +162,8 @@ async def write_batch_filtered(
     except Exception as exc:
         state.ctx.log.exception("batch_write_error", batch_size=len(to_write))
         routed = True
-        for raw_record, processed_record in active_items:
+        pairs = zip(raw_batch, to_write, strict=True) if active_items is None else active_items
+        for raw_record, processed_record in pairs:
             ok = await write_to_dlq(
                 ctx=state.ctx,
                 stage="sink_write",
@@ -176,9 +189,8 @@ async def write_batch_filtered(
         return
 
     outcomes: list[CommitOutcome] = []
-    for (raw_record, processed_record), write_result in zip(
-        active_items, write_results, strict=True
-    ):
+    pairs = zip(raw_batch, to_write, strict=True) if active_items is None else active_items
+    for (raw_record, processed_record), write_result in zip(pairs, write_results, strict=True):
         outcome = await resolve_write_result(
             state.ctx,
             write_result,

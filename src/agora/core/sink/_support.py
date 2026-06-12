@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
@@ -10,7 +9,6 @@ from agora.core.batch import is_arrow_native_sink
 from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, ordered_unique_planes
 
 T = TypeVar("T")
-_WARNED_LEGACY_SINK_TYPES: set[type[object]] = set()
 
 if TYPE_CHECKING:
     from agora.core.writer import WriteResult
@@ -48,8 +46,13 @@ class SinkCapabilities:
 
 def bind_context_if_supported(target: object, ctx: Any) -> None:
     """Bind context when the target advertises that capability."""
-    if isinstance(target, ContextBindable):
-        target.bind_context(ctx)
+    bind_context = getattr(target, "bind_context", None)
+    if callable(bind_context):
+        bind_context(ctx)
+
+
+def _has_batch_write_method(target: object) -> bool:
+    return callable(getattr(target, "write_batch", None))
 
 
 def _default_sink_data_planes(
@@ -93,18 +96,10 @@ def normalized_sink_capabilities(
     )
 
 
-def warn_legacy_sink_flags_once(target: object) -> None:
-    sink_type = type(target)
-    if sink_type in _WARNED_LEGACY_SINK_TYPES:
-        return
-    _WARNED_LEGACY_SINK_TYPES.add(sink_type)
-    warnings.warn(
-        f"{sink_type.__name__} uses legacy sink data-plane bool flags; "
-        "advertise accepted_data_planes/native_data_planes or override "
-        "sink_capabilities() with explicit data planes instead. "
-        "Legacy flags remain supported in 0.3.x and are planned for removal in 0.4.0.",
-        DeprecationWarning,
-        stacklevel=3,
+def _raise_legacy_sink_flag_error(target: object) -> None:
+    raise TypeError(
+        f"{type(target).__name__} still uses legacy sink data-plane bool flags. "
+        "In 0.4.0, declare accepted_data_planes/native_data_planes explicitly."
     )
 
 
@@ -125,7 +120,7 @@ def sink_capabilities(target: object) -> SinkCapabilities:
                 and not value.accepted_data_planes
                 and not value.native_data_planes
             ):
-                warn_legacy_sink_flags_once(target)
+                _raise_legacy_sink_flag_error(target)
             return normalized_sink_capabilities(
                 value,
                 batch_native=bool(getattr(value, "batch_writable_native", False))
@@ -153,10 +148,10 @@ def sink_capabilities(target: object) -> SinkCapabilities:
         parallel_safe = bool(getattr(target, "parallel_writes_safe", False))
         ordered_required = bool(getattr(target, "ordered_writes_required", True))
         if (batch_native or arrow_native) and not accepted_planes and not native_planes:
-            warn_legacy_sink_flags_once(target)
+            _raise_legacy_sink_flag_error(target)
         if not batch_native and type(target).write_batch is not BaseSink.write_batch:
             batch_native = True
-    elif isinstance(target, BatchWritable):
+    elif _has_batch_write_method(target):
         batch_native = True
         arrow_native = is_arrow_native_sink(target)
     else:
@@ -168,7 +163,7 @@ def sink_capabilities(target: object) -> SinkCapabilities:
             and not getattr(target, "accepted_data_planes", ())
             and not getattr(target, "native_data_planes", ())
         ):
-            warn_legacy_sink_flags_once(target)
+            _raise_legacy_sink_flag_error(target)
         batch_native = legacy_batch_native
         arrow_native = legacy_arrow_native or arrow_native
 
@@ -198,6 +193,10 @@ def sink_data_plane_spec(target: object) -> SinkDataPlaneSpec:
 
 def writer_target_data_plane_specs(writer: object) -> tuple[SinkDataPlaneSpec, ...]:
     """Return sink-level data-plane specs visible behind *writer*."""
+    cached_specs = getattr(writer, "_sink_data_plane_specs", None)
+    if cached_specs is not None:
+        return tuple(cached_specs)
+
     inner_sinks = getattr(writer, "_sinks", None)
     if inner_sinks is not None:
         return tuple(sink_data_plane_spec(sink) for sink in inner_sinks)

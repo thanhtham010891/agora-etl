@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import logstruct
+
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.errors import PipelineError
 from agora.core.runtime._plan_types import BufferedStageSpec, MiddlewareExecutionPlan
@@ -11,6 +13,50 @@ from agora.core.runtime._plan_types import BufferedStageSpec, MiddlewareExecutio
 if TYPE_CHECKING:
     from agora.core.middleware import MiddlewareChain
     from agora.core.source import BaseSource
+
+logger = logstruct.getLogger(__name__)
+
+# Source types already advised about the Arrow fast path — keeps the hint to
+# one log line per source class per process (mirrors warn_legacy_sink_flags_once).
+_ADVISED_SOURCE_TYPES: set[type[object]] = set()
+
+
+def maybe_advise_arrow_fast_path(
+    source: BaseSource[Any],
+    chain: MiddlewareChain[Any, Any],
+    *,
+    arrow_chain: bool,
+    sink_accepts_arrow: bool,
+) -> None:
+    """Emit a one-time hint when a transform-free pipeline could use Arrow.
+
+    Fires only when the pipeline is NOT already on the Arrow chain, has no
+    middleware (so no per-record transform to reason about), the sink already
+    accepts Arrow batches, and the source advertises an Arrow-native
+    counterpart. Purely advisory — never changes planning or runtime behavior.
+    """
+    if arrow_chain or not sink_accepts_arrow:
+        return
+    if chain.middleware_count() != 0:
+        return
+    hint = getattr(source, "arrow_alternative_hint", None)
+    if not hint:
+        return
+    source_type = type(source)
+    if source_type in _ADVISED_SOURCE_TYPES:
+        return
+    _ADVISED_SOURCE_TYPES.add(source_type)
+    logger.info(
+        "arrow_fast_path_available",
+        source=getattr(source, "source_name", source_type.__name__),
+        suggestion=hint,
+        detail=(
+            "Pipeline uses a row-based data plane but the sink accepts Arrow "
+            "batches. If no per-record transform is needed, consider "
+            f"{hint} to enable the Arrow fast path for higher throughput. "
+            "This is a suggestion, not a requirement."
+        ),
+    )
 
 
 def buffered_stage_specs(chain: MiddlewareChain[Any, Any]) -> tuple[BufferedStageSpec, ...]:
