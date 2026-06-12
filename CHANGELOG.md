@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.3.3](docs/change-log/0.3.3.md) — AI provider contract cleanup, Anthropic official bundle promotion, and config-driven OTel workers
 - [0.3.1](docs/change-log/0.3.1.md) — runtime contract hardening, recovery CLI UX, and stronger doctor/preflight diagnostics
 - [0.3.0](docs/change-log/0.3.0.md) — process isolation, data-plane semantics, public explain/introspection, and source-bound limits
 - [0.2.2](docs/change-log/0.2.2.md) — live worker observability, timed batch flushes, and Kafka worker example hardening

@@ -7,6 +7,9 @@ The official first-party plugin package is `agora-etl-plugins`.
 It exists to keep the core runtime focused while still giving the ecosystem a
 clear, supported set of integrations.
 
+Anthropic completion support is now part of the official bundle through the
+`anthropic` extra in `agora-etl-plugins`.
+
 ## Install
 
 Install only the extras you need:
@@ -17,6 +20,7 @@ pip install "agora-etl-plugins[cron]"
 pip install "agora-etl-plugins[distributed]"
 pip install "agora-etl-plugins[kafka]"
 pip install "agora-etl-plugins[postgres]"
+pip install "agora-etl-plugins[anthropic]"
 ```
 
 Or install everything:
@@ -32,6 +36,7 @@ pip install "agora-etl-plugins[all]"
 | Redis Streams, shared state, Redis-backed DLQ | `agora-etl-plugins[redis]` | `RedisStreamSource`, `RedisSink`, `RedisBackend` |
 | Topic-based ingestion and delivery | `agora-etl-plugins[kafka]` | `KafkaSource`, `KafkaSink` |
 | SQL extraction, upsert, `COPY`, relational DLQ | `agora-etl-plugins[postgres]` | `PostgresSource`, `PostgresSink` |
+| Claude completions and structured JSON output | `agora-etl-plugins[anthropic]` | `AnthropicProvider` |
 | Cron expressions in `Schedule.cron(...)` | `agora-etl-plugins[cron]` | `Schedule.cron(...)` |
 | Multi-worker lease ownership | `agora-etl-plugins[distributed]` | `RedisWorkerCoordinator` |
 
@@ -77,6 +82,14 @@ Choose PostgreSQL when extract/load behavior is relational, SQL is an operator
 tooling strength, or DLQ records should live in a database table.
 
 See: [PostgreSQL](postgresql.md)
+
+### Anthropic
+
+Choose Anthropic when the AI workflow is completion-driven and Claude models
+fit the job, especially for enrichment, extraction, validation, translation, or
+structured JSON output.
+
+See: [Anthropic](anthropic.md)
 
 ### Scheduling
 

@@ -9,10 +9,22 @@ through the ``agora.ai.providers`` entry-point group.
 
 from __future__ import annotations
 
-from agora.ai.providers.base import AIProvider, CompletionResponse, EmbeddingResponse
+from agora.ai.providers.base import (
+    AIProvider,
+    CompletionProvider,
+    CompletionResponse,
+    EmbeddingProvider,
+    EmbeddingResponse,
+    require_completion_provider,
+    require_embedding_provider,
+)
 
 __all__ = [
     "AIProvider",
+    "CompletionProvider",
     "CompletionResponse",
+    "EmbeddingProvider",
     "EmbeddingResponse",
+    "require_completion_provider",
+    "require_embedding_provider",
 ]

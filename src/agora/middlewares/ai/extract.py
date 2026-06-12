@@ -37,7 +37,7 @@ from agora.utils.records import merge_into_record
 
 if TYPE_CHECKING:
     from agora.ai.cache import LLMCache
-    from agora.ai.providers.base import AIProvider
+    from agora.ai.providers.base import CompletionProvider
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -58,7 +58,7 @@ class AIExtractMiddleware(AIMiddleware[T], Generic[T]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider``.
+        Any completion-capable provider.
     source_field:
         Name of the record field containing the unstructured text.
     extract:
@@ -76,7 +76,7 @@ class AIExtractMiddleware(AIMiddleware[T], Generic[T]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: CompletionProvider,
         source_field: str,
         extract: dict[str, str],
         *,

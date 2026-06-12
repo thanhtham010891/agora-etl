@@ -37,7 +37,7 @@ from agora.core.types import OnError as _OnError
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
-    from agora.ai.providers.base import AIProvider, CompletionResponse
+    from agora.ai.providers.base import CompletionResponse
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -81,7 +81,8 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider``-compliant object (GeminiProvider, etc.).
+        Any completion-capable provider (GeminiProvider, OpenAIProvider,
+        AnthropicProvider, etc.).
     cache:
         Optional response cache.  Highly recommended for production to
         avoid redundant LLM calls on reruns.
@@ -96,12 +97,17 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: object,
         *,
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
+        require_completion: bool = True,
     ) -> None:
+        if require_completion:
+            from agora.ai.providers.base import require_completion_provider
+
+            require_completion_provider(provider, consumer=type(self).__name__)
         self._provider = provider
         self._cache = cache
         self._cache_ttl = cache_ttl
@@ -157,7 +163,10 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         if ctx is not None:
             ctx.metrics.middleware(self.name).ai.cache_misses += 1
 
-        response = await self._provider.complete(
+        from agora.ai.providers.base import require_completion_provider
+
+        provider = require_completion_provider(self._provider, consumer=type(self).__name__)
+        response = await provider.complete(
             prompt,
             system=system,
             temperature=temperature,

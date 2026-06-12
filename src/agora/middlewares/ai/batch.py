@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agora.ai.cache import LLMCache
-    from agora.ai.providers.base import AIProvider
+    from agora.ai.providers.base import CompletionProvider
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -82,7 +82,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider``.
+        Any completion-capable provider.
     prompt_fn:
         Callable that receives ``list[dict]`` (serialized records) and returns
         the prompt string to send to the LLM.
@@ -107,7 +107,7 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: CompletionProvider,
         prompt_fn: Callable[[list[dict[str, Any]]], str],
         *,
         output_fields: list[str] | None = None,

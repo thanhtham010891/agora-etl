@@ -213,6 +213,7 @@ path = ".orders.dlq.db"
 [pipelines.orders.tracing]
 enabled = true
 backend = "in_memory"
+auto_configure = true
 service_name = "orders-local"
 ```
 
@@ -221,6 +222,46 @@ Supported tracing backends:
 - `noop`
 - `in_memory`
 - `opentelemetry`
+
+For `opentelemetry`, `auto_configure = true` tells Agora to reuse an existing
+global tracer provider when one is already configured, or to auto-configure an
+OTLP exporter when the optional OTel SDK/exporter packages are installed.
+
+## Scheduled worker config
+
+The same `agora/v1` file can now define a `WorkerPool` without a custom
+`worker.py` module.
+
+Top-level worker options:
+
+```toml
+[worker]
+graceful_shutdown_timeout = 45.0
+health_port = 8080
+health_host = "0.0.0.0"
+```
+
+Per-pipeline schedules:
+
+```toml
+[pipelines.orders.schedule]
+mode = "every"
+minutes = 15
+
+[pipelines.reports.schedule]
+mode = "cron"
+expression = "0 * * * *"
+
+[pipelines.stream.schedule]
+mode = "continuous"
+```
+
+Supported schedule modes:
+
+- `every` with `seconds`, `minutes`, `hours`, or `days`
+- `cron` with `expression`
+- `continuous`
+- `once`
 
 ## Component type names
 

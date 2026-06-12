@@ -51,7 +51,7 @@ from agora.utils.records import merge_into_record
 
 if TYPE_CHECKING:
     from agora.ai.cache import LLMCache
-    from agora.ai.providers.base import AIProvider
+    from agora.ai.providers.base import CompletionProvider
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -65,7 +65,7 @@ class AIEnrichMiddleware(AIMiddleware[T], Generic[T]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider`` (Gemini, OpenAI, Anthropic).
+        Any completion-capable provider (Gemini, OpenAI, Anthropic).
     prompt_template:
         Prompt string with ``{field_name}`` placeholders referencing
         record fields.  The LLM must return a JSON object.
@@ -94,7 +94,7 @@ class AIEnrichMiddleware(AIMiddleware[T], Generic[T]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: CompletionProvider,
         prompt_template: str,
         *,
         output_fields: list[str] | None = None,

@@ -321,6 +321,48 @@ pipeline = (
 
 If you already have OTel configured in your application, `OpenTelemetryTracer()` with no arguments picks up the global tracer provider automatically.
 
+For config-driven workers, Agora can stay on the same tracing path without a
+custom `worker.py`. A recommended OTLP setup is:
+
+1. Install optional OTel packages:
+
+```bash
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
+```
+
+2. Set the OTLP endpoint:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+3. Enable tracing in the worker config:
+
+```toml
+[worker]
+health_port = 8080
+
+[pipelines.orders.schedule]
+mode = "continuous"
+
+[pipelines.orders.tracing]
+enabled = true
+backend = "opentelemetry"
+auto_configure = true
+service_name = "orders-worker"
+```
+
+4. Start the worker directly from config:
+
+```bash
+agora worker --config pipelines.toml
+```
+
+With `auto_configure = true`, Agora reuses an existing global tracer provider
+when one is already present. Otherwise it auto-configures an OTLP exporter from
+the installed OTel SDK/exporter packages and the standard `OTEL_*`
+environment variables.
+
 ## What to alert on
 
 These are the signals worth wiring into your alerting system.

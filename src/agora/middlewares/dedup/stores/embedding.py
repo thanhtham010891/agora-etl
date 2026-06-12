@@ -40,7 +40,7 @@ from agora.middlewares.dedup.stores.base import DedupStore
 from agora.utils.math import cosine_similarity as _cosine_similarity
 
 if TYPE_CHECKING:
-    from agora.ai.providers.base import AIProvider
+    from agora.ai.providers.base import EmbeddingProvider
 
 logger = logstruct.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class EmbeddingStore(DedupStore[str]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider`` that implements ``embed()``.
+        Any embedding-capable provider.
         Use ``GeminiProvider`` or ``OpenAIProvider`` — not ``AnthropicProvider``.
     similarity_threshold:
         Records with cosine similarity >= this value are considered duplicates.
@@ -67,11 +67,13 @@ class EmbeddingStore(DedupStore[str]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: EmbeddingProvider,
         *,
         similarity_threshold: float = 0.92,
     ) -> None:
-        self._provider = provider
+        from agora.ai.providers.base import require_embedding_provider
+
+        self._provider = require_embedding_provider(provider, consumer="EmbeddingStore")
         self._threshold = similarity_threshold
         self._memory: list[tuple[str, list[float]]] = []
         self._lock = asyncio.Lock()  # guards _memory for concurrent mark_if_new calls

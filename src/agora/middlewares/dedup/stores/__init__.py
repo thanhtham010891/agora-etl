@@ -108,8 +108,9 @@ dedup_store_registry.register("sqlite", SQLiteDedupStore)
 def _register_lazy_stores() -> None:
     """Register optional stores as factories.
 
-    EmbeddingStore requires an explicit ``provider`` kwarg (an ``AIProvider``
-    instance).  Callers must inject it — there is no implicit registry lookup.
+    EmbeddingStore requires an explicit ``provider`` kwarg (an
+    embedding-capable provider instance). Callers must inject it — there is no
+    implicit registry lookup.
     This keeps the AI provider dependency visible rather than hidden::
 
         from agora_ai_gemini import GeminiProvider
@@ -121,7 +122,8 @@ def _register_lazy_stores() -> None:
     def _embedding_factory(**kwargs: Any) -> Any:
         if "provider" not in kwargs:
             raise TypeError(
-                "EmbeddingStore requires an 'provider' kwarg (an AIProvider instance). "
+                "EmbeddingStore requires a 'provider' kwarg (an embedding-capable "
+                "provider instance). "
                 "Pass it explicitly: dedup_store_registry.create('embedding', provider=my_provider)"
             )
         from agora.middlewares.dedup.stores.embedding import EmbeddingStore

@@ -20,6 +20,7 @@ This section focuses on the public plugin story:
 - Need relational extract/load workflows: [PostgreSQL](postgresql.md)
 - Need calendar scheduling: [Scheduling](scheduling.md)
 - Need multi-worker lease ownership: [Distributed Coordination](distributed.md)
+- Need Anthropic completion or structured output support: [Anthropic](anthropic.md)
 - Want to build your own package: [Developing Plugins](developing.md)
 - Need to know which extension points are stable: [Plugin Contract](contract.md)
 - Need to understand manifest versioning: [Manifest Contract](manifest.md)
@@ -46,8 +47,8 @@ release cadence.
 The public first-party plugin distribution is
 [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/).
 
-Current official coverage includes Redis, Kafka, PostgreSQL, cron scheduling,
-and distributed worker coordination.
+Current official coverage includes Redis, Kafka, PostgreSQL, Anthropic
+completion support, cron scheduling, and distributed worker coordination.
 
 Install examples:
 
@@ -55,6 +56,7 @@ Install examples:
 pip install "agora-etl-plugins[redis]"
 pip install "agora-etl-plugins[kafka]"
 pip install "agora-etl-plugins[postgres]"
+pip install "agora-etl-plugins[anthropic]"
 pip install "agora-etl-plugins[all]"
 ```
 

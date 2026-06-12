@@ -138,7 +138,7 @@ For provisional plugin groups, the following module-level contracts are also
 part of the public boundary:
 
 - `agora.ai.cache`
-- `agora.ai.providers.base`
+- `agora.ai.providers.base` for provider capability protocols and response types
 - `agora.core.registry` for MANIFEST compatibility binding
 - `agora.core.retry` for shared retry helpers
 - `agora.metrics.exporters`

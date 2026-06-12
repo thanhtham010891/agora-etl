@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from os import getenv
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -56,3 +57,45 @@ class OpenTelemetryTracer:
         for key, value in (attributes or {}).items():
             span.set_attribute(key, value)
         return OpenTelemetrySpan(name=name, span=span)
+
+
+def build_configured_opentelemetry_tracer(
+    *,
+    name: str,
+    auto_configure: bool,
+) -> OpenTelemetryTracer:
+    """Build an OpenTelemetry tracer and optionally auto-configure OTLP export."""
+    try:
+        from opentelemetry import trace as otel_trace
+    except ImportError as exc:
+        raise ImportError("OpenTelemetry tracing requires 'opentelemetry-api'.") from exc
+
+    if auto_configure:
+        _ensure_otel_provider_configured(otel_trace=otel_trace, service_name=name)
+    return OpenTelemetryTracer(name=name)
+
+
+def _ensure_otel_provider_configured(*, otel_trace: Any, service_name: str) -> None:
+    provider = otel_trace.get_tracer_provider()
+    if type(provider).__name__ != "ProxyTracerProvider":
+        return
+
+    try:
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    except ImportError as exc:
+        raise ImportError(
+            "OpenTelemetry auto-configuration requires 'opentelemetry-sdk' and "
+            "'opentelemetry-exporter-otlp-proto-grpc', or a pre-configured global tracer provider."
+        ) from exc
+
+    resource = Resource.create(
+        {
+            "service.name": getenv("OTEL_SERVICE_NAME", service_name),
+        }
+    )
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    otel_trace.set_tracer_provider(tracer_provider)

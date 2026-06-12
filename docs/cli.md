@@ -65,11 +65,16 @@ Start the `WorkerPool` from a `worker.py` module:
 ```bash
 agora worker
 agora worker --module pipelines.worker   # custom module path
+agora worker --config pipelines.toml     # build WorkerPool from config alone
 agora worker --list                      # list registered pipelines
 agora worker --health-auth-token <token> # override health auth token
 ```
 
-The module must define `get_worker() -> WorkerPool`.
+The module path must define `get_worker() -> WorkerPool`.
+
+When `--config` is used, Agora resolves every pipeline in the `agora/v1` TOML
+document, requires each one to define `[pipelines.<name>.schedule]`, and builds
+the `WorkerPool` without any custom `worker.py`.
 
 If you want `uvloop` for a long-lived worker process, prefer a custom
 launcher script that calls `pool.run()` inside `asyncio.Runner(...)`. See

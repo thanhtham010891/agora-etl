@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 from agora.core.component_factory import config_component_factory
 from agora.core.errors import ConfigError
-from agora.core.tracing import InMemoryTracer, NoopTracer, OpenTelemetryTracer
+from agora.core.tracing import InMemoryTracer, NoopTracer
+from agora.core.tracing._opentelemetry import build_configured_opentelemetry_tracer
 from agora.core.types import DLQFailurePolicy
 
 if TYPE_CHECKING:
@@ -104,6 +105,7 @@ def build_tracer_from_config(
 ) -> tuple[Any, str]:
     enabled = tracing_cfg.get("enabled", True)
     backend = str(tracing_cfg.get("backend", "opentelemetry")).strip().lower()
+    auto_configure = bool(tracing_cfg.get("auto_configure", True))
     service_name = tracing_cfg.get("service_name") or pipeline_id
 
     if not enabled or backend == "noop":
@@ -112,11 +114,19 @@ def build_tracer_from_config(
         return InMemoryTracer(), "in_memory"
     if backend == "opentelemetry":
         try:
-            return OpenTelemetryTracer(name=service_name), "opentelemetry"
+            return (
+                build_configured_opentelemetry_tracer(
+                    name=service_name,
+                    auto_configure=auto_configure,
+                ),
+                "opentelemetry",
+            )
         except ImportError as exc:
             raise ConfigError(
-                "Tracing backend 'opentelemetry' requires the optional "
-                "'opentelemetry-api' dependency to be installed."
+                "Tracing backend 'opentelemetry' requires either a pre-configured "
+                "global tracer provider or the optional dependencies "
+                "'opentelemetry-api', 'opentelemetry-sdk', and "
+                "'opentelemetry-exporter-otlp-proto-grpc'."
             ) from exc
     raise ConfigError(
         f"Unknown tracing backend '{backend}'. Expected one of: noop, in_memory, opentelemetry."

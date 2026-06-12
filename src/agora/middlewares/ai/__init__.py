@@ -3,7 +3,8 @@ agora/middlewares/ai/__init__.py
 ==================================
 AI-powered middleware collection.
 
-All middlewares require an ``AIProvider`` and are optional extras.
+Completion-driven middlewares require a completion-capable provider.
+Embedding mode and semantic dedup flows require embedding support.
 Import what you need::
 
     from agora.middlewares.ai import (

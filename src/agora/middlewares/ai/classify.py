@@ -52,7 +52,7 @@ from agora.utils.records import merge_into_record
 
 if TYPE_CHECKING:
     from agora.ai.cache import LLMCache
-    from agora.ai.providers.base import AIProvider
+    from agora.ai.providers.base import CompletionProvider, EmbeddingProvider
     from agora.core.context import PipelineContext
 
 T = TypeVar("T")
@@ -69,7 +69,8 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
     Parameters
     ----------
     provider:
-        Any ``AIProvider``.
+        In LLM mode, any completion-capable provider.
+        In embedding mode, any embedding-capable provider.
     source_fields:
         Record fields whose values are concatenated to form the input text.
     categories:
@@ -90,7 +91,7 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
 
     def __init__(
         self,
-        provider: AIProvider,
+        provider: CompletionProvider | EmbeddingProvider,
         source_fields: list[str],
         categories: list[str],
         *,
@@ -101,11 +102,24 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
     ) -> None:
-        super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
+        super().__init__(
+            provider,
+            cache=cache,
+            cache_ttl=cache_ttl,
+            on_error=on_error,
+            require_completion=not use_embeddings,
+        )
         if not categories:
             raise ValueError("AIClassifyMiddleware requires at least one category")
         if not source_fields:
             raise ValueError("AIClassifyMiddleware requires at least one source_field")
+        if use_embeddings:
+            from agora.ai.providers.base import require_embedding_provider
+
+            require_embedding_provider(
+                provider,
+                consumer="AIClassifyMiddleware(use_embeddings=True)",
+            )
         self._source_fields = source_fields
         self._categories = categories
         self._output_field = output_field
@@ -123,7 +137,13 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
     async def _ensure_category_embeddings(self) -> list[list[float]]:
         async with self._embeddings_lock:
             if self._category_embeddings is None:
-                responses = await self._provider.embed_batch(self._categories)
+                from agora.ai.providers.base import require_embedding_provider
+
+                provider = require_embedding_provider(
+                    self._provider,
+                    consumer="AIClassifyMiddleware(use_embeddings=True)",
+                )
+                responses = await provider.embed_batch(self._categories)
                 self._category_embeddings = [r.embedding for r in responses]
                 logger.debug(
                     "ai_classify_embeddings_ready",
@@ -133,8 +153,14 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
         return self._category_embeddings
 
     async def _classify_with_embeddings(self, text: str) -> tuple[str, float]:
+        from agora.ai.providers.base import require_embedding_provider
+
+        provider = require_embedding_provider(
+            self._provider,
+            consumer="AIClassifyMiddleware(use_embeddings=True)",
+        )
         category_embeddings = await self._ensure_category_embeddings()
-        record_response = await self._provider.embed(text)
+        record_response = await provider.embed(text)
         record_embedding = record_response.embedding
 
         similarities = [

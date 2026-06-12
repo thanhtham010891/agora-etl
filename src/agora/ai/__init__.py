@@ -24,7 +24,8 @@ Cache:
     InMemoryLLMCache, SQLiteLLMCache, StateBackendLLMCache
 
 Types:
-    AIProvider, LLMCache, CompletionResponse, EmbeddingResponse
+    AIProvider, CompletionProvider, EmbeddingProvider, LLMCache,
+    CompletionResponse, EmbeddingResponse
 """
 
 from agora.ai.cache import (
@@ -35,7 +36,15 @@ from agora.ai.cache import (
     ai_cache_registry,
     build_llm_cache,
 )
-from agora.ai.providers.base import AIProvider, CompletionResponse, EmbeddingResponse
+from agora.ai.providers.base import (
+    AIProvider,
+    CompletionProvider,
+    CompletionResponse,
+    EmbeddingProvider,
+    EmbeddingResponse,
+    require_completion_provider,
+    require_embedding_provider,
+)
 from agora.core.registry import Registry
 
 # ======================================================================
@@ -55,7 +64,9 @@ _register_lazy_providers()
 
 __all__ = [
     "AIProvider",
+    "CompletionProvider",
     "CompletionResponse",
+    "EmbeddingProvider",
     "EmbeddingResponse",
     "InMemoryLLMCache",
     "LLMCache",
@@ -64,4 +75,6 @@ __all__ = [
     "ai_cache_registry",
     "ai_provider_registry",
     "build_llm_cache",
+    "require_completion_provider",
+    "require_embedding_provider",
 ]

@@ -116,6 +116,7 @@ class TracingConfig(BaseModel):
 
     enabled: bool = True
     backend: Literal["noop", "in_memory", "opentelemetry"] = "opentelemetry"
+    auto_configure: bool = True
     service_name: str | None = None
 
     @field_validator("service_name")
@@ -139,6 +140,7 @@ class PipelineConfig(BaseModel):
     middlewares: list[ComponentConfig] = Field(default_factory=list)
     dedup: DedupConfig | None = None
     dlq: DLQConfig | None = None
+    schedule: ScheduleConfig | None = None
     tracing: TracingConfig | None = None
     sinks: list[ComponentConfig] = Field(default_factory=list)
 
@@ -183,6 +185,63 @@ class OverlayScope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pipelines: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    worker: dict[str, Any] | None = None
+
+
+class ScheduleConfig(BaseModel):
+    """Schema for optional scheduled worker execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["every", "cron", "continuous", "once"]
+    seconds: float = 0.0
+    minutes: float = 0.0
+    hours: float = 0.0
+    days: float = 0.0
+    expression: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_schedule_shape(self) -> ScheduleConfig:
+        if self.mode == "every":
+            total = self.seconds + self.minutes * 60 + self.hours * 3600 + self.days * 86400
+            if total <= 0:
+                raise ValueError("Schedule.every requires a positive duration.")
+            if self.expression is not None:
+                raise ValueError("Schedule.every does not accept expression.")
+            self.expression = None
+            return self
+        if self.mode == "cron":
+            if self.expression is None or not self.expression.strip():
+                raise ValueError("Schedule.cron requires expression.")
+            self.expression = self.expression.strip()
+            self.seconds = 0.0
+            self.minutes = 0.0
+            self.hours = 0.0
+            self.days = 0.0
+            return self
+        if self.mode in {"continuous", "once"}:
+            if self.expression is not None:
+                raise ValueError(f"Schedule.{self.mode} does not accept expression.")
+            if any(value != 0 for value in (self.seconds, self.minutes, self.hours, self.days)):
+                raise ValueError(f"Schedule.{self.mode} does not accept duration fields.")
+            self.expression = None
+            self.seconds = 0.0
+            self.minutes = 0.0
+            self.hours = 0.0
+            self.days = 0.0
+            return self
+        raise ValueError(f"Unknown schedule mode {self.mode!r}.")
+
+
+class WorkerConfig(BaseModel):
+    """Schema for config-driven worker startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    graceful_shutdown_timeout: float = 30.0
+    health_port: int | None = None
+    health_host: str = "127.0.0.1"
+    health_auth_token: str | None = None
 
 
 class ConfigDocument(BaseModel):
@@ -192,6 +251,7 @@ class ConfigDocument(BaseModel):
 
     format: Literal["agora/v1"]
     defaults: ConfigDefaults = Field(default_factory=ConfigDefaults)
+    worker: WorkerConfig | None = None
     pipelines: dict[str, dict[str, Any]]
     profiles: dict[str, OverlayScope] = Field(default_factory=dict)
     environments: dict[str, OverlayScope] = Field(default_factory=dict)
@@ -212,6 +272,16 @@ class ResolvedPipelineConfig:
     profile_name: str | None
     environment_name: str | None
     pipeline_config: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedWorkerConfig:
+    """One fully resolved worker config document."""
+
+    profile_name: str | None
+    environment_name: str | None
+    worker_config: dict[str, Any]
+    pipelines: tuple[ResolvedPipelineConfig, ...]
 
 
 def validate_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -327,7 +397,19 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         tracing = {
             "enabled": validated.tracing.enabled,
             "backend": validated.tracing.backend,
+            "auto_configure": validated.tracing.auto_configure,
             "service_name": service_name,
+        }
+
+    schedule = None
+    if validated.schedule is not None:
+        schedule = {
+            "mode": validated.schedule.mode,
+            "expression": validated.schedule.expression,
+            "seconds": validated.schedule.seconds,
+            "minutes": validated.schedule.minutes,
+            "hours": validated.schedule.hours,
+            "days": validated.schedule.days,
         }
 
     return {
@@ -336,10 +418,77 @@ def describe_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
         "middlewares": [middleware.type for middleware in validated.middlewares],
         "dedup": dedup,
         "dlq": dlq,
+        "schedule": schedule,
         "tracing": tracing,
         "sinks": [sink.type for sink in validated.sinks],
         "import_refs": import_refs,
     }
+
+
+def resolve_worker_config_document(
+    config: dict[str, Any],
+    *,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> ResolvedWorkerConfig:
+    """Resolve worker-level config and every scheduled pipeline from one document."""
+    try:
+        document = ConfigDocument.model_validate(config)
+    except ValidationError as exc:
+        raise ConfigError(_format_validation_error("config document", exc)) from exc
+
+    selected_profile = _select_optional_overlay(profile_name, document.defaults.profile)
+    selected_environment = _select_optional_overlay(
+        environment_name,
+        document.defaults.environment,
+    )
+
+    worker_config: dict[str, Any] = (
+        document.worker.model_dump(mode="python", by_alias=True, exclude_none=True)
+        if document.worker is not None
+        else {}
+    )
+    worker_config = _apply_worker_overlay(
+        worker_config,
+        selected_name=selected_profile,
+        scopes=document.profiles,
+    )
+    worker_config = _apply_worker_overlay(
+        worker_config,
+        selected_name=selected_environment,
+        scopes=document.environments,
+    )
+    if worker_config:
+        try:
+            worker_config = WorkerConfig.model_validate(worker_config).model_dump(
+                mode="python",
+                by_alias=True,
+                exclude_none=True,
+            )
+        except ValidationError as exc:
+            raise ConfigError(_format_validation_error("worker config", exc)) from exc
+
+    resolved_pipelines: list[ResolvedPipelineConfig] = []
+    for pipeline_name in document.pipelines:
+        resolved = resolve_config_document(
+            config,
+            pipeline_name=pipeline_name,
+            profile_name=selected_profile,
+            environment_name=selected_environment,
+        )
+        if "schedule" not in resolved.pipeline_config:
+            raise ConfigError(
+                f"Pipeline '{pipeline_name}' is missing schedule. "
+                "Config-driven workers require [pipelines.<name>.schedule]."
+            )
+        resolved_pipelines.append(resolved)
+
+    return ResolvedWorkerConfig(
+        profile_name=selected_profile,
+        environment_name=selected_environment,
+        worker_config=worker_config,
+        pipelines=tuple(resolved_pipelines),
+    )
 
 
 def collect_import_references(config: Any, *, path: str = "") -> list[str]:
@@ -402,6 +551,23 @@ def _apply_named_overlay(
     return deep_merge(config, overlay)
 
 
+def _apply_worker_overlay(
+    config: dict[str, Any],
+    *,
+    selected_name: str | None,
+    scopes: dict[str, OverlayScope],
+) -> dict[str, Any]:
+    if selected_name is None:
+        return config
+    scope = scopes.get(selected_name)
+    if scope is None:
+        available = ", ".join(sorted(scopes)) or "none"
+        raise ConfigError(f"Unknown overlay '{selected_name}'. Available: {available}")
+    if scope.worker is None:
+        return config
+    return deep_merge(config, scope.worker)
+
+
 def _select_name(
     *,
     explicit_value: str | None,
@@ -458,11 +624,15 @@ __all__ = [
     "OverlayScope",
     "PipelineConfig",
     "ResolvedPipelineConfig",
+    "ResolvedWorkerConfig",
+    "ScheduleConfig",
     "TracingConfig",
+    "WorkerConfig",
     "collect_import_references",
     "deep_merge",
     "describe_pipeline_config",
     "resolve_config_document",
+    "resolve_worker_config_document",
     "validate_config_document",
     "validate_import_path",
     "validate_pipeline_config",

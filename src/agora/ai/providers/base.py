@@ -1,13 +1,13 @@
 """
 agora/ai/providers/base.py
 ===========================
-``AIProvider`` — structural protocol for all LLM/embedding providers.
+Provider protocols for Agora AI integrations.
 
 Design decisions
 ----------------
-- Protocol (not ABC): providers can be implemented externally without
-  subclassing agora. Duck-typing works: any object with ``complete`` and
-  ``embed`` methods is a valid provider.
+- Protocols (not ABCs): providers can be implemented externally without
+  subclassing agora. Duck-typing works as long as the required capability
+  methods are present.
 - ``CompletionResponse`` / ``EmbeddingResponse`` are plain dataclasses —
   no framework lock-in, easy to mock in tests.
 - Temperature defaults to 0.0: ETL enrichment requires deterministic,
@@ -19,7 +19,7 @@ Design decisions
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -59,16 +59,16 @@ class EmbeddingResponse:
 
 
 # ======================================================================
-# AIProvider protocol
+# Provider capability protocols
 # ======================================================================
 
 
 @runtime_checkable
-class AIProvider(Protocol):
-    """Structural protocol for LLM/embedding providers.
+class CompletionProvider(Protocol):
+    """Structural protocol for completion-capable providers.
 
-    Providers must implement both completion and embedding operations.
-    Implementations live in sub-modules (gemini, openai, anthropic).
+    Completion-only providers are valid here. This is the capability required
+    by the LLM-style AI middlewares.
 
     Parameters accepted by ``complete``
     ------------------------------------
@@ -82,11 +82,6 @@ class AIProvider(Protocol):
         Hard limit on output length.
     response_format:
         Pydantic model class → provider will return JSON matching schema.
-
-    Parameters accepted by ``embed``
-    ---------------------------------
-    text:
-        Text to embed.  Chunking is the caller's responsibility.
     """
 
     @property
@@ -106,6 +101,25 @@ class AIProvider(Protocol):
         """Run a single completion and return structured result."""
         ...
 
+
+@runtime_checkable
+class EmbeddingProvider(Protocol):
+    """Structural protocol for embedding-capable providers.
+
+    This is the capability required by embedding-based classification and
+    semantic dedup stores.
+
+    Parameters accepted by ``embed``
+    ---------------------------------
+    text:
+        Text to embed. Chunking is the caller's responsibility.
+    """
+
+    @property
+    def model(self) -> str:
+        """Canonical model identifier for embedding calls."""
+        ...
+
     async def embed(self, text: str) -> EmbeddingResponse:
         """Embed a single text string into a vector."""
         ...
@@ -113,3 +127,57 @@ class AIProvider(Protocol):
     async def embed_batch(self, texts: list[str]) -> list[EmbeddingResponse]:
         """Embed multiple strings.  Implementations should batch API calls."""
         ...
+
+
+@runtime_checkable
+class AIProvider(CompletionProvider, Protocol):
+    """Backward-compatible alias for completion-capable AI providers.
+
+    Historically ``AIProvider`` implied both completion and embedding support.
+    In `0.3.x`, Agora treats completion and embedding as separate capabilities.
+    ``AIProvider`` remains as the completion-facing compatibility name used by
+    the existing AI middleware surface.
+    """
+
+
+def _describe_provider_capabilities(provider: object) -> str:
+    capabilities: list[str] = []
+    if hasattr(provider, "complete"):
+        capabilities.append("complete()")
+    if hasattr(provider, "embed"):
+        capabilities.append("embed()")
+    if hasattr(provider, "embed_batch"):
+        capabilities.append("embed_batch()")
+    if not capabilities:
+        return "no recognized AI capability methods"
+    return ", ".join(capabilities)
+
+
+def require_completion_provider(
+    provider: object,
+    *,
+    consumer: str,
+) -> CompletionProvider:
+    """Return *provider* as a completion provider or raise a clear error."""
+    if hasattr(provider, "complete"):
+        return cast("CompletionProvider", provider)
+    capability_summary = _describe_provider_capabilities(provider)
+    raise TypeError(
+        f"{consumer} requires a completion-capable provider with complete(). "
+        f"Got {type(provider).__name__} exposing {capability_summary}."
+    )
+
+
+def require_embedding_provider(
+    provider: object,
+    *,
+    consumer: str,
+) -> EmbeddingProvider:
+    """Return *provider* as an embedding provider or raise a clear error."""
+    if hasattr(provider, "embed") and hasattr(provider, "embed_batch"):
+        return cast("EmbeddingProvider", provider)
+    capability_summary = _describe_provider_capabilities(provider)
+    raise TypeError(
+        f"{consumer} requires an embedding-capable provider with embed() and "
+        f"embed_batch(). Got {type(provider).__name__} exposing {capability_summary}."
+    )

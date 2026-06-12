@@ -14,8 +14,10 @@ categories.
 
 ## Two modes
 
-- LLM mode: more flexible, usually slower and more expensive
-- embedding mode: cheaper and faster, but requires provider embedding support
+- LLM mode: more flexible, usually slower and more expensive; requires a
+  completion-capable provider
+- embedding mode: cheaper and faster, but requires an embedding-capable
+  provider
 
 ## When it is a good fit
 
@@ -55,9 +57,11 @@ AIClassifyMiddleware(
 )
 ```
 
+Completion-only providers such as Anthropic can still be used in ordinary LLM
+mode, but they are rejected for `use_embeddings=True`.
+
 ## When to choose something else
 
 - use [AIEnrichMiddleware](ai-enrich.md) when multiple output fields matter
 - use [RouteMiddleware](route.md) when the category already exists in the record
   and only branching behavior is needed
-

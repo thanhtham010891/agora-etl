@@ -150,6 +150,43 @@ Run it directly from Python if you want, or via the CLI with:
 agora worker --module myproject.worker
 ```
 
+## Config-only workers
+
+If the pipeline wiring already lives in an `agora/v1` config file, `agora
+worker` can now build the `WorkerPool` from config alone:
+
+```toml
+format = "agora/v1"
+
+[worker]
+health_port = 8080
+
+[pipelines.orders.source]
+type = "iterable"
+records = [{id = 1}]
+
+[pipelines.orders.schedule]
+mode = "every"
+minutes = 15
+
+[pipelines.orders.tracing]
+enabled = true
+backend = "opentelemetry"
+service_name = "orders-worker"
+
+[[pipelines.orders.sinks]]
+type = "stdout"
+```
+
+Start it with:
+
+```bash
+agora worker --config pipelines.toml
+```
+
+This path reuses the same config-driven container assembly as `agora run
+--config ...`, including DLQ and tracing wiring.
+
 ## SIGINT and SIGTERM behavior
 
 `WorkerPool.run()` installs handlers for both `SIGINT` (Ctrl+C) and `SIGTERM` (systemd stop, `kill`). When either signal arrives:

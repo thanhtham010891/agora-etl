@@ -6,6 +6,7 @@ from agora.config import (
     collect_import_references,
     describe_pipeline_config,
     resolve_config_document,
+    resolve_worker_config_document,
     validate_config_document,
     validate_pipeline_config,
 )
@@ -115,7 +116,11 @@ def test_validate_pipeline_config_includes_tracing_defaults() -> None:
         }
     )
 
-    assert validated["tracing"] == {"enabled": True, "backend": "opentelemetry"}
+    assert validated["tracing"] == {
+        "enabled": True,
+        "backend": "opentelemetry",
+        "auto_configure": True,
+    }
 
 
 def test_validate_pipeline_config_requires_at_least_one_sink() -> None:
@@ -187,6 +192,7 @@ def test_describe_pipeline_config_includes_tracing_summary() -> None:
     assert plan["tracing"] == {
         "enabled": True,
         "backend": "in_memory",
+        "auto_configure": True,
         "service_name": "with-tracing",
     }
 
@@ -204,8 +210,79 @@ def test_describe_pipeline_config_marks_disabled_tracing() -> None:
     assert plan["tracing"] == {
         "enabled": False,
         "backend": "opentelemetry",
+        "auto_configure": True,
         "service_name": None,
     }
+
+
+def test_resolve_worker_config_document_applies_pipeline_and_worker_overlays() -> None:
+    resolved = resolve_worker_config_document(
+        {
+            "format": "agora/v1",
+            "worker": {"health_port": 8080},
+            "defaults": {"profile": "batch", "environment": "prod"},
+            "pipelines": {
+                "orders": {
+                    "source": {"type": "iterable", "records": [1]},
+                    "schedule": {"mode": "every", "minutes": 15},
+                    "sinks": [{"type": "stdout"}],
+                }
+            },
+            "profiles": {
+                "batch": {
+                    "worker": {"graceful_shutdown_timeout": 45.0},
+                    "pipelines": {
+                        "orders": {
+                            "tracing": {"enabled": True, "backend": "in_memory"},
+                        }
+                    },
+                }
+            },
+            "environments": {
+                "prod": {
+                    "worker": {"health_host": "0.0.0.0"},
+                    "pipelines": {
+                        "orders": {
+                            "schedule": {"mode": "cron", "expression": "0 * * * *"},
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    assert resolved.worker_config == {
+        "health_port": 8080,
+        "graceful_shutdown_timeout": 45.0,
+        "health_host": "0.0.0.0",
+    }
+    assert len(resolved.pipelines) == 1
+    assert resolved.pipelines[0].pipeline_config["schedule"] == {
+        "mode": "cron",
+        "expression": "0 * * * *",
+        "seconds": 0.0,
+        "minutes": 0.0,
+        "hours": 0.0,
+        "days": 0.0,
+    }
+
+
+def test_resolve_worker_config_document_requires_schedule_for_each_pipeline() -> None:
+    with pytest.raises(
+        ConfigError,
+        match="Pipeline 'orders' is missing schedule",
+    ):
+        resolve_worker_config_document(
+            {
+                "format": "agora/v1",
+                "pipelines": {
+                    "orders": {
+                        "source": {"type": "iterable", "records": [1]},
+                        "sinks": [{"type": "stdout"}],
+                    }
+                },
+            }
+        )
 
 
 def test_describe_pipeline_config_marks_implicit_builtin_dlq_sink() -> None:

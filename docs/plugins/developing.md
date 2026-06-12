@@ -90,7 +90,7 @@ For group-specific provisional plugins, these advanced module-level contracts
 are also part of the supported boundary:
 
 - `agora.ai.cache` for AI cache implementations
-- `agora.ai.providers.base` for AI provider response types
+- `agora.ai.providers.base` for AI provider capability protocols and response types
 - `agora.core.registry` for MANIFEST compatibility binding
 - `agora.core.retry` for shared retry policy/helpers
 - `agora.metrics.exporters` for metrics exporter protocols and registries
@@ -139,6 +139,10 @@ class MyProvider:
             output_tokens=response.usage.output,
         )
 ```
+
+If the provider also supports embeddings, implement `embed()` and
+`embed_batch()` too. Completion-only providers are valid, but embedding-based
+Agora features will reject them explicitly.
 
 ### Dedup store
 
