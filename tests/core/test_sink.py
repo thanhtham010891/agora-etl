@@ -15,6 +15,7 @@ from agora.core.sink import (
     sink_capabilities,
     sink_data_plane_spec,
 )
+from agora.core.writer import WriteResult
 from agora.sinks.file.csv import CsvSink
 from agora.sinks.file.jsonlines import JsonLinesSink
 
@@ -418,6 +419,31 @@ async def test_sink_router_with_max_records_limits_at_source_boundary() -> None:
     assert summary.records_consumed == 4
     assert summary.records_written == 4
     assert sink.records == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_sink_router_native_batch_preserves_partial_write_results() -> None:
+    class _PartialBatchSink(BaseSink[int]):
+        sink_name = "partial_batch"
+
+        async def write(self, record: int) -> None:
+            raise AssertionError(f"single-record path should not be used: {record!r}")
+
+        async def write_batch(self, records: list[int]) -> list[WriteResult]:
+            assert records == [1, 2]
+            return [
+                WriteResult(written=True),
+                WriteResult(written=False, errors=[RuntimeError("row failed")]),
+            ]
+
+    router = SinkRouter[int]().default(_PartialBatchSink())
+
+    results = await router.write_batch([1, 2])
+
+    assert results[0].written is True
+    assert results[0].errors == []
+    assert results[1].written is False
+    assert [str(error) for error in results[1].errors] == ["row failed"]
 
 
 @pytest.mark.asyncio

@@ -142,7 +142,9 @@ class MyProvider:
 
 If the provider also supports embeddings, implement `embed()` and
 `embed_batch()` too. Completion-only providers are valid, but embedding-based
-Agora features will reject them explicitly.
+Agora features will reject them explicitly. Providers that keep legacy
+embedding method names without real embedding support should declare
+`supports_embeddings = False` so `require_embedding_provider()` fails closed.
 
 ### Dedup store
 

@@ -37,6 +37,7 @@ from uuid import uuid4
 
 import logstruct
 
+from agora.core.fencing import RunFence
 from agora.metrics.collector import MetricsCollector
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ class WorkerPool:
                 worker_id=worker_id,
                 pipeline_ids=[p.pipeline_id for p in self._pipelines],
             )
+            self._coordinator.set_lease_lost_callback(self._on_lease_lost)
             for p in self._pipelines:
                 self._wire_lease_gating(p)
 
@@ -307,13 +309,52 @@ class WorkerPool:
 
         return _callback
 
+    async def _on_lease_lost(self, pipeline_id: str) -> None:
+        """Abort the in-flight run for *pipeline_id* after its lease was lost."""
+        for pipeline in self._pipelines:
+            if pipeline.pipeline_id == pipeline_id:
+                logger.warning("worker_pool_lease_lost_abort", pipeline_id=pipeline_id)
+                pipeline.state.abort_event.set()
+                return
+
     def _wire_lease_gating(self, pipeline: ScheduledPipeline) -> None:
         """Attach lease acquire/release hooks to a pipeline for distributed mode."""
         coordinator = self._coordinator
         assert coordinator is not None
 
         async def _pre_run_hook() -> bool:
-            return await coordinator.try_acquire_lease(pipeline.pipeline_id, pipeline.run_count + 1)
+            pipeline.state.run_fence = None
+            acquired = await coordinator.try_acquire_lease(
+                pipeline.pipeline_id,
+                pipeline.run_count + 1,
+            )
+            if not acquired:
+                return False
+            current_lease = getattr(coordinator, "current_lease", None)
+            if not callable(current_lease):
+                return True
+            lease = current_lease(pipeline.pipeline_id)
+            if lease is None:
+                return True
+            validate_lease = getattr(coordinator, "validate_lease", None)
+            if not callable(validate_lease):
+                return True
+
+            async def _validate() -> bool:
+                return bool(
+                    await validate_lease(
+                        pipeline.pipeline_id,
+                        lease.fencing_token,
+                    )
+                )
+
+            pipeline.state.run_fence = RunFence(
+                pipeline_id=pipeline.pipeline_id,
+                worker_id=lease.worker_id,
+                fencing_token=lease.fencing_token,
+                validate=_validate,
+            )
+            return True
 
         async def _release_observer(record: RunRecord) -> None:
             await coordinator.release_lease(pipeline.pipeline_id)

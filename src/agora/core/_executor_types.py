@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agora.core.context import PipelineContext
+    from agora.core.fencing import RunFence
     from agora.core.middleware import MiddlewareChain
     from agora.core.source import BaseSource
     from agora.core.types import DeliveryConfig
@@ -25,3 +26,4 @@ class PipelineRuntimeSpec:
     pipeline_id: str
     config: DeliveryConfig
     live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
+    run_fence: RunFence | None = None

@@ -105,6 +105,8 @@ def _dlq_record(
     pipeline_id: str,
     *,
     source: str,
+    details: object | None = None,
+    record: object | None = None,
 ) -> DLQRecord:
     return DLQRecord(
         pipeline_id=pipeline_id,
@@ -112,8 +114,9 @@ def _dlq_record(
         stage="source_stream",
         error_type="RuntimeError",
         error_message="boom",
-        record={"id": 1},
+        record={"id": 1} if record is None else record,
         source=source,
+        details=details,
         created_at=datetime(2026, 6, 4, 10, 42, 0, tzinfo=UTC),
     )
 
@@ -174,6 +177,94 @@ async def test_checkpoint_inspect_warns_for_large_file_resume_offset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_inspect_surfaces_postgres_operator_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "postgres_pipe",
+        _checkpoint(
+            "postgres_pipe",
+            source="postgres",
+            value={"row_number": 9, "cursor": {"updated_at": "2026-06-04T10:00:00+00:00"}},
+        ),
+    )
+    fake_console = _FakeConsole()
+
+    with (
+        patch("agora.cli.commands.checkpoint._build_store", return_value=store),
+        patch("agora.cli.commands.checkpoint.console", fake_console),
+    ):
+        exit_code = await _run_checkpoint_command(_checkpoint_args("inspect", "postgres_pipe"))
+
+    assert exit_code == 0
+    assert ("recovery support", "yes") in fake_console.items
+    assert ("resume key", "cursor") in fake_console.items
+    assert any(
+        row[0] == "operator hook" and "restart the pipeline" in row[1] for row in fake_console.items
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspect_surfaces_kafka_operator_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "kafka_pipe",
+        _checkpoint(
+            "kafka_pipe",
+            source="kafka",
+            value={
+                "topic": "orders",
+                "partition": 0,
+                "offset": 42,
+                "offsets": [{"topic": "orders", "partition": 0, "offset": 42}],
+            },
+        ),
+    )
+    fake_console = _FakeConsole()
+
+    with (
+        patch("agora.cli.commands.checkpoint._build_store", return_value=store),
+        patch("agora.cli.commands.checkpoint.console", fake_console),
+    ):
+        exit_code = await _run_checkpoint_command(_checkpoint_args("inspect", "kafka_pipe"))
+
+    assert exit_code == 0
+    assert ("recovery support", "yes") in fake_console.items
+    assert ("resume key", "topic/partition offsets") in fake_console.items
+    assert any(
+        row[0] == "operator hook" and "consumer group" in row[1].lower()
+        for row in fake_console.items
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_inspect_surfaces_redis_stream_operator_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "redis_stream_pipe",
+        _checkpoint(
+            "redis_stream_pipe",
+            source="redis_stream",
+            value={"message_id": "1717580312345-0"},
+        ),
+    )
+    fake_console = _FakeConsole()
+
+    with (
+        patch("agora.cli.commands.checkpoint._build_store", return_value=store),
+        patch("agora.cli.commands.checkpoint.console", fake_console),
+    ):
+        exit_code = await _run_checkpoint_command(_checkpoint_args("inspect", "redis_stream_pipe"))
+
+    assert exit_code == 0
+    assert ("recovery support", "yes") in fake_console.items
+    assert ("resume key", "message_id") in fake_console.items
+    assert any(
+        row[0] == "operator hook" and "pending entries" in row[1].lower()
+        for row in fake_console.items
+    )
+
+
+@pytest.mark.asyncio
 async def test_diagnose_surfaces_recovery_contract_from_checkpoint_source() -> None:
     """Validates: diagnose shows resume contract from the stored checkpoint source."""
     store = InMemoryCheckpointStore()
@@ -228,6 +319,101 @@ async def test_diagnose_uses_dlq_source_when_checkpoint_is_missing() -> None:
         "always restarts from the beginning" in row[1]
         for row in fake_console.items
         if row[0] == "Resume behavior"
+    )
+
+
+@pytest.mark.asyncio
+async def test_diagnose_surfaces_postgres_failure_runbook_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "postgres_pipe",
+        _checkpoint(
+            "postgres_pipe",
+            source="postgres",
+            value={"row_number": 3, "cursor": {"id": 3}},
+        ),
+    )
+    fake_console = _FakeConsole()
+
+    with (
+        patch("agora.cli.commands.diagnose._build_checkpoint_store", return_value=store),
+        patch(
+            "agora.cli.commands.diagnose._load_dlq_records",
+            return_value=[
+                _dlq_record(
+                    "postgres_pipe",
+                    source="postgres",
+                    details={
+                        "postgres": {
+                            "classification": "schema_drift",
+                            "reason": "missing_required_columns",
+                            "details": {"missing_required_columns": ["tenant_id"]},
+                        }
+                    },
+                )
+            ],
+        ),
+        patch("agora.cli.commands.diagnose.console", fake_console),
+    ):
+        exit_code = await _run_diagnose(_diagnose_args("postgres_pipe"))
+
+    assert exit_code == 1
+    assert ("Recovery support", "yes") in fake_console.items
+    assert any(
+        row[0] == "Operator hook" and "Compare incoming payload columns" in row[1]
+        for row in fake_console.items
+    )
+    assert any(row[0] == "Operator hook" and "tenant_id" in row[1] for row in fake_console.items)
+
+
+@pytest.mark.asyncio
+async def test_diagnose_surfaces_kafka_failure_runbook_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "kafka_pipe",
+        _checkpoint(
+            "kafka_pipe",
+            source="kafka",
+            value={
+                "topic": "orders",
+                "partition": 0,
+                "offset": 42,
+                "offsets": [{"topic": "orders", "partition": 0, "offset": 42}],
+            },
+        ),
+    )
+    fake_console = _FakeConsole()
+    fake_record = _dlq_record(
+        "kafka_pipe",
+        source="kafka",
+        details=None,
+        record={
+            "topic": "orders",
+            "partition": 0,
+            "offset": 42,
+            "poison": {
+                "classification": "schema_registry_binding_mismatch",
+                "policy": "dlq_and_continue",
+            },
+        },
+    )
+
+    with (
+        patch("agora.cli.commands.diagnose._build_checkpoint_store", return_value=store),
+        patch("agora.cli.commands.diagnose._load_dlq_records", return_value=[fake_record]),
+        patch("agora.cli.commands.diagnose.console", fake_console),
+    ):
+        exit_code = await _run_diagnose(_diagnose_args("kafka_pipe"))
+
+    assert exit_code == 1
+    assert ("Recovery support", "yes") in fake_console.items
+    assert any(
+        row[0] == "Operator hook" and "schema registry subject" in row[1].lower()
+        for row in fake_console.items
+    )
+    assert any(
+        row[0] == "Operator hook" and "topic=orders, partition=0, offset=42" in row[1]
+        for row in fake_console.items
     )
 
 
@@ -320,3 +506,89 @@ async def test_diagnose_json_reports_recovery_and_dlq_summary() -> None:
     assert payload["recovery"]["resume_key"] == "line_number"
     assert payload["dlq"]["record_count"] == 1
     assert payload["summary"]["has_failure_indicators"] is True
+
+
+@pytest.mark.asyncio
+async def test_diagnose_json_includes_postgres_runbook_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "postgres_json_pipe",
+        _checkpoint(
+            "postgres_json_pipe",
+            source="postgres",
+            value={"row_number": 4, "cursor": {"id": 4}},
+        ),
+    )
+    fake_console = _FakeConsole()
+
+    with (
+        patch("agora.cli.commands.diagnose._build_checkpoint_store", return_value=store),
+        patch(
+            "agora.cli.commands.diagnose._load_dlq_records",
+            return_value=[
+                _dlq_record(
+                    "postgres_json_pipe",
+                    source="postgres",
+                    details={
+                        "postgres": {
+                            "classification": "constraint_violation",
+                            "reason": "foreign_key_violation",
+                            "details": {"sqlstate": "23503"},
+                        }
+                    },
+                )
+            ],
+        ),
+        patch("agora.cli.commands.diagnose.console", fake_console),
+    ):
+        exit_code = await _run_diagnose(_diagnose_args("postgres_json_pipe", json_output=True))
+
+    assert exit_code == 1
+    payload = json.loads(fake_console.outs[-1])
+    assert any("restart the pipeline" in hook for hook in payload["summary"]["runbook_hooks"])
+    assert any("dependency order" in hook for hook in payload["summary"]["runbook_hooks"])
+
+
+@pytest.mark.asyncio
+async def test_diagnose_json_includes_kafka_runbook_hooks() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(
+        "kafka_json_pipe",
+        _checkpoint(
+            "kafka_json_pipe",
+            source="kafka",
+            value={
+                "topic": "orders",
+                "partition": 1,
+                "offset": 99,
+                "offsets": [{"topic": "orders", "partition": 1, "offset": 99}],
+            },
+        ),
+    )
+    fake_console = _FakeConsole()
+    record = _dlq_record(
+        "kafka_json_pipe",
+        source="kafka",
+        details=None,
+        record={
+            "topic": "orders",
+            "partition": 1,
+            "offset": 99,
+            "poison": {
+                "classification": "deserialization",
+                "policy": "fail_closed",
+            },
+        },
+    )
+
+    with (
+        patch("agora.cli.commands.diagnose._build_checkpoint_store", return_value=store),
+        patch("agora.cli.commands.diagnose._load_dlq_records", return_value=[record]),
+        patch("agora.cli.commands.diagnose.console", fake_console),
+    ):
+        exit_code = await _run_diagnose(_diagnose_args("kafka_json_pipe", json_output=True))
+
+    assert exit_code == 1
+    payload = json.loads(fake_console.outs[-1])
+    assert any("serializer contract" in hook for hook in payload["summary"]["runbook_hooks"])
+    assert any("saved offsets" in hook for hook in payload["summary"]["runbook_hooks"])

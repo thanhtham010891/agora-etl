@@ -400,7 +400,19 @@ def test_c11_describe_items_returns_registry_item_info() -> None:
 
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-_PLUGIN_SOURCE_ROOTS = tuple(sorted((_PACKAGE_ROOT / "plugins").glob("*/src")))
+_MONOREPO_ROOT = _PACKAGE_ROOT.parents[1]
+
+
+def _plugin_source_roots() -> tuple[Path, ...]:
+    candidates = [
+        *_PACKAGE_ROOT.glob("plugins/*/src"),
+        _MONOREPO_ROOT / "packages" / "agora-plugins" / "src",
+        *_MONOREPO_ROOT.glob("packages/plugins/*/src"),
+    ]
+    return tuple(sorted(path for path in candidates if path.exists()))
+
+
+_PLUGIN_SOURCE_ROOTS = _plugin_source_roots()
 _LEGACY_PLUGIN_IMPORT_REPLACEMENTS = {
     "agora.runner.coordinator": "agora.runner",
     "agora.state.backend": "agora.state",
@@ -413,6 +425,12 @@ _BANNED_PLUGIN_IMPORT_MODULES = {
 
 
 def _iter_plugin_python_files() -> list[Path]:
+    if not _PLUGIN_SOURCE_ROOTS:
+        pytest.skip(
+            "No first-party plugin source roots found; skipping plugin-source contract "
+            "scan for package-only core CI."
+        )
+
     files: list[Path] = []
     for root in _PLUGIN_SOURCE_ROOTS:
         files.extend(sorted(root.rglob("*.py")))
@@ -427,7 +445,7 @@ def _plugin_contract_violations() -> list[str]:
     violations: list[str] = []
     for path in _iter_plugin_python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        rel_path = path.relative_to(_PACKAGE_ROOT)
+        rel_path = path.relative_to(_MONOREPO_ROOT)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
@@ -476,7 +494,7 @@ def _manifest_version_binding_violations() -> list[str]:
         if path.name != "plugin.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        rel_path = path.relative_to(_PACKAGE_ROOT)
+        rel_path = path.relative_to(_MONOREPO_ROOT)
         found_manifest_keyword = False
         found_public_constant_import = False
 
@@ -511,6 +529,49 @@ def _manifest_version_binding_violations() -> list[str]:
     return violations
 
 
+def _core_api_range_binding_violations() -> list[str]:
+    violations: list[str] = []
+    for path in _iter_plugin_python_files():
+        if path.name != "plugin.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel_path = path.relative_to(_MONOREPO_ROOT)
+        found_range_keyword = False
+        found_public_constant_import = False
+
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "agora.core.registry":
+                found_public_constant_import = any(
+                    alias.name == "AGORA_CORE_API_COMPATIBILITY" for alias in node.names
+                )
+            if not isinstance(node, ast.Assign):
+                continue
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if node.targets[0].id != "MANIFEST" or not isinstance(node.value, ast.Call):
+                continue
+            for keyword in node.value.keywords:
+                if keyword.arg != "agora_core_api_range":
+                    continue
+                found_range_keyword = True
+                if not (
+                    isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == "AGORA_CORE_API_COMPATIBILITY"
+                ):
+                    violations.append(
+                        f"{rel_path}:{node.lineno} must bind MANIFEST.agora_core_api_range "
+                        "to AGORA_CORE_API_COMPATIBILITY"
+                    )
+
+        if not found_range_keyword:
+            violations.append(f"{rel_path} must declare MANIFEST.agora_core_api_range")
+        elif not found_public_constant_import:
+            violations.append(
+                f"{rel_path} must import AGORA_CORE_API_COMPATIBILITY from 'agora.core.registry'"
+            )
+    return violations
+
+
 def test_c12_plugin_packages_avoid_legacy_or_internal_agora_imports() -> None:
     """[CONTRACT-12] First-party and incubating plugin packages must depend on
     public Agora plugin boundaries rather than legacy/internal import paths.
@@ -531,3 +592,11 @@ def test_c13_plugin_manifests_bind_to_public_manifest_version_constant() -> None
     """
     violations = _manifest_version_binding_violations()
     assert not violations, "[CONTRACT-13] manifest binding violations:\n" + "\n".join(violations)
+
+
+def test_c14_plugin_manifests_bind_to_public_core_api_compatibility_constant() -> None:
+    """[CONTRACT-14] First-party plugin MANIFEST declarations must expose the
+    core API range they support, separate from the manifest schema version.
+    """
+    violations = _core_api_range_binding_violations()
+    assert not violations, "[CONTRACT-14] core API range violations:\n" + "\n".join(violations)

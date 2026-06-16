@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agora.core.fencing import FenceLostError
 from agora.core.runtime._delivery_batch_write import (
     write_batch_filtered,
     write_batch_middleware_failure,
@@ -80,6 +81,7 @@ class DeliveryEngine:
     current_checkpoint: Callable[[], CheckpointValue]
     dlq_sink: BaseSink[DLQRecord] | None
     dlq_failure_policy: DLQFailurePolicy
+    dlq_redactor: Callable[[Any], Any] | None
     sink_failure_policy: SinkFailurePolicy
     checkpoint_store: CheckpointStore | None
     checkpoint_failure_policy: CheckpointFailurePolicy
@@ -102,7 +104,31 @@ class DeliveryEngine:
             current_checkpoint=self.current_checkpoint,
             dlq_sink=self.dlq_sink,
             dlq_failure_policy=self.dlq_failure_policy,
+            dlq_redactor=self.dlq_redactor,
         )
+
+    def _success_hook_for(
+        self,
+        ctx: PipelineContext,
+        raw_record: Any,
+        processed_record: Any | None,
+        on_success: Callable[[], Awaitable[None]] | None,
+    ) -> Callable[[], Awaitable[None]] | None:
+        hooks: list[Callable[[], Awaitable[None]]] = []
+        if on_success is not None:
+            hooks.append(on_success)
+        if processed_record is None:
+            hooks.extend(ctx.pop_success_hooks(raw_record))
+        else:
+            hooks.extend(ctx.pop_success_hooks(raw_record, processed_record))
+        if not hooks:
+            return None
+
+        async def _run_success_hooks() -> None:
+            for hook in hooks:
+                await hook()
+
+        return _run_success_hooks
 
     def _uses_pending_write_owner(
         self,
@@ -221,9 +247,14 @@ class DeliveryEngine:
         *,
         failure: MiddlewareFailure | None = None,
         on_success: Callable[[], Awaitable[None]] | None = None,
+        hook_record: Any | None = None,
     ) -> None:
+        if hook_record is not None:
+            on_success = self._success_hook_for(state.ctx, hook_record, None, on_success)
+        elif failure is not None:
+            on_success = self._success_hook_for(state.ctx, failure.record, None, on_success)
         if failure is not None:
-            await self.write_to_dlq(
+            routed = await self.write_to_dlq(
                 ctx=state.ctx,
                 stage=failure.stage,
                 exc=failure.exception,
@@ -233,6 +264,9 @@ class DeliveryEngine:
                 middleware=failure.middleware,
             )
             state.ctx.metrics.records_errored += 1
+            if self.dlq_sink is not None and not routed:
+                await state.ctx.discard_success_hooks(failure.record)
+                return
         else:
             state.ctx.metrics.records_dropped += 1
         await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
@@ -248,6 +282,7 @@ class DeliveryEngine:
         checkpoint_value: CheckpointValue,
         on_success: Callable[[], Awaitable[None]] | None,
     ) -> CommitOutcome:
+        on_success = self._success_hook_for(ctx, raw_record, processed_record, on_success)
         return await resolve_write_result(
             ctx=ctx,
             write_result=write_result,
@@ -282,11 +317,19 @@ class DeliveryEngine:
         on_success: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if result is None:
-            await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
+            await self.drop_record(
+                state,
+                checkpoint_value,
+                failure=failure,
+                on_success=on_success,
+                hook_record=raw_record,
+            )
             return
 
         try:
             write_result = await self.transport.write_one(state.ctx, result)
+        except FenceLostError:
+            raise
         except Exception as exc:
             state.ctx.log.exception("pipeline_write_error")
             routed = await self.write_to_dlq(
@@ -301,9 +344,19 @@ class DeliveryEngine:
             state.ctx.metrics.records_errored += 1
             if routed or self.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
                 await self.save_checkpoint(state.ctx, state.checkpoint_state, checkpoint_value)
-                if routed and on_success is not None:
-                    await on_success()
+                if routed:
+                    committed_hook = self._success_hook_for(
+                        state.ctx,
+                        raw_record,
+                        result,
+                        on_success,
+                    )
+                    if committed_hook is not None:
+                        await committed_hook()
+                else:
+                    await state.ctx.discard_success_hooks(raw_record, result)
             elif self.sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
+                await state.ctx.discard_success_hooks(raw_record, result)
                 raise RecordDeliveryError(exc) from exc
             return
 
@@ -401,6 +454,8 @@ class DeliveryEngine:
             write_results, _ = await self.transport.write_batch(
                 state.ctx, [item.processed for item in batch]
             )
+        except FenceLostError:
+            raise
         except Exception as exc:
             state.ctx.log.exception("pipeline_write_batch_error", batch_size=len(batch))
             await self._flush_batch_outcomes(
@@ -446,6 +501,7 @@ class DeliveryEngine:
         *,
         on_success: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        on_success = self._success_hook_for(state.ctx, raw_record, result, on_success)
         uses_pending_write_owner = self._pending_write_uses_owner(state, writer_batch_size)
         if uses_pending_write_owner:
             if state.pending_write_owner_task is None:
@@ -485,7 +541,13 @@ class DeliveryEngine:
         on_success: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if result is None:
-            await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
+            await self.drop_record(
+                state,
+                checkpoint_value,
+                failure=failure,
+                on_success=on_success,
+                hook_record=raw_record,
+            )
             return
         await self.queue_success_record(
             state,
@@ -508,7 +570,13 @@ class DeliveryEngine:
         on_success: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if result is None:
-            await self.drop_record(state, checkpoint_value, failure=failure, on_success=on_success)
+            await self.drop_record(
+                state,
+                checkpoint_value,
+                failure=failure,
+                on_success=on_success,
+                hook_record=raw_record,
+            )
             return
         if writer_batch_size <= 1:
             await self.write_processed_record(
@@ -556,9 +624,20 @@ class DeliveryEngine:
                 "flush_batch_direct() requires processed/raw/checkpoint/on_success lists "
                 "with matching lengths."
             )
+        on_success_list = [
+            self._success_hook_for(state.ctx, raw, processed, on_success)
+            for raw, processed, on_success in zip(
+                raw_list,
+                processed_list,
+                on_success_list,
+                strict=True,
+            )
+        ]
 
         try:
             write_results, _ = await self.transport.write_batch(state.ctx, processed_list)
+        except FenceLostError:
+            raise
         except Exception as exc:
             state.ctx.log.exception("pipeline_write_batch_error", batch_size=len(processed_list))
             await self._flush_batch_outcomes(
@@ -630,6 +709,8 @@ class DeliveryEngine:
                 write_to_dlq=self.write_to_dlq,
                 save_batch_checkpoint=self.save_batch_checkpoint,
                 resolve_write_result=self._resolve_write_result,
+                commit_outcomes=self._commit_outcomes,
+                success_hook_for=self._success_hook_for,
             )
         else:
             await write_batch_filtered(
@@ -642,6 +723,8 @@ class DeliveryEngine:
                 write_to_dlq=self.write_to_dlq,
                 save_batch_checkpoint=self.save_batch_checkpoint,
                 resolve_write_result=self._resolve_write_result,
+                commit_outcomes=self._commit_outcomes,
+                success_hook_for=self._success_hook_for,
             )
 
     async def save_batch_checkpoint(

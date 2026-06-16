@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agora.ai.cache import LLMCache
+    from agora.ai.governance import AIBudgetPolicy, AICostCatalog
     from agora.ai.providers.base import CompletionProvider
     from agora.core.context import PipelineContext
 
@@ -118,8 +119,17 @@ class AIBatchMiddleware(AIMiddleware[T], Generic[T]):
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
+        budget_policy: AIBudgetPolicy | None = None,
+        cost_catalog: AICostCatalog | None = None,
     ) -> None:
-        super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
+        super().__init__(
+            provider,
+            cache=cache,
+            cache_ttl=cache_ttl,
+            on_error=on_error,
+            budget_policy=budget_policy,
+            cost_catalog=cost_catalog,
+        )
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
         self._prompt_fn = prompt_fn

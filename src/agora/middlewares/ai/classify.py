@@ -52,6 +52,7 @@ from agora.utils.records import merge_into_record
 
 if TYPE_CHECKING:
     from agora.ai.cache import LLMCache
+    from agora.ai.governance import AIBudgetPolicy, AICostCatalog
     from agora.ai.providers.base import CompletionProvider, EmbeddingProvider
     from agora.core.context import PipelineContext
 
@@ -101,6 +102,8 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
+        budget_policy: AIBudgetPolicy | None = None,
+        cost_catalog: AICostCatalog | None = None,
     ) -> None:
         super().__init__(
             provider,
@@ -108,6 +111,8 @@ class AIClassifyMiddleware(AIMiddleware[T], Generic[T]):
             cache_ttl=cache_ttl,
             on_error=on_error,
             require_completion=not use_embeddings,
+            budget_policy=budget_policy,
+            cost_catalog=cost_catalog,
         )
         if not categories:
             raise ValueError("AIClassifyMiddleware requires at least one category")

@@ -12,7 +12,12 @@ import time
 
 import pytest
 
+from agora.core.fencing import FenceLostError
 from agora.core.metrics import PipelineRunSummary
+from agora.core.pipeline import Pipeline
+from agora.core.sink import BaseSink
+from agora.core.source import IterableSource
+from agora.runner import LeaseState
 from agora.runner.policies import ExponentialBackoffPolicy
 from agora.runner.scheduled import RunRecord, Schedule, ScheduledPipeline
 from agora.runner.worker import WorkerPool
@@ -432,6 +437,9 @@ class TestWorkerPool:
             async def release_lease(self, pipeline_id: str) -> None:
                 self.release_calls.append(pipeline_id)
 
+            def set_lease_lost_callback(self, callback) -> None:
+                self._lease_lost_callback = callback
+
             async def list_workers(self):
                 return []
 
@@ -459,3 +467,80 @@ class TestWorkerPool:
         assert coordinator.acquire_calls == [("once_coord", 1), ("once_coord", 2)]
         assert coordinator.release_calls == ["once_coord", "once_coord"]
         assert len(scheduled._observers) == 2
+
+    async def test_worker_pool_fence_blocks_write_when_coordinator_token_is_stale(self) -> None:
+        class RecordingSink(BaseSink[int]):
+            def __init__(self) -> None:
+                self.records: list[int] = []
+
+            async def write(self, record: int) -> None:
+                self.records.append(record)
+
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.valid = False
+                self.validate_calls: list[tuple[str, int]] = []
+                self.release_calls: list[str] = []
+                self.lease = LeaseState(
+                    pipeline_id="fenced_once",
+                    run_number=1,
+                    worker_id="worker-a",
+                    fencing_token=11,
+                    acquired_at="now",
+                )
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+
+            async def stop(self) -> None:
+                return None
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                self.lease = LeaseState(
+                    pipeline_id=pipeline_id,
+                    run_number=run_number,
+                    worker_id="worker-a",
+                    fencing_token=11,
+                    acquired_at="now",
+                )
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                self.release_calls.append(pipeline_id)
+
+            def current_lease(self, pipeline_id: str) -> LeaseState | None:
+                return self.lease if pipeline_id == self.lease.pipeline_id else None
+
+            async def validate_lease(self, pipeline_id: str, fencing_token: int) -> bool:
+                self.validate_calls.append((pipeline_id, fencing_token))
+                return self.valid
+
+            def set_lease_lost_callback(self, callback) -> None:
+                self._lease_lost_callback = callback
+
+            async def list_workers(self):
+                return []
+
+        sink = RecordingSink()
+
+        async def factory():
+            return Pipeline(IterableSource([1]), id="fenced_once").build(sink)
+
+        coordinator = FakeCoordinator()
+        pool = WorkerPool(coordinator=coordinator)
+        pool.register(
+            ScheduledPipeline(
+                factory=factory,
+                schedule=Schedule.once(),
+                pipeline_id="fenced_once",
+                error_backoff_seconds=0.0,
+                max_consecutive_errors=1,
+            )
+        )
+
+        with pytest.raises(FenceLostError):
+            await pool.run()
+
+        assert sink.records == []
+        assert coordinator.validate_calls == [("fenced_once", 11), ("fenced_once", 11)]
+        assert coordinator.release_calls == ["fenced_once"]

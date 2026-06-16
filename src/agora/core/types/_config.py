@@ -13,6 +13,9 @@ from agora.core.types._policies import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
     from agora.core.checkpoint import CheckpointStore
     from agora.core.dlq import DLQRecord
     from agora.core.sink import BaseSink
@@ -59,6 +62,7 @@ class DeliveryConfig:
     performance_profile: str = "balanced"
     dlq: BaseSink[DLQRecord] | None = None
     dlq_failure_policy: DLQFailurePolicy = DLQFailurePolicy.LOG_ONLY
+    dlq_redactor: Callable[[Any], Any] | None = None
     checkpoint: CheckpointStore | None = None
     checkpoint_key: str | None = None
     checkpoint_every: int = 1

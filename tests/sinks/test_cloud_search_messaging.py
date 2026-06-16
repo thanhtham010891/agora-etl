@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agora.sinks.http.webhook import WebhookSink
+from agora.sinks.http.webhook import WebhookSink, _redact_url
 
 
 async def test_webhook_single_mode_posts_each_record() -> None:
@@ -179,6 +179,15 @@ async def test_webhook_zero_retries_still_attempts_once() -> None:
         await sink.write({"id": 1})
 
     assert mock_client.post.call_count == 1
+
+
+def test_webhook_redacts_secret_bearing_url_for_diagnostics() -> None:
+    safe = _redact_url("https://user:secret@example.com/hook?token=abc#fragment")
+
+    assert safe == "https://<redacted>@example.com/hook?<redacted>"
+    assert "secret" not in safe
+    assert "token=abc" not in safe
+    assert "fragment" not in safe
 
 
 async def test_webhook_payload_fn_called() -> None:

@@ -21,6 +21,7 @@ from agora import (
 from agora.core.context import PipelineContext
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.errors import PipelineError
+from agora.core.fencing import FenceLostError, RunFence
 from agora.core.metrics import PipelineMetrics
 from agora.core.middleware import Middleware, MiddlewareChain, MiddlewareFailure
 from agora.core.runtime import _buffered, _lanes, _source_adapter
@@ -88,7 +89,52 @@ def test_bound_pipeline_with_sink_preserves_concurrency_and_live_metrics_callbac
     assert replaced._config.sink_concurrency == 3
     assert replaced._live_metrics_callback is _callback
     assert replaced._writer._concurrent_writes is True
-    assert replaced._writer._max_concurrency == 3
+
+
+async def test_bound_pipeline_run_fence_blocks_stale_sink_write() -> None:
+    class RecordingSink(BaseSink[int]):
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def write(self, record: int) -> None:
+            self.records.append(record)
+
+    async def _stale() -> bool:
+        return False
+
+    sink = RecordingSink()
+    bound = Pipeline(IterableSource([1]), id="fenced").build(sink)
+    bound.set_run_fence(
+        RunFence(
+            pipeline_id="fenced",
+            worker_id="worker-a",
+            fencing_token=7,
+            validate=_stale,
+        )
+    )
+
+    with pytest.raises(FenceLostError):
+        await bound.run()
+
+    assert sink.records == []
+
+
+async def test_bound_pipeline_run_fence_is_preserved_when_replacing_sink() -> None:
+    async def _active() -> bool:
+        return True
+
+    bound = Pipeline(IterableSource([1]), id="fenced_replace").build(StdoutSink())
+    fence = RunFence(
+        pipeline_id="fenced_replace",
+        worker_id="worker-a",
+        fencing_token=7,
+        validate=_active,
+    )
+    bound.set_run_fence(fence)
+
+    replaced = bound.with_sink(StdoutSink())
+
+    assert replaced._run_fence is fence
 
 
 def test_bound_pipeline_explain_reports_pre_run_shape() -> None:

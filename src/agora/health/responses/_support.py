@@ -30,4 +30,4 @@ def health_payload(collector_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def ready_payload(status: str) -> dict[str, Any]:
-    return {"ready": status not in ("failing",), "status": status}
+    return {"ready": status == "ok", "status": status}

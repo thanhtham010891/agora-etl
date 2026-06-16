@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import logstruct
 
@@ -90,6 +91,7 @@ class WebhookSink(BaseSink[T], Generic[T]):
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         self._url = url
+        self._safe_url = _redact_url(url)
         self._payload_fn = payload_fn or _default_payload
         self._headers = {"Content-Type": "application/json", **(headers or {})}
         self._max_retries = max_retries
@@ -181,7 +183,7 @@ class WebhookSink(BaseSink[T], Generic[T]):
                 resp.raise_for_status()
                 logger.debug(
                     "webhook_sink_posted",
-                    url=self._url,
+                    url=self._safe_url,
                     status=resp.status_code,
                 )
                 return
@@ -194,7 +196,7 @@ class WebhookSink(BaseSink[T], Generic[T]):
                     wait = 2**attempt
                     logger.warning(
                         "webhook_sink_retry",
-                        url=self._url,
+                        url=self._safe_url,
                         status=status,
                         attempt=attempt,
                         wait_s=wait,
@@ -203,7 +205,7 @@ class WebhookSink(BaseSink[T], Generic[T]):
                 else:
                     logger.exception(
                         "webhook_sink_error",
-                        url=self._url,
+                        url=self._safe_url,
                         status=status,
                         error=str(exc),
                     )
@@ -214,13 +216,13 @@ class WebhookSink(BaseSink[T], Generic[T]):
                     break
                 logger.warning(
                     "webhook_sink_request_error",
-                    url=self._url,
+                    url=self._safe_url,
                     error=str(exc),
                     attempt=attempt,
                 )
                 await asyncio.sleep(attempt)
         raise RuntimeError(
-            f"WebhookSink POST {self._url} failed after {self._max_retries} retries"
+            f"WebhookSink POST {self._safe_url} failed after {self._max_retries} retries"
         ) from last_exc
 
 
@@ -230,3 +232,27 @@ def _default_payload(record: Any) -> Any:
     if hasattr(record, "__dict__"):
         return record.__dict__
     return record
+
+
+def _redact_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
+
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    if parsed.username or parsed.password:
+        host = f"<redacted>@{host}"
+
+    query = "<redacted>" if parsed.query else ""
+    return urlunsplit(
+        SplitResult(
+            scheme=parsed.scheme,
+            netloc=host,
+            path=parsed.path,
+            query=query,
+            fragment="",
+        )
+    )

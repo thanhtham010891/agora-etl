@@ -16,6 +16,7 @@ from agora.core._executor_support import (
 from agora.core._executor_types import PipelineRuntimeSpec
 from agora.core.acceleration import AccelerationCapability, acceleration_supports
 from agora.core.errors import PipelineError
+from agora.core.fencing import FenceLostError
 from agora.core.runtime import (
     DeliveryEngine,
     ExecutionCoordinator,
@@ -116,6 +117,8 @@ class PipelineExecutor:
             return
 
         state.run_error = exc
+        if isinstance(exc, FenceLostError):
+            return
         if isinstance(exc, RecordDeliveryError):
             return
 

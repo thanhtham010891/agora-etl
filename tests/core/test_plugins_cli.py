@@ -4,7 +4,7 @@ import argparse
 import json
 from unittest.mock import MagicMock, patch
 
-from agora.cli.commands.plugins import _ALL_KINDS, PluginsCommand
+from agora.cli.commands.plugins import _ALL_KINDS, _EXTRA_HINTS, PluginsCommand
 from agora.core.discovery import public_entrypoint_group_contracts
 
 
@@ -130,3 +130,8 @@ def test_plugins_command_table_output_uses_all_requested_groups() -> None:
     assert exit_code == 0
     assert fake_console.outs == []
     assert fake_console.tables == [collected]
+
+
+def test_plugins_extra_hints_include_kafka_dlq_components() -> None:
+    assert _EXTRA_HINTS["source"]["kafka_dlq_source"] == "agora-etl-plugins[kafka]"
+    assert _EXTRA_HINTS["sink"]["kafka_dlq"] == "agora-etl-plugins[kafka]"

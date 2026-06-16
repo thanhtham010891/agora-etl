@@ -32,14 +32,15 @@ provider for completion-driven AI workflows that keeps its contract explicit.
 
 ## What it does not support
 
-- `embed()`
-- `embed_batch()`
+- native embeddings
 - `AIClassifyMiddleware(use_embeddings=True)`
 - `EmbeddingStore`
 
 Anthropic does not provide native embedding models in this package's support
-story. For embedding-based workflows, prefer `agora-ai-openai` or
-`agora-ai-gemini`.
+story. `AnthropicProvider` declares `supports_embeddings=False`, so
+embedding-based workflows are rejected by Agora's embedding provider guard even
+if legacy compatibility methods are present. For embedding-based workflows,
+prefer `agora-ai-openai` or `agora-ai-gemini`.
 
 ## Install
 
@@ -112,7 +113,8 @@ summary = (
 This provider is official, but its scope stays intentionally narrow:
 
 - it supports completion-driven middleware flows and structured JSON output
-- it does not expose `embed()` or `embed_batch()`
+- it is not an embedding-capable provider and declares
+  `supports_embeddings=False`
 - embedding-based features should use an embedding-capable provider instead
 
 That keeps the Anthropic path honest while still making it part of the official

@@ -31,6 +31,13 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 import logstruct
 
 from agora.ai.cache import LLMCache, make_cache_key
+from agora.ai.governance import (
+    AIBudgetExceeded,
+    AIBudgetPolicy,
+    AIBudgetUsage,
+    AICostCatalog,
+    estimate_prompt_tokens,
+)
 from agora.core.middleware import Middleware
 from agora.core.types import OnError as _OnError
 
@@ -103,6 +110,8 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
         require_completion: bool = True,
+        budget_policy: AIBudgetPolicy | None = None,
+        cost_catalog: AICostCatalog | None = None,
     ) -> None:
         if require_completion:
             from agora.ai.providers.base import require_completion_provider
@@ -112,12 +121,21 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         self._cache = cache
         self._cache_ttl = cache_ttl
         self._on_error = on_error
+        self._budget_policy = budget_policy
+        self._cost_catalog = cost_catalog
+        self._budget_usage = AIBudgetUsage()
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
+    async def on_start(self, ctx: PipelineContext) -> None:
+        del ctx
+        if self._budget_policy is not None and self._budget_policy.scope == "run":
+            self._budget_usage = AIBudgetUsage()
+
     async def on_stop(self, ctx: PipelineContext) -> None:
+        del ctx
         if self._cache is not None:
             await self._cache.close()
 
@@ -141,6 +159,7 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         ``ctx.metrics.middleware(name).ai`` when *ctx* is provided.
         """
         cache_kwargs: dict[str, Any] = {
+            "model": self._provider_cache_identity(),
             "system": system,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -166,6 +185,13 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         from agora.ai.providers.base import require_completion_provider
 
         provider = require_completion_provider(self._provider, consumer=type(self).__name__)
+        model = self._provider_cache_identity()
+        self._enforce_budget_preflight(
+            model=model,
+            prompt=prompt,
+            system=system,
+            max_tokens=max_tokens,
+        )
         response = await provider.complete(
             prompt,
             system=system,
@@ -173,6 +199,7 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
             max_tokens=max_tokens,
             response_format=response_format,
         )
+        self._record_budget_usage(response)
 
         logger.debug(
             "llm_complete",
@@ -192,6 +219,114 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
             await self._cache.set(cache_key, response.content, self._cache_ttl)
 
         return response
+
+    def _enforce_budget_preflight(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        system: str | None,
+        max_tokens: int,
+    ) -> None:
+        policy = self._budget_policy
+        if policy is None:
+            return
+        input_tokens = estimate_prompt_tokens(system, prompt)
+        output_tokens = max(max_tokens, 0)
+        self._check_budget(
+            policy,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated=True,
+        )
+
+    def _record_budget_usage(self, response: CompletionResponse) -> None:
+        policy = self._budget_policy
+        if policy is None:
+            return
+        cost_usd = self._estimate_cost_usd(
+            response.model,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+        self._check_budget(
+            policy,
+            model=response.model,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=cost_usd,
+            estimated=False,
+        )
+        if policy.scope == "run":
+            self._budget_usage.input_tokens += response.input_tokens
+            self._budget_usage.output_tokens += response.output_tokens
+            self._budget_usage.cost_usd += cost_usd
+
+    def _check_budget(
+        self,
+        policy: AIBudgetPolicy,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        estimated: bool,
+        cost_usd: float | None = None,
+    ) -> None:
+        prefix = "estimated " if estimated else ""
+        effective_input = input_tokens
+        effective_output = output_tokens
+        effective_total = input_tokens + output_tokens
+        effective_cost = (
+            self._estimate_cost_usd(model, input_tokens=input_tokens, output_tokens=output_tokens)
+            if cost_usd is None
+            else cost_usd
+        )
+        if policy.scope == "run":
+            effective_input += self._budget_usage.input_tokens
+            effective_output += self._budget_usage.output_tokens
+            effective_total += self._budget_usage.total_tokens
+            effective_cost += self._budget_usage.cost_usd
+
+        if policy.max_input_tokens is not None and effective_input > policy.max_input_tokens:
+            raise AIBudgetExceeded(
+                f"AI budget exceeded: {prefix}input_tokens={effective_input} "
+                f"> max_input_tokens={policy.max_input_tokens}."
+            )
+        if policy.max_output_tokens is not None and effective_output > policy.max_output_tokens:
+            raise AIBudgetExceeded(
+                f"AI budget exceeded: {prefix}output_tokens={effective_output} "
+                f"> max_output_tokens={policy.max_output_tokens}."
+            )
+        if policy.max_total_tokens is not None and effective_total > policy.max_total_tokens:
+            raise AIBudgetExceeded(
+                f"AI budget exceeded: {prefix}total_tokens={effective_total} "
+                f"> max_total_tokens={policy.max_total_tokens}."
+            )
+        if policy.max_cost_usd is not None and effective_cost > policy.max_cost_usd:
+            raise AIBudgetExceeded(
+                f"AI budget exceeded: {prefix}cost_usd={effective_cost:.6f} "
+                f"> max_cost_usd={policy.max_cost_usd:.6f}."
+            )
+
+    def _estimate_cost_usd(
+        self,
+        model: str,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> float:
+        if self._budget_policy is None or self._budget_policy.max_cost_usd is None:
+            return 0.0
+        if self._cost_catalog is None:
+            raise AIBudgetExceeded(
+                "AI cost guard requires an AICostCatalog when max_cost_usd is set."
+            )
+        return self._cost_catalog.estimate_usd(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
     def _render_prompt(self, template: str, record: T) -> str:
         """Render *template* with record fields — injection-safe via ``_SafeFormatter``.
@@ -236,6 +371,15 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         if self._on_error == "drop":
             return None
         return record  # passthrough
+
+    def _provider_cache_identity(self) -> str:
+        model = getattr(self._provider, "model", None)
+        if isinstance(model, str) and model:
+            return model
+        private_model = getattr(self._provider, "_model", None)
+        if isinstance(private_model, str) and private_model:
+            return private_model
+        return type(self._provider).__qualname__
 
     @abstractmethod
     async def process(self, record: T, ctx: PipelineContext) -> T | None: ...

@@ -84,6 +84,19 @@ class EmbeddingOnlyProvider:
         return [await self.embed(text) for text in texts]
 
 
+class DeclaredNoEmbeddingProvider:
+    """Provider with legacy embedding methods that explicitly disables embeddings."""
+
+    model: str = "declared-no-embedding-v1"
+    supports_embeddings = False
+
+    async def embed(self, text: str) -> EmbeddingResponse:
+        return EmbeddingResponse(embedding=[float(len(text))], model=self.model)
+
+    async def embed_batch(self, texts: list[str]) -> list[EmbeddingResponse]:
+        return [await self.embed(text) for text in texts]
+
+
 # ======================================================================
 # Protocol compliance
 # ======================================================================
@@ -154,6 +167,13 @@ class TestAIProviderProtocol:
         provider = EmbeddingOnlyProvider()
         resolved = require_embedding_provider(provider, consumer="EmbeddingStore")
         assert resolved is provider
+
+    def test_require_embedding_provider_rejects_declared_no_embedding_provider(self) -> None:
+        with pytest.raises(TypeError, match="supports_embeddings=False"):
+            require_embedding_provider(
+                DeclaredNoEmbeddingProvider(),
+                consumer="EmbeddingStore",
+            )
 
     def test_require_embedding_provider_rejects_completion_only_provider(self) -> None:
         with pytest.raises(

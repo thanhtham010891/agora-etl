@@ -149,17 +149,18 @@ async def test_200_on_correct_bearer_token_metrics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_200_on_correct_bearer_token_ready() -> None:
-    """GET /ready with correct Bearer token → 200."""
+async def test_503_idle_on_correct_bearer_token_ready() -> None:
+    """GET /ready with correct Bearer token authenticates, then reports idle readiness."""
     response = await _send_request(
         b"GET /ready HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer my-secret\r\n\r\n",
         auth_token="my-secret",
     )
-    assert "200" in _status_line(response), (
-        f"Expected 200 for correct Bearer token on /ready, got: {_status_line(response)!r}"
+    assert "503" in _status_line(response), (
+        f"Expected 503 idle readiness for correct Bearer token on /ready, got: {_status_line(response)!r}"
     )
     body = json.loads(_body(response))
     assert "ready" in body, f"Ready payload missing 'ready': {body}"
+    assert body["ready"] is False
 
 
 # ------------------------------------------------------------------ #
@@ -206,12 +207,12 @@ async def test_200_when_auth_disabled_metrics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_200_when_auth_disabled_ready() -> None:
-    """GET /ready with no auth_token configured → 200."""
+async def test_503_idle_when_auth_disabled_ready() -> None:
+    """GET /ready with no auth_token configured reports idle readiness."""
     response = await _send_request(
         b"GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n",
         auth_token=None,
     )
-    assert "200" in _status_line(response), (
-        f"Expected 200 for /ready when auth disabled, got: {_status_line(response)!r}"
+    assert "503" in _status_line(response), (
+        f"Expected 503 idle readiness for /ready when auth disabled, got: {_status_line(response)!r}"
     )

@@ -4,6 +4,7 @@ Advanced domain-specific contracts live under ``agora.core.<area>``.
 Underscore-prefixed support modules remain internal implementation detail.
 """
 
+from agora.core.acceptance import AcceptanceFinding, AcceptanceGate, AcceptanceReport
 from agora.core.checkpoint import (
     Checkpoint,
     CheckpointableSource,
@@ -27,6 +28,12 @@ from agora.core.errors import (
     RegistryError,
 )
 from agora.core.explain import MiddlewareStageExplain, PipelineExplain, SinkWriteExplain
+from agora.core.failures import (
+    FailureClassification,
+    PoisonRecordClassification,
+    PoisonRecordInfo,
+)
+from agora.core.health import ComponentHealthSnapshot, HealthCheckable
 from agora.core.metrics import PipelineMetrics, PipelineRunSummary
 from agora.core.middleware import (
     FilterMiddleware,
@@ -37,7 +44,17 @@ from agora.core.middleware import (
 )
 from agora.core.pipeline import BoundPipeline, Pipeline
 from agora.core.plugin import Configurable, Lifecycle, Plugin
-from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION, Registry
+from agora.core.recovery import (
+    SourceRecoveryContractProvider,
+    SourceRecoveryContractSnapshot,
+    SourceRecoveryMode,
+)
+from agora.core.registry import (
+    AGORA_CORE_API_COMPATIBILITY,
+    AGORA_CORE_API_VERSION,
+    AGORA_PLUGIN_MANIFEST_VERSION,
+    Registry,
+)
 from agora.core.retry import RetryPolicy, retry_async
 from agora.core.sink import BaseSink, SinkFanOut, SinkRouter, sink_data_plane_spec
 from agora.core.source import BaseSource, IterableSource, source_data_plane_spec
@@ -87,10 +104,18 @@ _RECOVERY_EXPORTS = (
     "DedupStoreFailurePolicy",
     "InMemoryCheckpointStore",
     "OnError",
+    "FailureClassification",
+    "PoisonRecordClassification",
+    "PoisonRecordInfo",
     "SQLiteCheckpointStore",
+    "SourceRecoveryContractProvider",
+    "SourceRecoveryContractSnapshot",
+    "SourceRecoveryMode",
 )
 
 _PLUGIN_EXPORTS = (
+    "AGORA_CORE_API_COMPATIBILITY",
+    "AGORA_CORE_API_VERSION",
     "AGORA_PLUGIN_MANIFEST_VERSION",
     "Configurable",
     "Lifecycle",
@@ -99,6 +124,11 @@ _PLUGIN_EXPORTS = (
 )
 
 _OBSERVABILITY_EXPORTS = (
+    "AcceptanceFinding",
+    "AcceptanceGate",
+    "AcceptanceReport",
+    "ComponentHealthSnapshot",
+    "HealthCheckable",
     "MiddlewareStageExplain",
     "PipelineContext",
     "PipelineExplain",
@@ -152,9 +182,22 @@ __all__ = [  # noqa: RUF022
     "DedupStoreFailurePolicy",
     "InMemoryCheckpointStore",
     "OnError",
+    "FailureClassification",
+    "PoisonRecordClassification",
+    "PoisonRecordInfo",
     "SQLiteCheckpointStore",
+    "SourceRecoveryContractProvider",
+    "SourceRecoveryContractSnapshot",
+    "SourceRecoveryMode",
+    "AGORA_CORE_API_COMPATIBILITY",
+    "AGORA_CORE_API_VERSION",
     "AGORA_PLUGIN_MANIFEST_VERSION",
+    "AcceptanceFinding",
+    "AcceptanceGate",
+    "AcceptanceReport",
+    "ComponentHealthSnapshot",
     "Configurable",
+    "HealthCheckable",
     "Lifecycle",
     "Plugin",
     "Registry",

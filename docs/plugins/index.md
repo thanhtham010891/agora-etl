@@ -15,6 +15,7 @@ This section focuses on the public plugin story:
 ## Start here
 
 - Want the official first-party integrations: [Official Bundle](official-bundle.md)
+- Need production compatibility and release gates: [Production Readiness](production-readiness.md)
 - Need Redis-backed state, streams, or replay: [Redis](redis.md)
 - Need topic-based pipelines: [Kafka](kafka.md)
 - Need relational extract/load workflows: [PostgreSQL](postgresql.md)

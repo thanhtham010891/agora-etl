@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from agora.core.checkpoint import Checkpoint, CheckpointStore, CheckpointValue
 from agora.core.dlq import DLQRecord
+from agora.core.fencing import assert_run_fence_active
 from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy
 
 if TYPE_CHECKING:
@@ -26,6 +27,12 @@ class DLQWriter:
     current_checkpoint: Callable[[], CheckpointValue]
     dlq_sink: BaseSink[DLQRecord] | None
     dlq_failure_policy: DLQFailurePolicy
+    dlq_redactor: Callable[[Any], Any] | None = None
+
+    def _redact(self, value: Any) -> Any:
+        if self.dlq_redactor is None:
+            return value
+        return self.dlq_redactor(value)
 
     async def write(
         self,
@@ -45,6 +52,7 @@ class DLQWriter:
             return False
 
         try:
+            await assert_run_fence_active(ctx)
             with ctx.trace_span(
                 "dlq.write",
                 stage=stage,
@@ -57,22 +65,25 @@ class DLQWriter:
                         run_id=ctx.run_id,
                         stage=stage,
                         error_type=type(exc).__name__,
-                        error_message=str(exc),
+                        error_message=str(self._redact(str(exc))),
                         record=(
-                            original_record
+                            self._redact(original_record)
                             if original_record is not None
-                            else record
+                            else self._redact(record)
                             if record is not None
-                            else processed_record
+                            else self._redact(processed_record)
                         ),
                         source=source or self.source_name,
                         checkpoint=(
-                            checkpoint if checkpoint is not None else self.current_checkpoint()
+                            self._redact(
+                                checkpoint if checkpoint is not None else self.current_checkpoint()
+                            )
                         ),
+                        details=self._redact(getattr(exc, "dlq_details", None)),
                         middleware=middleware,
                         sink=sink,
-                        original_record=original_record,
-                        processed_record=processed_record,
+                        original_record=self._redact(original_record),
+                        processed_record=self._redact(processed_record),
                     )
                 )
             return True
@@ -124,6 +135,7 @@ class CheckpointManager:
     ) -> None:
         t0 = time.monotonic()
         try:
+            await assert_run_fence_active(ctx)
             if self.checkpoint_store is None:
                 raise RuntimeError("checkpoint_store is None — cannot persist checkpoint")
             with ctx.trace_span(

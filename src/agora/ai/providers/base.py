@@ -174,6 +174,12 @@ def require_embedding_provider(
     consumer: str,
 ) -> EmbeddingProvider:
     """Return *provider* as an embedding provider or raise a clear error."""
+    if getattr(provider, "supports_embeddings", True) is False:
+        raise TypeError(
+            f"{consumer} requires an embedding-capable provider, but "
+            f"{type(provider).__name__} declares supports_embeddings=False. "
+            "Use a provider with native embedding support."
+        )
     if hasattr(provider, "embed") and hasattr(provider, "embed_batch"):
         return cast("EmbeddingProvider", provider)
     capability_summary = _describe_provider_capabilities(provider)

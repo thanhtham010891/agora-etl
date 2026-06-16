@@ -31,11 +31,33 @@ _DLQ_SOURCE_BY_SINK_TYPE = {
     "sqlite_dlq": "sqlite_dlq_source",
     "postgres_dlq": "postgres_dlq_source",
     "redis_dlq": "redis_dlq_source",
+    "kafka_dlq": "kafka_dlq_source",
 }
 _DLQ_SOURCE_FIELDS_BY_SINK_TYPE = {
     "sqlite_dlq": ("path",),
     "postgres_dlq": ("dsn", "table"),
     "redis_dlq": ("url", "key_prefix"),
+    "kafka_dlq": (
+        "bootstrap_servers",
+        "topic",
+        "security_protocol",
+        "sasl_mechanism",
+        "sasl_username",
+        "sasl_username_env",
+        "sasl_password",
+        "sasl_password_env",
+        "sasl_password_file",
+        "ssl_cafile",
+        "ssl_cafile_env",
+        "ssl_certfile",
+        "ssl_certfile_env",
+        "ssl_keyfile",
+        "ssl_keyfile_env",
+        "ssl_password",
+        "ssl_password_env",
+        "ssl_password_file",
+        "ssl_check_hostname",
+    ),
 }
 
 

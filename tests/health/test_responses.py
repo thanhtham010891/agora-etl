@@ -60,6 +60,33 @@ def test_ready_response_is_service_unavailable_when_collector_is_failing() -> No
     assert payload == {"ready": False, "status": "failing"}
 
 
+def test_ready_response_is_service_unavailable_when_collector_is_idle() -> None:
+    collector = MetricsCollector()
+    builder = HealthResponseBuilder(
+        collector=collector,
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build_ready()
+    payload = json.loads(response.body.decode("utf-8"))
+    assert b"503" in response.status_line
+    assert payload == {"ready": False, "status": "idle"}
+
+
+def test_ready_response_is_ok_after_successful_run() -> None:
+    import asyncio
+
+    collector = MetricsCollector()
+    asyncio.run(collector.record_run("pipe", summary=None))
+    builder = HealthResponseBuilder(
+        collector=collector,
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build_ready()
+    payload = json.loads(response.body.decode("utf-8"))
+    assert b"200" in response.status_line
+    assert payload == {"ready": True, "status": "ok"}
+
+
 def test_unknown_path_returns_not_found_response() -> None:
     builder = HealthResponseBuilder(
         collector=MetricsCollector(),

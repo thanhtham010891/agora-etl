@@ -21,7 +21,8 @@ import json
 import os
 import sys
 import textwrap
-from types import SimpleNamespace
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -39,9 +40,12 @@ from agora.cli.commands.doctor import (
     check_dlq_replay_support,
     check_entrypoint_plugins,
     check_env_vars,
+    check_kafka_enterprise_readiness,
     check_plugins_importable,
+    check_postgres_enterprise_readiness,
     check_python_version,
     check_recovery_posture,
+    check_redis_enterprise_readiness,
 )
 from agora.core.acceleration import AccelerationCapability, AccelerationMode
 
@@ -85,6 +89,55 @@ def test_report_to_dict_serializes_results() -> None:
     assert payload["warned"] is False
     assert payload["results"][0]["name"] == "agora-etl-rs acceleration"
     assert payload["results"][0]["status"] == "pass"
+    assert payload["results"][0]["data"] == {}
+    assert payload["readiness"]["component_count"] == 0
+
+
+def test_report_to_dict_groups_structured_readiness_by_backend() -> None:
+    report = DoctorReport()
+    report.add(
+        CheckResult(
+            "Kafka source readiness",
+            Status.WARN,
+            "Kafka source opened but has no active partition assignment yet",
+            data={
+                "category": "enterprise_readiness",
+                "backend": "kafka",
+                "component": "source",
+                "name": "Kafka source readiness",
+                "status": "warn",
+                "message": "Kafka source opened but has no active partition assignment yet",
+                "metrics": {"assignment_count": 0},
+                "findings": [],
+                "operator_hooks": ["Wait for assignment."],
+            },
+        )
+    )
+    report.add(
+        CheckResult(
+            "Redis sink readiness #1",
+            Status.PASS,
+            "Redis sink '127.0.0.1:6379/0' passed enterprise readiness checks",
+            data={
+                "category": "enterprise_readiness",
+                "backend": "redis",
+                "component": "sink",
+                "name": "Redis sink readiness #1",
+                "status": "pass",
+                "message": "Redis sink '127.0.0.1:6379/0' passed enterprise readiness checks",
+                "metrics": {"connection_ready": True},
+                "findings": [],
+                "operator_hooks": ["Observe memory policy."],
+            },
+        )
+    )
+
+    payload = report.to_dict()
+
+    assert payload["readiness"]["component_count"] == 2
+    assert payload["readiness"]["backends"]["kafka"]["warned"] is True
+    assert payload["readiness"]["backends"]["redis"]["failed"] is False
+    assert payload["readiness"]["backends"]["kafka"]["components"][0]["component"] == "source"
 
 
 # ======================================================================
@@ -580,6 +633,424 @@ def test_recovery_posture_warns_for_non_checkpointable_source(tmp_path: Any) -> 
     )
 
 
+@dataclass(frozen=True)
+class _FakeFinding:
+    component: str
+    metric: str
+    message: str
+    value: object
+    threshold: object
+
+
+@dataclass(frozen=True)
+class _FakeReport:
+    passed: bool
+    findings: tuple[_FakeFinding, ...] = ()
+
+
+class _FakeGate:
+    def evaluate_source(self, snapshot: Any, thresholds: Any | None = None) -> _FakeReport:
+        del thresholds
+        findings: list[_FakeFinding] = []
+        if not snapshot.recovery_contract.supports_checkpoint:
+            findings.append(
+                _FakeFinding(
+                    "source",
+                    "recovery_contract.supports_checkpoint",
+                    "Postgres source does not support checkpoint-based resume.",
+                    snapshot.recovery_contract.supports_checkpoint,
+                    True,
+                )
+            )
+        return _FakeReport(passed=not findings, findings=tuple(findings))
+
+    def evaluate_sink(self, snapshot: Any, thresholds: Any | None = None) -> _FakeReport:
+        del thresholds
+        findings: list[_FakeFinding] = []
+        if not snapshot.connection_ready:
+            findings.append(
+                _FakeFinding(
+                    "sink",
+                    "connection_ready",
+                    "Postgres sink connection is not ready.",
+                    snapshot.connection_ready,
+                    True,
+                )
+            )
+        return _FakeReport(passed=not findings, findings=tuple(findings))
+
+    def evaluate_dlq_sink(self, snapshot: Any, thresholds: Any | None = None) -> _FakeReport:
+        del thresholds
+        findings: list[_FakeFinding] = []
+        if not snapshot.table_ready:
+            findings.append(
+                _FakeFinding(
+                    "dlq_sink",
+                    "table_ready",
+                    "Postgres DLQ sink table is not ready.",
+                    snapshot.table_ready,
+                    True,
+                )
+            )
+        return _FakeReport(passed=not findings, findings=tuple(findings))
+
+
+class _FakeThresholds:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+def _install_fake_postgres_plugin_module() -> ModuleType:
+    module = ModuleType("agora_plugins.postgres")
+    module.PostgresEnterpriseAcceptanceGate = _FakeGate
+    module.PostgresSourceEnterpriseAcceptanceThresholds = _FakeThresholds
+    module.PostgresSinkEnterpriseAcceptanceThresholds = _FakeThresholds
+    module.PostgresDLQSinkEnterpriseAcceptanceThresholds = _FakeThresholds
+    return module
+
+
+class _FakeAsyncContainer:
+    def __init__(self, pipeline: Any, dlq_sink: Any | None = None) -> None:
+        self._pipeline = pipeline
+        self._dlq_sink = dlq_sink
+
+    async def __aenter__(self) -> _FakeAsyncContainer:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        del exc_info
+
+    def build_pipeline(self) -> Any:
+        return self._pipeline
+
+    def has(self, key: str) -> bool:
+        return key == "_dlq_sink" and self._dlq_sink is not None
+
+    def resolve(self, key: str) -> Any:
+        if key == "_dlq_sink":
+            return self._dlq_sink
+        raise KeyError(key)
+
+
+class _FakeKafkaSource:
+    def __init__(
+        self,
+        *,
+        ready: bool,
+        stalled: bool = False,
+        assignment_count: int = 1,
+        pending_commit_count: int = 0,
+        record_error_count: int = 0,
+        poison_record_fail_closed_count: int = 0,
+    ) -> None:
+        self._health = SimpleNamespace(
+            consumer_group="orders",
+            subscription_mode="topics",
+            assignment_count=assignment_count,
+            pending_commit_count=pending_commit_count,
+            rebalance_count=0,
+            total_lag=0,
+            ready=ready,
+            stalled=stalled,
+        )
+        self._runtime = SimpleNamespace(
+            record_error_count=record_error_count,
+            record_drop_count=0,
+        )
+        self._operational = SimpleNamespace(
+            poison_record_fail_closed_count=poison_record_fail_closed_count,
+        )
+
+    async def health_snapshot(self, force_refresh: bool = False) -> Any:
+        del force_refresh
+        return self._health
+
+    def runtime_metrics(self) -> Any:
+        return self._runtime
+
+    def operational_metrics(self) -> Any:
+        return self._operational
+
+
+def test_postgres_enterprise_readiness_passes_for_ready_components() -> None:
+    config = {
+        "source": {"type": "postgres"},
+        "sinks": [{"type": "postgres"}],
+        "dlq": {"enabled": True, "sink": {"type": "postgres_dlq"}},
+    }
+    ctx = SimpleNamespace(
+        pipeline_config=config,
+    )
+    source_snapshot = SimpleNamespace(
+        recovery_contract=SimpleNamespace(
+            mode=SimpleNamespace(value="checkpoint_rerun"),
+            supports_checkpoint=True,
+            requires_pipeline_rerun=True,
+            transparent_failover=False,
+        )
+    )
+    sink_snapshot = SimpleNamespace(
+        table="events",
+        connection_ready=True,
+        write_safety_policy="strict",
+    )
+    dlq_snapshot = SimpleNamespace(
+        table="events_dlq",
+        connection_ready=True,
+        table_ready=True,
+    )
+    pipeline = SimpleNamespace(
+        _source=SimpleNamespace(metrics_snapshot=lambda: source_snapshot),
+        _writer=SimpleNamespace(_sinks=[SimpleNamespace(metrics_snapshot=lambda: sink_snapshot)]),
+    )
+    container = _FakeAsyncContainer(
+        pipeline,
+        dlq_sink=SimpleNamespace(metrics_snapshot=lambda: dlq_snapshot),
+    )
+    fake_plugin_module = _install_fake_postgres_plugin_module()
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.postgres": fake_plugin_module}),
+    ):
+        results = check_postgres_enterprise_readiness("ignored.toml")
+
+    assert [result.status for result in results] == [Status.PASS, Status.PASS, Status.PASS]
+    assert "Postgres source" in results[0].message
+    assert "table=events" in results[1].detail
+    assert "table=events_dlq" in results[2].detail
+    assert results[0].data["backend"] == "postgres"
+    assert results[0].data["component"] == "source"
+
+
+def test_postgres_enterprise_readiness_surfaces_operator_hooks_on_failure() -> None:
+    config = {
+        "source": {"type": "postgres"},
+        "sinks": [{"type": "postgres"}],
+        "dlq": {"enabled": True, "sink": {"type": "postgres_dlq"}},
+    }
+    ctx = SimpleNamespace(
+        pipeline_config=config,
+    )
+    source_snapshot = SimpleNamespace(
+        recovery_contract=SimpleNamespace(
+            mode=SimpleNamespace(value="full_rerun"),
+            supports_checkpoint=False,
+            requires_pipeline_rerun=True,
+            transparent_failover=False,
+        )
+    )
+    sink_snapshot = SimpleNamespace(
+        table="events",
+        connection_ready=False,
+        write_safety_policy="strict",
+    )
+    dlq_snapshot = SimpleNamespace(
+        table="events_dlq",
+        connection_ready=True,
+        table_ready=False,
+    )
+    pipeline = SimpleNamespace(
+        _source=SimpleNamespace(metrics_snapshot=lambda: source_snapshot),
+        _writer=SimpleNamespace(_sinks=[SimpleNamespace(metrics_snapshot=lambda: sink_snapshot)]),
+    )
+    container = _FakeAsyncContainer(
+        pipeline,
+        dlq_sink=SimpleNamespace(metrics_snapshot=lambda: dlq_snapshot),
+    )
+    fake_plugin_module = _install_fake_postgres_plugin_module()
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.postgres": fake_plugin_module}),
+    ):
+        results = check_postgres_enterprise_readiness("ignored.toml")
+
+    assert [result.status for result in results] == [Status.FAIL, Status.FAIL, Status.FAIL]
+    assert "Configure checkpoint cursor fields" in results[0].detail
+    assert "Verify DSN, credentials, TLS settings" in results[1].detail
+    assert "Ensure the target table" in results[2].detail
+
+
+def test_kafka_enterprise_readiness_passes_for_ready_components() -> None:
+    config = {
+        "source": {"type": "kafka"},
+        "sinks": [{"type": "kafka"}],
+        "dlq": {"enabled": True, "sink": {"type": "kafka_dlq"}},
+    }
+    ctx = SimpleNamespace(pipeline_config=config)
+    pipeline = SimpleNamespace(
+        _source=_FakeKafkaSource(ready=True),
+        _writer=SimpleNamespace(
+            _sinks=[
+                SimpleNamespace(
+                    _producer=object(),
+                    _topic="orders",
+                    _bootstrap="127.0.0.1:9092",
+                )
+            ]
+        ),
+    )
+    container = _FakeAsyncContainer(
+        pipeline,
+        dlq_sink=SimpleNamespace(
+            metrics_snapshot=lambda: SimpleNamespace(
+                topic="orders.dlq",
+                bootstrap_servers="127.0.0.1:9092",
+            )
+        ),
+    )
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+    ):
+        results = check_kafka_enterprise_readiness("ignored.toml")
+
+    assert [result.status for result in results] == [Status.PASS, Status.PASS, Status.PASS]
+    assert "consumer_group=orders" in results[0].detail
+    assert "topic=orders" in results[1].detail
+    assert "orders.dlq" in results[2].message
+    assert results[0].data["metrics"]["assignment_count"] == 1
+
+
+def test_kafka_enterprise_readiness_warns_without_assignment() -> None:
+    config = {
+        "source": {"type": "kafka"},
+        "sinks": [],
+    }
+    ctx = SimpleNamespace(pipeline_config=config)
+    pipeline = SimpleNamespace(
+        _source=_FakeKafkaSource(ready=False, assignment_count=0),
+        _writer=SimpleNamespace(_sinks=[]),
+    )
+    container = _FakeAsyncContainer(pipeline)
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+    ):
+        results = check_kafka_enterprise_readiness("ignored.toml")
+
+    assert len(results) == 1
+    assert results[0].status == Status.WARN
+    assert "no active partition assignment" in results[0].message.lower()
+    assert "consumer-group coordinator state" in results[0].detail
+
+
+def test_redis_enterprise_readiness_passes_for_ready_components() -> None:
+    config = {
+        "source": {"type": "redis_stream"},
+        "sinks": [{"type": "redis"}],
+        "dlq": {"enabled": True, "sink": {"type": "redis_dlq"}},
+    }
+    ctx = SimpleNamespace(pipeline_config=config)
+    redis_source = SimpleNamespace(
+        _client=object(),
+        _stream="agora:ingest",
+        _group="orders",
+        _consumer="worker-1",
+        supports_checkpoint=True,
+        runtime_metrics=lambda: SimpleNamespace(record_error_count=0, record_drop_count=0),
+    )
+    redis_sink = SimpleNamespace(
+        metrics_snapshot=lambda: SimpleNamespace(
+            target="127.0.0.1:6379/0",
+            mode="set",
+            connection_ready=True,
+        )
+    )
+    pipeline = SimpleNamespace(
+        _source=redis_source,
+        _writer=SimpleNamespace(_sinks=[redis_sink]),
+    )
+    container = _FakeAsyncContainer(
+        pipeline,
+        dlq_sink=SimpleNamespace(
+            _client=object(),
+            _key_prefix="agora:dlq",
+        ),
+    )
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+    ):
+        results = check_redis_enterprise_readiness("ignored.toml")
+
+    assert [result.status for result in results] == [Status.PASS, Status.PASS, Status.PASS]
+    assert "stream=agora:ingest" in results[0].detail
+    assert "target=127.0.0.1:6379/0" in results[1].detail
+    assert "agora:dlq" in results[2].message
+    assert results[1].data["metrics"]["connection_ready"] is True
+
+
+def test_redis_enterprise_readiness_fails_when_connection_missing() -> None:
+    config = {
+        "source": {"type": "redis_stream"},
+        "sinks": [{"type": "redis"}],
+        "dlq": {"enabled": True, "sink": {"type": "redis_dlq"}},
+    }
+    ctx = SimpleNamespace(pipeline_config=config)
+    redis_source = SimpleNamespace(
+        _client=None,
+        _stream="agora:ingest",
+        _group="orders",
+        _consumer="worker-1",
+        supports_checkpoint=True,
+        runtime_metrics=lambda: SimpleNamespace(record_error_count=0, record_drop_count=0),
+    )
+    redis_sink = SimpleNamespace(
+        metrics_snapshot=lambda: SimpleNamespace(
+            target="127.0.0.1:6379/0",
+            mode="set",
+            connection_ready=False,
+        )
+    )
+    pipeline = SimpleNamespace(
+        _source=redis_source,
+        _writer=SimpleNamespace(_sinks=[redis_sink]),
+    )
+    container = _FakeAsyncContainer(
+        pipeline,
+        dlq_sink=SimpleNamespace(
+            _client=None,
+            _key_prefix="agora:dlq",
+        ),
+    )
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=SimpleNamespace(resolved=ctx),
+        ),
+        patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+    ):
+        results = check_redis_enterprise_readiness("ignored.toml")
+
+    assert [result.status for result in results] == [Status.FAIL, Status.FAIL, Status.FAIL]
+    assert "Verify Redis URL" in results[0].detail
+    assert "reachability" in results[1].detail
+    assert "ACLs" in results[2].detail
+
+
 def test_dlq_replay_support_fails_for_unsupported_sink_type(tmp_path: Any) -> None:
     config = tmp_path / "pipelines.toml"
     config.write_text(
@@ -607,6 +1078,37 @@ def test_dlq_replay_support_fails_for_unsupported_sink_type(tmp_path: Any) -> No
     result = check_dlq_replay_support(str(config))
     assert result.status == Status.FAIL
     assert "custom_dlq" in result.message
+
+
+def test_dlq_replay_support_passes_for_kafka_dlq(tmp_path: Any) -> None:
+    config = tmp_path / "pipelines.toml"
+    config.write_text(
+        textwrap.dedent("""\
+        format = "agora/v1"
+
+        [defaults]
+        pipeline = "orders"
+
+        [pipelines.orders.source]
+        type = "iterable"
+        records = []
+
+        [[pipelines.orders.sinks]]
+        type = "stdout"
+
+        [pipelines.orders.dlq]
+        enabled = true
+
+        [pipelines.orders.dlq.sink]
+        type = "kafka_dlq"
+        bootstrap_servers = "127.0.0.1:19092"
+        topic = "orders.dlq"
+        """),
+        encoding="utf-8",
+    )
+    result = check_dlq_replay_support(str(config))
+    assert result.status == Status.PASS
+    assert "kafka_dlq" in result.message
 
 
 # ======================================================================

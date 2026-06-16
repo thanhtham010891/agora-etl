@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agora.core.fencing import assert_run_fence_active
+
 if TYPE_CHECKING:
     from agora.core.context import PipelineContext
     from agora.core.writer import Writer, WriteResult
@@ -27,6 +29,7 @@ class WriterTransport:
         record: Any,
     ) -> WriteResult:
         t0 = time.monotonic()
+        await assert_run_fence_active(ctx)
         with ctx.trace_span("writer.write", writer=type(self.writer).__name__):
             result = await self.writer.write(record)
         self._record_flush_metrics(ctx, 1, (time.monotonic() - t0) * 1000)
@@ -39,6 +42,7 @@ class WriterTransport:
     ) -> tuple[list[WriteResult], float]:
         """Write a batch and return (results, elapsed_ms)."""
         t0 = time.monotonic()
+        await assert_run_fence_active(ctx)
         with ctx.trace_span(
             "writer.write_batch",
             writer=type(self.writer).__name__,
@@ -57,6 +61,7 @@ class WriterTransport:
     ) -> None:
         batch_size = len(batch)
         t0 = time.monotonic()
+        await assert_run_fence_active(ctx)
         with ctx.trace_span(
             "writer.write_arrow_batch",
             writer=type(self.writer).__name__,
@@ -78,7 +83,9 @@ class WriterTransport:
             batch_size,
         )
 
-    async def flush(self) -> None:
+    async def flush(self, ctx: PipelineContext | None = None) -> None:
+        if ctx is not None:
+            await assert_run_fence_active(ctx)
         await self.writer.flush()
 
     async def close(self) -> None:

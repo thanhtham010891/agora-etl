@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import logstruct
 
 if TYPE_CHECKING:
+    from agora.core.fencing import RunFence
     from agora.core.metrics import PipelineRunSummary
 
 logger = logstruct.getLogger(__name__)
@@ -52,10 +53,16 @@ class ScheduledPipelineState:
     history: deque[RunRecord] = field(default_factory=lambda: deque(maxlen=100))
     running: bool = False
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    abort_event: asyncio.Event = field(default_factory=asyncio.Event)
+    run_fence: RunFence | None = None
 
     @property
     def last_run(self) -> RunRecord | None:
         return self.history[-1] if self.history else None
+
+
+class LeaseLost(Exception):  # noqa: N818
+    """Raised internally when a run is aborted because its lease was lost."""
 
 
 class ScheduledPipelineRunner:
@@ -166,6 +173,7 @@ class ScheduledPipelineRunner:
 
         state.run_number += 1
         record = RunRecord(run_number=state.run_number, started_at=time.monotonic())
+        state.abort_event.clear()
 
         logger.info(
             "scheduler_run_start",
@@ -178,21 +186,51 @@ class ScheduledPipelineRunner:
             live_metrics_callback = self._pipeline.live_metrics_callback
             if live_metrics_callback is not None and hasattr(pipeline, "set_live_metrics_callback"):
                 pipeline.set_live_metrics_callback(live_metrics_callback)
-            summary = await pipeline.run(max_records=self._pipeline.max_records)
+            if hasattr(pipeline, "set_run_fence"):
+                pipeline.set_run_fence(state.run_fence)
+            summary = await self._run_with_abort(pipeline, state)
             self._handle_run_success(record, summary)
         except asyncio.CancelledError as exc:
             record.error = exc
             raise
+        except LeaseLost as exc:
+            record.error = exc
+            logger.warning(
+                "scheduler_run_aborted_lease_lost",
+                pipeline=self._pipeline.pipeline_id,
+                run=state.run_number,
+            )
         except Exception as exc:
             await self._handle_run_failure(record, exc)
         finally:
             state.history.append(record)
             await self._notify_run_complete(record)
+            state.run_fence = None
 
         return True
 
+    async def _run_with_abort(self, pipeline: Any, state: ScheduledPipelineState) -> Any:
+        """Run *pipeline*, cancelling it if the lease-lost abort fires first."""
+        run_task = asyncio.ensure_future(pipeline.run(max_records=self._pipeline.max_records))
+        abort_task = asyncio.ensure_future(state.abort_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {run_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if run_task in done:
+                return run_task.result()
+            run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await run_task
+            raise LeaseLost(self._pipeline.pipeline_id)
+        finally:
+            abort_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await abort_task
+
 
 __all__ = [
+    "LeaseLost",
     "RunRecord",
     "ScheduledPipelineRunner",
     "ScheduledPipelineState",

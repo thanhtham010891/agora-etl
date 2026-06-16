@@ -64,11 +64,11 @@ async def test_sec1_health_endpoint_returns_200_when_no_auth_configured() -> Non
 
 
 @pytest.mark.asyncio
-async def test_sec1_ready_endpoint_returns_200_when_healthy() -> None:
-    """[SEC-1] Preservation: GET /ready with healthy worker → {"ready": true} 200.
+async def test_sec1_ready_endpoint_returns_503_when_idle() -> None:
+    """[SEC-1] Preservation: GET /ready with idle worker → {"ready": false} 503.
 
-    Baseline behavior: /ready returns 200 {"ready": true} when no pipelines are failing.
-    Must be preserved after auth fix (valid auth or auth disabled → same response).
+    Readiness means at least one pipeline has completed successfully; an idle
+    process may be live but is not yet ready for traffic.
 
     Validates: Requirements 3.3
     """
@@ -77,16 +77,15 @@ async def test_sec1_ready_endpoint_returns_200_when_healthy() -> None:
     )
     status_line = _status_line(response)
 
-    # With no pipelines registered, status is "idle" → ready=True → 200
-    assert "200" in status_line, (
-        f"[SEC-1] PRESERVATION FAILED: GET /ready with healthy worker should return 200, "
+    assert "503" in status_line, (
+        f"[SEC-1] PRESERVATION FAILED: GET /ready with idle worker should return 503, "
         f"got: {status_line!r}"
     )
 
     payload = json.loads(_body(response))
     assert "ready" in payload, f"Ready payload missing 'ready' key: {payload}"
-    assert payload["ready"] is True, (
-        f"[SEC-1] PRESERVATION FAILED: Expected ready=True for healthy worker, got: {payload}"
+    assert payload["ready"] is False, (
+        f"[SEC-1] PRESERVATION FAILED: Expected ready=False for idle worker, got: {payload}"
     )
 
 

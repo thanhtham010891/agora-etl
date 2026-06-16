@@ -592,9 +592,17 @@ class SinkRouter(Generic[T]):
             capabilities = sink_capabilities(sink)
             if capabilities.batch_writable_native and isinstance(sink, BatchWritable):
                 try:
-                    await sink.write_batch([record for _, record in entries])
-                    for index, _ in entries:
-                        written_flags[index] = True
+                    batch_sink = cast("BatchWritable[T]", sink)
+                    batch_result = await batch_sink.write_batch([record for _, record in entries])
+                    write_results = _normalize_batch_write_results(
+                        batch_result,
+                        expected=len(entries),
+                    )
+                    for (index, _), write_result in zip(entries, write_results, strict=True):
+                        if write_result.written:
+                            written_flags[index] = True
+                        if write_result.errors:
+                            errors_by_record[index].extend(write_result.errors)
                 except Exception as exc:
                     for index, _ in entries:
                         errors_by_record[index].append(exc)

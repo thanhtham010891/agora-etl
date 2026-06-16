@@ -26,7 +26,7 @@ Public API::
 """
 
 from agora.core.registry import Registry
-from agora.runner.coordinator import WorkerCoordinator, WorkerInfo
+from agora.runner.coordinator import LeaseState, WorkerCoordinator, WorkerInfo
 from agora.runner.policies import BackoffPolicy, ExponentialBackoffPolicy
 from agora.runner.scheduled import Schedule, ScheduledPipeline
 from agora.runner.worker import WorkerPool
@@ -44,6 +44,7 @@ runner_registry.register("worker_pool", WorkerPool)
 __all__ = [
     "BackoffPolicy",
     "ExponentialBackoffPolicy",
+    "LeaseState",
     "Schedule",
     "ScheduledPipeline",
     "WorkerCoordinator",

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agora.cli.commands.base import CommandError
-from agora.cli.commands.dlq import _run_dlq_command
+from agora.cli.commands.dlq import _build_dlq_source_config, _run_dlq_command
 from agora.cli.commands.run import _load_container_from_config
 from agora.sinks import sink_registry
 
@@ -127,6 +127,44 @@ path = "{dlq_path}"
     finally:
         conn.close()
     assert remaining == 0
+
+
+def test_build_dlq_source_config_maps_kafka_dlq_fields() -> None:
+    source_cfg = _build_dlq_source_config(
+        {
+            "pipeline_id": "orders-etl",
+            "dlq": {
+                "sink": {
+                    "type": "kafka_dlq",
+                    "bootstrap_servers": "127.0.0.1:19092",
+                    "topic": "orders.dlq",
+                    "security_protocol": "SASL_SSL",
+                    "sasl_mechanism": "PLAIN",
+                    "sasl_username": "svc",
+                    "sasl_password": "secret",
+                    "ssl_cafile": "/tmp/ca.pem",
+                    "ssl_check_hostname": False,
+                }
+            },
+        },
+        stage="middleware",
+        limit=25,
+    )
+
+    assert source_cfg == {
+        "type": "kafka_dlq_source",
+        "pipeline_id": "orders-etl",
+        "bootstrap_servers": "127.0.0.1:19092",
+        "topic": "orders.dlq",
+        "security_protocol": "SASL_SSL",
+        "sasl_mechanism": "PLAIN",
+        "sasl_username": "svc",
+        "sasl_password": "secret",
+        "ssl_cafile": "/tmp/ca.pem",
+        "ssl_check_hostname": False,
+        "stage": "middleware",
+        "limit": 25,
+    }
 
 
 @pytest.mark.asyncio

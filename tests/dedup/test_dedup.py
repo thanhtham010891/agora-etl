@@ -7,6 +7,8 @@ from __future__ import annotations
 import pytest
 
 from agora import IterableSource, Pipeline
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
+from agora.core.source import BaseSource
 from agora.core.types import DedupStoreFailurePolicy
 from agora.middlewares.dedup import DedupMiddleware
 from agora.middlewares.dedup.stores.base import DedupStore
@@ -141,27 +143,24 @@ async def test_dedup_fuzzy_drops_similar():
 
 
 @pytest.mark.asyncio
-async def test_dedup_exact_prefers_mark_if_new_capability():
-    class _AtomicStore(DedupStore[str]):
+async def test_dedup_exact_marks_store_only_after_successful_delivery():
+    class _TrackingStore(DedupStore[str]):
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
             self._seen: set[str] = set()
 
         async def exists(self, key: str) -> bool:
             self.calls.append(("exists", key))
-            raise AssertionError("exact dedup path should not call exists()")
+            return key in self._seen
 
         async def add(self, key: str) -> None:
             self.calls.append(("add", key))
-            raise AssertionError("exact dedup path should not call add()")
+            self._seen.add(key)
 
         async def mark_if_new(self, key: str, *, ttl_seconds: int | None = None) -> bool:
             del ttl_seconds
             self.calls.append(("mark_if_new", key))
-            if key in self._seen:
-                return False
-            self._seen.add(key)
-            return True
+            raise AssertionError("dedup middleware must not mark keys before sink success")
 
     class _CollectSink:
         sink_name = "collect"
@@ -181,7 +180,7 @@ async def test_dedup_exact_prefers_mark_if_new_capability():
         async def close(self) -> None:
             return None
 
-    store = _AtomicStore()
+    store = _TrackingStore()
     sink = _CollectSink()
     summary = await (
         Pipeline(IterableSource(["a", "b", "a"]))
@@ -193,10 +192,151 @@ async def test_dedup_exact_prefers_mark_if_new_capability():
     assert sink.records == ["a", "b"]
     assert summary.records_dropped == 1
     assert store.calls == [
-        ("mark_if_new", "a"),
-        ("mark_if_new", "b"),
-        ("mark_if_new", "a"),
+        ("exists", "a"),
+        ("add", "a"),
+        ("exists", "b"),
+        ("add", "b"),
+        ("exists", "a"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_dedup_exact_does_not_persist_key_when_sink_fails():
+    class _FailingSink:
+        sink_name = "failing"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: dict[str, str]) -> None:
+            del record
+            raise RuntimeError("sink down")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _CollectSink:
+        sink_name = "collect"
+
+        def __init__(self) -> None:
+            self.records: list[dict[str, str]] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: dict[str, str]) -> None:
+            self.records.append(record)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    record = {"id": "A"}
+    middleware = DedupMiddleware(key=lambda row: row["id"], store=InMemoryStore())
+
+    with pytest.raises(RuntimeError, match="sink down"):
+        await (
+            Pipeline(IterableSource([record]))
+            .pipe(middleware)
+            .build(_FailingSink())  # type: ignore[arg-type]
+            .run()
+        )
+
+    sink = _CollectSink()
+    summary = await (
+        Pipeline(IterableSource([record]))
+        .pipe(middleware)
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [record]
+    assert summary.records_written == 1
+    assert summary.records_dropped == 0
+
+
+@pytest.mark.asyncio
+async def test_dedup_respects_explicit_empty_store_instance():
+    store = InMemoryStore(max_size=1)
+    middleware = DedupMiddleware(key=lambda value: value, store=store)
+    sink = StdoutSink()
+
+    await Pipeline(IterableSource(["a", "b"])).pipe(middleware).build(sink).run()
+
+    assert await store.exists("a") is False
+    assert await store.exists("b") is True
+
+
+@pytest.mark.asyncio
+async def test_dedup_batch_source_marks_store_after_successful_batch_delivery():
+    class _BatchSource(BaseSource[int]):
+        source_name = "batch_dedup_source"
+
+        def __init__(self, batches: list[list[int]]) -> None:
+            self._batches = batches
+            self._checkpoint: int | None = None
+
+        def data_plane_spec(self) -> SourceDataPlaneSpec:
+            return SourceDataPlaneSpec(
+                source_name=self.source_name,
+                emitted_plane=DataPlane.PYTHON_BATCHES,
+                supports_batch_emit=True,
+                emits_arrow_batches=False,
+            )
+
+        async def stream_batches(self):  # type: ignore[override]
+            for index, batch in enumerate(self._batches):
+                self._checkpoint = index
+                yield batch
+
+        async def stream(self):
+            for batch in self._batches:
+                for record in batch:
+                    yield record
+
+        def current_checkpoint(self) -> int | None:
+            return self._checkpoint
+
+    class _CollectSink:
+        sink_name = "collect"
+
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: int) -> None:
+            self.records.append(record)
+
+        async def write_batch(self, records: list[int]) -> None:
+            self.records.extend(records)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = InMemoryStore()
+    sink = _CollectSink()
+
+    summary = await (
+        Pipeline(_BatchSource([[1, 2]]))
+        .pipe(DedupMiddleware(key=str, store=store))
+        .build(sink)  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert sink.records == [1, 2]
+    assert summary.records_written == 2
+    assert await store.exists("1") is True
+    assert await store.exists("2") is True
 
 
 @pytest.mark.asyncio

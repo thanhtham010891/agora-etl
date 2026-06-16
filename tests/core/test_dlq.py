@@ -117,6 +117,41 @@ async def test_pipeline_routes_middleware_errors_to_dlq() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dlq_redactor_scrubs_payload_before_sink_write() -> None:
+    sink = _CollectSink()
+    dlq = _CollectDLQSink()
+
+    def _redact(value):
+        if isinstance(value, dict):
+            return {
+                key: "[REDACTED]" if key in {"api_key", "token"} else _redact(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, str):
+            return value.replace("secret-token", "[REDACTED]")
+        return value
+
+    pipeline = (
+        Pipeline(IterableSource([{"id": 1, "api_key": "secret-token"}]))
+        .pipe(_BoomMiddleware())
+        .build(
+            sink,
+            config=DeliveryConfig(
+                dlq=dlq,
+                dlq_redactor=_redact,
+            ),
+        )  # type: ignore[arg-type]
+    )
+
+    await pipeline.run()
+
+    record = dlq.records[0]
+    assert record.record == {"id": 1, "api_key": "[REDACTED]"}
+    assert record.original_record == {"id": 1, "api_key": "[REDACTED]"}
+    assert "secret-token" not in str(record)
+
+
+@pytest.mark.asyncio
 async def test_pipeline_routes_sink_write_errors_to_dlq_without_dropping_run() -> None:
     dlq = _CollectDLQSink()
 
@@ -325,6 +360,7 @@ async def test_direct_flush_log_and_continue_transport_error_without_dlq_does_no
             warning=lambda *args, **kwargs: None,
         ),
         trace_span=lambda *args, **kwargs: nullcontext(),
+        pop_success_hooks=lambda *records: [],
     )
 
     engine = DeliveryEngine(
@@ -333,6 +369,7 @@ async def test_direct_flush_log_and_continue_transport_error_without_dlq_does_no
         current_checkpoint=lambda: {"id": 2},
         dlq_sink=None,
         dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
+        dlq_redactor=None,
         sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
         checkpoint_store=None,
         checkpoint_failure_policy=CheckpointFailurePolicy.FAIL_CLOSED,
@@ -419,6 +456,7 @@ async def test_direct_flush_partial_failure_routes_failed_records_to_dlq() -> No
             warning=lambda *args, **kwargs: None,
         ),
         trace_span=lambda *args, **kwargs: nullcontext(),
+        pop_success_hooks=lambda *records: [],
     )
 
     engine = DeliveryEngine(
@@ -427,6 +465,7 @@ async def test_direct_flush_partial_failure_routes_failed_records_to_dlq() -> No
         current_checkpoint=lambda: {"id": 3},
         dlq_sink=dlq,  # type: ignore[arg-type]
         dlq_failure_policy=DLQFailurePolicy.LOG_ONLY,
+        dlq_redactor=None,
         sink_failure_policy=SinkFailurePolicy.LOG_AND_CONTINUE,
         checkpoint_store=None,
         checkpoint_failure_policy=CheckpointFailurePolicy.FAIL_CLOSED,

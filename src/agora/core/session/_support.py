@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agora.core.checkpoint import is_checkpoint_capable
 from agora.core.context import PipelineContext
+from agora.core.fencing import bind_run_fence
 from agora.core.metrics import PipelineMetrics
 from agora.core.runtime import DeliveryEngine
 from agora.core.session._state import PipelineRunState
@@ -35,6 +36,7 @@ def create_run_state(
         run_id=run_id or str(uuid.uuid4()),
         tracer=spec.config.tracer or NoopTracer(),
     )
+    bind_run_fence(ctx, spec.run_fence)
     ctx.log.info("pipeline_start", source_limit=source_limit)
     return PipelineRunState(ctx=ctx)
 
@@ -52,6 +54,7 @@ def make_delivery_engine(
         current_checkpoint=spec.source.current_checkpoint,
         dlq_sink=config.dlq,
         dlq_failure_policy=config.dlq_failure_policy,
+        dlq_redactor=config.dlq_redactor,
         sink_failure_policy=config.sink_failure_policy,
         checkpoint_store=config.checkpoint,
         checkpoint_failure_policy=config.checkpoint_failure_policy,
@@ -196,7 +199,7 @@ async def shutdown_runtime_components(
         await _capture("pipeline_dlq_close_error", spec.config.dlq.close)
 
     if state.writer_opened and transport is not None:
-        await _capture("pipeline_writer_flush_error", transport.flush)
+        await _capture("pipeline_writer_flush_error", lambda: transport.flush(state.ctx))
         await _capture("pipeline_writer_close_error", transport.close)
 
     if spec.config.checkpoint is not None:

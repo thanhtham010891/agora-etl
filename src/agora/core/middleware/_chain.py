@@ -439,6 +439,7 @@ class MiddlewareChain(Generic[T, U]):
             t0 = time.monotonic()
             m_metrics = middleware_metrics(middleware_name)
             m_metrics.records_in += 1
+            previous = current
 
             try:
                 span = start_trace_span(
@@ -478,6 +479,7 @@ class MiddlewareChain(Generic[T, U]):
                 m_metrics.records_dropped += 1
                 return None, None
 
+            ctx.transfer_success_hooks(previous, current)
             m_metrics.records_out += 1
 
         return current, None
@@ -503,6 +505,7 @@ class MiddlewareChain(Generic[T, U]):
             t0 = time.monotonic()
             m_metrics = middleware_metrics(middleware_name)
             m_metrics.records_in += 1
+            previous = current
 
             try:
                 row_fast_process = row_fast_processes[idx]
@@ -530,6 +533,7 @@ class MiddlewareChain(Generic[T, U]):
                 m_metrics.records_dropped += 1
                 return None, None
 
+            ctx.transfer_success_hooks(previous, current)
             m_metrics.records_out += 1
 
         return current, None

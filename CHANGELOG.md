@@ -5,6 +5,8 @@ Full change log index:
 
 ## Releases
 
+- [0.4.1](docs/change-log/0.4.1.md) — shared supportability contracts, recovery diagnostics, distributed run fencing, and AI budget governance
+- [0.4.0](docs/change-log/0.4.0.md) — optional Rust acceleration boundary, performance profiles, and benchmark-backed runtime visibility
 - [0.3.3](docs/change-log/0.3.3.md) — AI provider contract cleanup, Anthropic official bundle promotion, and config-driven OTel workers
 - [0.3.1](docs/change-log/0.3.1.md) — runtime contract hardening, recovery CLI UX, and stronger doctor/preflight diagnostics
 - [0.3.0](docs/change-log/0.3.0.md) — process isolation, data-plane semantics, public explain/introspection, and source-bound limits

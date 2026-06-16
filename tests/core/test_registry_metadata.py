@@ -6,7 +6,12 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agora.cli.commands.plugins import _registry_rows
-from agora.core.registry import AGORA_PLUGIN_MANIFEST_VERSION, Registry
+from agora.core.registry import (
+    AGORA_CORE_API_COMPATIBILITY,
+    AGORA_CORE_API_VERSION,
+    AGORA_PLUGIN_MANIFEST_VERSION,
+    Registry,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -19,6 +24,7 @@ class _Manifest:
     agora_api_version: str
     package: str
     capabilities: tuple[str, ...]
+    agora_core_api_range: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,7 @@ def _install_fake_plugin(
     package_name: str,
     plugin_module_name: str,
     manifest_api_version: str,
+    core_api_range: str | None = None,
 ):
     package = ModuleType(package_name)
     package.MANIFEST = _Manifest(
@@ -53,6 +60,7 @@ def _install_fake_plugin(
         agora_api_version=manifest_api_version,
         package=f"{package_name}-dist",
         capabilities=("sink:test",),
+        agora_core_api_range=core_api_range,
     )
     plugin_module = ModuleType(plugin_module_name)
 
@@ -101,6 +109,112 @@ def test_registry_load_entrypoints_records_manifest_metadata(
 
 def test_registry_manifest_version_is_current() -> None:
     assert AGORA_PLUGIN_MANIFEST_VERSION == "0.4"
+
+
+def test_registry_core_api_version_is_current() -> None:
+    assert AGORA_CORE_API_VERSION == "0.4.1"
+    assert AGORA_CORE_API_COMPATIBILITY == ">=0.4,<0.5"
+
+
+def test_registry_load_entrypoints_records_core_api_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="fake_plugin_core_ok",
+        plugin_module_name="fake_plugin_core_ok.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+        core_api_range=AGORA_CORE_API_COMPATIBILITY,
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "fake_sink",
+                plugin_cls,
+                dist_name="fake-plugin-core-ok",
+                dist_version="1.2.3",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks", eager=True)
+
+    item = registry.describe_items()[0]
+    assert item.compatible is True
+    assert item.agora_core_api_version == AGORA_CORE_API_VERSION
+    assert item.agora_core_api_range == AGORA_CORE_API_COMPATIBILITY
+    assert item.core_api_compatible is True
+
+
+def test_registry_skips_incompatible_core_api_range_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="fake_plugin_core_bad",
+        plugin_module_name="fake_plugin_core_bad.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+        core_api_range=">=0.5,<0.6",
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "bad_core_sink",
+                plugin_cls,
+                dist_name="fake-plugin-core-bad",
+                dist_version="1.2.3",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks", eager=True)
+
+    assert registry.has("bad_core_sink") is False
+    item = registry.describe_items()[0]
+    assert item.origin == "entrypoint_incompatible"
+    assert item.compatible is False
+    assert item.agora_core_api_range == ">=0.5,<0.6"
+    assert item.core_api_compatible is False
+
+
+def test_registry_skips_malformed_core_api_range_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_cls = _install_fake_plugin(
+        monkeypatch,
+        package_name="fake_plugin_core_malformed",
+        plugin_module_name="fake_plugin_core_malformed.sinks",
+        manifest_api_version=AGORA_PLUGIN_MANIFEST_VERSION,
+        core_api_range=">=banana",
+    )
+
+    monkeypatch.setattr(
+        "importlib.metadata.entry_points",
+        lambda *, group: [
+            _FakeEntryPoint(
+                "malformed_core_sink",
+                plugin_cls,
+                dist_name="fake-plugin-core-malformed",
+                dist_version="1.2.3",
+            )
+        ],
+    )
+
+    registry: Registry[type] = Registry(name="sink")
+    registry.load_entrypoints("agora.sinks", eager=True)
+
+    assert registry.has("malformed_core_sink") is False
+    item = registry.describe_items()[0]
+    assert item.origin == "entrypoint_incompatible"
+    assert item.compatible is False
+    assert item.agora_core_api_range == ">=banana"
+    assert item.core_api_compatible is False
 
 
 def test_registry_skips_incompatible_manifest_entrypoints(

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from agora.core.runtime._delivery_types import CommitOutcome, ErroredUnrouted, RecordDeliveryError
+from agora.core.fencing import FenceLostError
+from agora.core.runtime._delivery_types import (
+    CommitOutcome,
+    Dropped,
+    RecordDeliveryError,
+)
 from agora.core.types import SinkFailurePolicy
 
 if TYPE_CHECKING:
@@ -28,8 +33,9 @@ async def write_batch_middleware_failure(
     """Handle a batch that failed entirely at the middleware stage."""
     state.ctx.metrics.records_errored += len(raw_batch)
     if dlq_sink_present:
+        routed = True
         for raw_record in raw_batch:
-            await write_to_dlq(
+            ok = await write_to_dlq(
                 ctx=state.ctx,
                 stage="batch_middleware",
                 exc=batch_failure.exception,
@@ -38,7 +44,10 @@ async def write_batch_middleware_failure(
                 middleware=batch_failure.middleware,
                 checkpoint=checkpoint_value,
             )
-        await save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
+            routed = routed and ok
+        if routed or sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
+            await save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
+            return
         return
 
     if sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
@@ -64,10 +73,14 @@ async def write_batch_passthrough(
     write_to_dlq: Callable[..., Awaitable[bool]],
     save_batch_checkpoint: Callable[..., Awaitable[None]],
     resolve_write_result: Callable[..., Awaitable[CommitOutcome]],
+    commit_outcomes: Callable[..., Awaitable[None]],
+    success_hook_for: Callable[..., Callable[[], Awaitable[None]] | None],
 ) -> None:
     """Write a batch where results is raw_batch (no middleware transformation)."""
     try:
         write_results, _ = await write_batch(state.ctx, raw_batch)
+    except FenceLostError:
+        raise
     except Exception as exc:
         state.ctx.log.exception("batch_write_error", batch_size=len(raw_batch))
         routed = True
@@ -85,18 +98,18 @@ async def write_batch_passthrough(
         state.ctx.metrics.records_errored += len(raw_batch)
         if routed or sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
             await save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
+            if routed:
+                for record in raw_batch:
+                    hook = success_hook_for(state.ctx, record, record, None)
+                    if hook is not None:
+                        await hook()
         elif sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
             raise RecordDeliveryError(exc) from exc
         return
 
     _validate_write_results_length(len(raw_batch), len(write_results), batch_input_kind="batch")
 
-    if all(write_result.ok for write_result in write_results):
-        state.ctx.metrics.records_written += len(raw_batch)
-        await save_batch_checkpoint(state, checkpoint_value, len(raw_batch))
-        return
-
-    errored_unrouted: Exception | None = None
+    outcomes: list[CommitOutcome] = []
     for record, write_result in zip(raw_batch, write_results, strict=True):
         outcome = await resolve_write_result(
             state.ctx,
@@ -104,18 +117,13 @@ async def write_batch_passthrough(
             record,
             record,
             checkpoint_value,
-            None,
+            success_hook_for(state.ctx, record, record, None),
         )
-        if isinstance(outcome, ErroredUnrouted) and errored_unrouted is None:
-            errored_unrouted = outcome.exc
+        outcomes.append(outcome)
 
-    await _finalize_batch_outcomes(
-        state=state,
-        checkpoint_value=checkpoint_value,
-        batch_size=len(raw_batch),
-        errored_unrouted=errored_unrouted,
-        sink_failure_policy=sink_failure_policy,
-        save_batch_checkpoint=save_batch_checkpoint,
+    await commit_outcomes(
+        state,
+        outcomes,
     )
 
 
@@ -130,6 +138,8 @@ async def write_batch_filtered(
     write_to_dlq: Callable[..., Awaitable[bool]],
     save_batch_checkpoint: Callable[..., Awaitable[None]],
     resolve_write_result: Callable[..., Awaitable[CommitOutcome]],
+    commit_outcomes: Callable[..., Awaitable[None]],
+    success_hook_for: Callable[..., Callable[[], Awaitable[None]] | None],
 ) -> None:
     """Write a batch where middleware may have dropped some records."""
     has_drops = False
@@ -141,7 +151,7 @@ async def write_batch_filtered(
     active_items: list[tuple[Any, Any]] | None
     if not has_drops:
         active_items = None
-        to_write = results
+        to_write = cast("list[Any]", results)
         dropped = 0
     else:
         active_items = [
@@ -152,17 +162,29 @@ async def write_batch_filtered(
         to_write = [processed for _raw, processed in active_items]
         dropped = len(results) - len(to_write)
     state.ctx.metrics.records_dropped += dropped
+    dropped_hooks = [
+        success_hook_for(state.ctx, raw_record, None, None)
+        for raw_record, processed_record in zip(raw_batch, results, strict=True)
+        if processed_record is None
+    ]
 
     if not to_write:
         await save_batch_checkpoint(state, checkpoint_value, len(results))
+        for hook in dropped_hooks:
+            if hook is not None:
+                await hook()
         return
 
     try:
         write_results, _ = await write_batch(state.ctx, to_write)
+    except FenceLostError:
+        raise
     except Exception as exc:
         state.ctx.log.exception("batch_write_error", batch_size=len(to_write))
         routed = True
-        pairs = zip(raw_batch, to_write, strict=True) if active_items is None else active_items
+        pairs = (
+            list(zip(raw_batch, to_write, strict=True)) if active_items is None else active_items
+        )
         for raw_record, processed_record in pairs:
             ok = await write_to_dlq(
                 ctx=state.ctx,
@@ -177,19 +199,24 @@ async def write_batch_filtered(
         state.ctx.metrics.records_errored += len(to_write)
         if routed or sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
             await save_batch_checkpoint(state, checkpoint_value, len(results))
+            for hook in dropped_hooks:
+                if hook is not None:
+                    await hook()
+            if routed:
+                for raw_record, processed_record in pairs:
+                    hook = success_hook_for(state.ctx, raw_record, processed_record, None)
+                    if hook is not None:
+                        await hook()
         elif sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
             raise RecordDeliveryError(exc) from exc
         return
 
     _validate_write_results_length(len(to_write), len(write_results), batch_input_kind="batch")
 
-    if all(write_result.ok for write_result in write_results):
-        state.ctx.metrics.records_written += len(to_write)
-        await save_batch_checkpoint(state, checkpoint_value, len(results))
-        return
-
     outcomes: list[CommitOutcome] = []
-    pairs = zip(raw_batch, to_write, strict=True) if active_items is None else active_items
+    for hook in dropped_hooks:
+        outcomes.append(Dropped(checkpoint=checkpoint_value, on_success=hook))
+    pairs = list(zip(raw_batch, to_write, strict=True)) if active_items is None else active_items
     for (raw_record, processed_record), write_result in zip(pairs, write_results, strict=True):
         outcome = await resolve_write_result(
             state.ctx,
@@ -197,22 +224,13 @@ async def write_batch_filtered(
             raw_record,
             processed_record,
             checkpoint_value,
-            None,
+            success_hook_for(state.ctx, raw_record, processed_record, None),
         )
         outcomes.append(outcome)
 
-    errored_unrouted: Exception | None = None
-    for outcome in outcomes:
-        if isinstance(outcome, ErroredUnrouted) and errored_unrouted is None:
-            errored_unrouted = outcome.exc
-
-    await _finalize_batch_outcomes(
-        state=state,
-        checkpoint_value=checkpoint_value,
-        batch_size=len(results),
-        errored_unrouted=errored_unrouted,
-        sink_failure_policy=sink_failure_policy,
-        save_batch_checkpoint=save_batch_checkpoint,
+    await commit_outcomes(
+        state,
+        outcomes,
     )
 
 
@@ -227,20 +245,3 @@ def _validate_write_results_length(
             f"Writer.write_batch() must return one WriteResult per {batch_input_kind} input record. "
             f"Expected {expected}, got {actual}."
         )
-
-
-async def _finalize_batch_outcomes(
-    *,
-    state: RunState,
-    checkpoint_value: Any,
-    batch_size: int,
-    errored_unrouted: Exception | None,
-    sink_failure_policy: SinkFailurePolicy,
-    save_batch_checkpoint: Callable[..., Awaitable[None]],
-) -> None:
-    routed_all = errored_unrouted is None
-    if routed_all or sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE:
-        await save_batch_checkpoint(state, checkpoint_value, batch_size)
-    if not routed_all and sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-        assert errored_unrouted is not None
-        raise RecordDeliveryError(errored_unrouted) from errored_unrouted

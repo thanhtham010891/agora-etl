@@ -66,6 +66,79 @@ Bumped from ``"0.3"`` to ``"0.4"`` in ``0.2.0`` — the batch-native protocols
 change for plugin authors who implement source or middleware extensions.
 """
 
+AGORA_CORE_API_VERSION = "0.4.1"
+"""Runtime API version used for plugin compatibility-range checks."""
+
+AGORA_CORE_API_COMPATIBILITY = ">=0.4,<0.5"
+"""Core API range first-party plugins are expected to declare for this release."""
+
+
+def _version_tuple(value: str) -> tuple[int, ...] | None:
+    parts: list[int] = []
+    for part in value.split("."):
+        numeric = ""
+        for char in part:
+            if not char.isdigit():
+                break
+            numeric += char
+        if numeric == "":
+            return None
+        parts.append(int(numeric))
+    return tuple(parts) if parts else None
+
+
+def _pad_version(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    length = max(len(left), len(right))
+    return left + (0,) * (length - len(left)), right + (0,) * (length - len(right))
+
+
+def _compare_versions(left: str, right: str) -> int | None:
+    left_version = _version_tuple(left)
+    right_version = _version_tuple(right)
+    if left_version is None or right_version is None:
+        return None
+    left_tuple, right_tuple = _pad_version(left_version, right_version)
+    if left_tuple < right_tuple:
+        return -1
+    if left_tuple > right_tuple:
+        return 1
+    return 0
+
+
+def _core_api_range_contains(specifier: str, version: str = AGORA_CORE_API_VERSION) -> bool:
+    """Return whether *version* satisfies a simple comma-separated version range.
+
+    Supports the operators used by Agora plugin manifests: ``>=``, ``>``,
+    ``<=``, ``<``, ``==`` and bare exact versions.
+    """
+    clauses = [clause.strip() for clause in specifier.split(",") if clause.strip()]
+    if not clauses:
+        return True
+    for clause in clauses:
+        op = "=="
+        target = clause
+        for candidate in (">=", "<=", "==", ">", "<"):
+            if clause.startswith(candidate):
+                op = candidate
+                target = clause[len(candidate) :].strip()
+                break
+        comparison = _compare_versions(version, target)
+        if comparison is None:
+            return False
+        if op == ">=" and comparison < 0:
+            return False
+        if op == ">" and comparison <= 0:
+            return False
+        if op == "<=" and comparison > 0:
+            return False
+        if op == "<" and comparison >= 0:
+            return False
+        if op == "==" and comparison != 0:
+            return False
+    return True
+
 
 @dataclass(frozen=True, slots=True)
 class RegistryItemInfo:
@@ -75,6 +148,9 @@ class RegistryItemInfo:
     package: str | None = None
     version: str | None = None
     agora_api_version: str | None = None
+    agora_core_api_version: str | None = None
+    agora_core_api_range: str | None = None
+    core_api_compatible: bool | None = None
     compatible: bool | None = None
     entrypoint_group: str | None = None
     capabilities: tuple[str, ...] = ()
@@ -116,15 +192,23 @@ def _coerce_manifest(
         }
 
     agora_api_version = getattr(manifest, "agora_api_version", None)
-    compatible = (
+    manifest_compatible = (
         bool(agora_api_version == AGORA_PLUGIN_MANIFEST_VERSION)
         if agora_api_version is not None
         else None
     )
+    core_api_range = getattr(manifest, "agora_core_api_range", None)
+    core_api_compatible = (
+        _core_api_range_contains(core_api_range) if isinstance(core_api_range, str) else None
+    )
+    compatible = manifest_compatible if core_api_compatible is not False else False
     return {
         "package": getattr(manifest, "package", None) or distribution_name or package_name,
         "version": getattr(manifest, "version", None) or distribution_version,
         "agora_api_version": agora_api_version,
+        "agora_core_api_version": AGORA_CORE_API_VERSION,
+        "agora_core_api_range": core_api_range,
+        "core_api_compatible": core_api_compatible,
         "compatible": compatible,
         "capabilities": tuple(getattr(manifest, "capabilities", ()) or ()),
         "distribution_name": distribution_name,
@@ -386,6 +470,9 @@ class Registry(Generic[P]):
                     package=metadata.get("package"),
                     version=metadata.get("version"),
                     agora_api_version=metadata.get("agora_api_version"),
+                    agora_core_api_version=metadata.get("agora_core_api_version"),
+                    agora_core_api_range=metadata.get("agora_core_api_range"),
+                    core_api_compatible=metadata.get("core_api_compatible"),
                     compatible=metadata.get("compatible"),
                     entrypoint_group=metadata.get("entrypoint_group"),
                     capabilities=tuple(metadata.get("capabilities", ()) or ()),

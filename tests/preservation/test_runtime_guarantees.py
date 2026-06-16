@@ -2008,6 +2008,107 @@ async def test_gb04_batch_failure_routes_entire_batch_to_dlq() -> None:
     assert summary.records_errored == 3
 
 
+@pytest.mark.asyncio
+async def test_gb04_batch_middleware_dlq_failure_does_not_advance_checkpoint() -> None:
+    """[GUARANTEE-B04] If batch middleware failure cannot be routed to DLQ
+    under FAIL_CLOSED, the checkpoint must not advance.
+    """
+    from agora import BatchMiddleware
+    from agora.core.context import PipelineContext  # noqa: TC001
+
+    class _AlwaysRaises(BatchMiddleware[int, int]):
+        name = "always_raises"
+
+        async def process_batch(self, records: list[int], ctx: PipelineContext) -> list[int | None]:
+            raise ValueError("batch boom")
+
+    class _BrokenDLQ:
+        sink_name = "broken_dlq"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: Any) -> None:
+            del record
+            raise RuntimeError("dlq unavailable")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = InMemoryCheckpointStore()
+
+    summary = await (
+        Pipeline(_BatchSource([[1, 2, 3]]), id="batch_dlq_failure_contract")
+        .pipe(_AlwaysRaises())
+        .build(
+            _CollectSink(),
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_every=1,
+                dlq=_BrokenDLQ(),  # type: ignore[arg-type]
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_errored == 3
+    assert summary.runtime.dlq_failure_count == 3
+    assert await store.load("batch_dlq_failure_contract") is None
+
+
+@pytest.mark.asyncio
+async def test_gb04_row_middleware_dlq_failure_does_not_advance_checkpoint() -> None:
+    """[GUARANTEE-B04] Row middleware failures are not checkpointed when the
+    configured DLQ sink fails under FAIL_CLOSED.
+    """
+
+    class _AlwaysRaises(Middleware[int, int]):
+        name = "always_raises"
+
+        async def process(self, record: int, ctx: Any) -> int | None:
+            del record, ctx
+            raise ValueError("middleware boom")
+
+    class _BrokenDLQ:
+        sink_name = "broken_dlq"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: Any) -> None:
+            del record
+            raise RuntimeError("dlq unavailable")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = InMemoryCheckpointStore()
+
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([1]), id="row_dlq_failure_contract")
+        .pipe(_AlwaysRaises())
+        .build(
+            _CollectSink(),
+            config=DeliveryConfig(
+                checkpoint=store,
+                checkpoint_every=1,
+                dlq=_BrokenDLQ(),  # type: ignore[arg-type]
+            ),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert summary.records_errored == 1
+    assert summary.runtime.dlq_failure_count == 1
+    assert await store.load("row_dlq_failure_contract") is None
+
+
 # ======================================================================
 # [GUARANTEE-D03] Batch writes preserve per-record outcome handling
 # ======================================================================

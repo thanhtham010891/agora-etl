@@ -272,6 +272,28 @@ async def test_cached_complete_tracks_cache_hit():
     assert ai_m.llm_calls == 1  # only 1 real LLM call
 
 
+@pytest.mark.asyncio
+async def test_cached_complete_cache_key_includes_provider_model():
+    from agora.ai.cache import InMemoryLLMCache
+    from agora.middlewares.ai.enrich import AIEnrichMiddleware
+
+    cache = InMemoryLLMCache()
+    provider_a = _make_provider('{"result": "a"}')
+    provider_a.model = "model-a"
+    provider_b = _make_provider('{"result": "b"}')
+    provider_b.model = "model-b"
+    mw_a = AIEnrichMiddleware(provider=provider_a, prompt_template="test", cache=cache)
+    mw_b = AIEnrichMiddleware(provider=provider_b, prompt_template="test", cache=cache)
+
+    first = await mw_a._cached_complete("hello")
+    second = await mw_b._cached_complete("hello")
+
+    assert first.content == '{"result": "a"}'
+    assert second.content == '{"result": "b"}'
+    assert provider_a.complete.await_count == 1
+    assert provider_b.complete.await_count == 1
+
+
 # ======================================================================
 # AIValidateMiddleware quality metrics
 # ======================================================================

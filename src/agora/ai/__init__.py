@@ -36,6 +36,15 @@ from agora.ai.cache import (
     ai_cache_registry,
     build_llm_cache,
 )
+from agora.ai.governance import (
+    AIBudgetExceeded,
+    AIBudgetExceededError,
+    AIBudgetPolicy,
+    AIBudgetUsage,
+    AICostCatalog,
+    AICostRate,
+    estimate_prompt_tokens,
+)
 from agora.ai.providers.base import (
     AIProvider,
     CompletionProvider,
@@ -63,6 +72,12 @@ def _register_lazy_providers() -> None:
 _register_lazy_providers()
 
 __all__ = [
+    "AIBudgetExceeded",
+    "AIBudgetExceededError",
+    "AIBudgetPolicy",
+    "AIBudgetUsage",
+    "AICostCatalog",
+    "AICostRate",
     "AIProvider",
     "CompletionProvider",
     "CompletionResponse",
@@ -75,6 +90,7 @@ __all__ = [
     "ai_cache_registry",
     "ai_provider_registry",
     "build_llm_cache",
+    "estimate_prompt_tokens",
     "require_completion_provider",
     "require_embedding_provider",
 ]

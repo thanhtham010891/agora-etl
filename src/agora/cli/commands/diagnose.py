@@ -27,7 +27,11 @@ from typing import TYPE_CHECKING, Any
 
 from agora.cli.commands.base import BaseCommand, CommandError
 from agora.cli.console import console
-from agora.cli.recovery import recovery_insight_for_source, recovery_insight_to_dict
+from agora.cli.recovery import (
+    failure_runbook_hooks,
+    recovery_insight_for_source,
+    recovery_insight_to_dict,
+)
 
 if TYPE_CHECKING:
     import argparse
@@ -156,6 +160,20 @@ def _render_diagnosis(
     checkpoint_value = checkpoint.value if checkpoint is not None else None
     insight = recovery_insight_for_source(source_name, checkpoint_value=checkpoint_value)
     replayable = [r for r in dlq_records if r.max_attempts is None or r.attempt < r.max_attempts]
+    runbook_hooks = list(insight.runbook_hooks if insight is not None else ())
+    if latest_dlq_record is not None:
+        runbook_hooks.extend(
+            failure_runbook_hooks(
+                latest_dlq_record.details,
+                record=latest_dlq_record.record,
+                source_name=source_name,
+            )
+        )
+    ordered_runbook_hooks = list(dict.fromkeys(runbook_hooks))
+    recovery_runbook_hooks = list(insight.runbook_hooks if insight is not None else ())
+    failure_only_runbook_hooks = [
+        hook for hook in ordered_runbook_hooks if hook not in recovery_runbook_hooks
+    ]
     has_issues = (
         bool(dlq_records)
         or checkpoint is None
@@ -185,6 +203,7 @@ def _render_diagnosis(
                             if replayable
                             else None
                         ),
+                        "runbook_hooks": ordered_runbook_hooks,
                     },
                 },
                 ensure_ascii=False,
@@ -228,6 +247,10 @@ def _render_diagnosis(
         if insight.warning is not None:
             console.blank()
             console.warn(insight.warning.message)
+        if insight.runbook_hooks:
+            console.blank()
+            for hook in insight.runbook_hooks:
+                console.item("Operator hook", hook)
 
     # ---- DLQ section ----
     console.blank()
@@ -261,6 +284,11 @@ def _render_diagnosis(
         console.blank()
         if replayable:
             console.info(f"To replay: agora dlq replay {pipeline_id} --config <config.toml>")
+
+    if failure_only_runbook_hooks:
+        console.blank()
+        for hook in failure_only_runbook_hooks:
+            console.item("Operator hook", hook)
 
     # ---- Summary status ----
     console.blank()

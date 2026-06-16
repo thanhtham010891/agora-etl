@@ -40,6 +40,7 @@ class DLQRecord:
     record: Any
     source: str | None = None
     checkpoint: Any | None = None
+    details: Any | None = None
     middleware: str | None = None
     sink: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -124,6 +125,7 @@ CREATE TABLE IF NOT EXISTS dlq_records (
     processed_record TEXT,
     source        TEXT,
     checkpoint    TEXT,
+    details       TEXT,
     middleware    TEXT,
     sink          TEXT,
     created_at    TEXT NOT NULL,
@@ -149,6 +151,7 @@ def _record_to_row(r: DLQRecord) -> dict[str, Any]:
         ),
         "source": r.source,
         "checkpoint": json.dumps(r.checkpoint, default=str) if r.checkpoint is not None else None,
+        "details": json.dumps(r.details, default=str) if r.details is not None else None,
         "middleware": r.middleware,
         "sink": r.sink,
         "created_at": r.created_at.isoformat(),
@@ -177,6 +180,7 @@ def _row_to_record(row: sqlite3.Row) -> DLQRecord:
         record=_json_or_raw("record"),
         source=row["source"],
         checkpoint=_json_or_raw("checkpoint"),
+        details=_json_or_raw("details"),
         middleware=row["middleware"],
         sink=row["sink"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -194,6 +198,8 @@ def _ensure_sqlite_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dlq_records ADD COLUMN original_record TEXT")
     if "processed_record" not in existing:
         conn.execute("ALTER TABLE dlq_records ADD COLUMN processed_record TEXT")
+    if "details" not in existing:
+        conn.execute("ALTER TABLE dlq_records ADD COLUMN details TEXT")
     conn.commit()
 
 

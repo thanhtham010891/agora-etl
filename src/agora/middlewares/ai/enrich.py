@@ -51,6 +51,7 @@ from agora.utils.records import merge_into_record
 
 if TYPE_CHECKING:
     from agora.ai.cache import LLMCache
+    from agora.ai.governance import AIBudgetPolicy, AICostCatalog
     from agora.ai.providers.base import CompletionProvider
     from agora.core.context import PipelineContext
 
@@ -105,8 +106,17 @@ class AIEnrichMiddleware(AIMiddleware[T], Generic[T]):
         cache: LLMCache | None = None,
         cache_ttl: int = 86_400,
         on_error: OnError = OnError.PASSTHROUGH,
+        budget_policy: AIBudgetPolicy | None = None,
+        cost_catalog: AICostCatalog | None = None,
     ) -> None:
-        super().__init__(provider, cache=cache, cache_ttl=cache_ttl, on_error=on_error)
+        super().__init__(
+            provider,
+            cache=cache,
+            cache_ttl=cache_ttl,
+            on_error=on_error,
+            budget_policy=budget_policy,
+            cost_catalog=cost_catalog,
+        )
         self._prompt_template = prompt_template
         self._output_fields = output_fields
         self._system = system

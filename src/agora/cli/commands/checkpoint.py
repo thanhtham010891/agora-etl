@@ -236,6 +236,10 @@ async def _cmd_inspect(store: Any, pipeline_id: str, *, as_json: bool) -> int:
         if insight.warning is not None:
             console.blank()
             console.warn(insight.warning.message)
+        if insight.runbook_hooks:
+            console.blank()
+            for hook in insight.runbook_hooks:
+                console.item("operator hook", hook)
 
     console.blank()
     console.info(

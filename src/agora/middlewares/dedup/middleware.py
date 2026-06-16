@@ -30,6 +30,7 @@ For distributed dedup across pods::
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import logstruct
@@ -98,15 +99,19 @@ class DedupMiddleware(Middleware[T, T], Generic[T]):
     ) -> None:
         self.name = name
         self._key = key
-        self._store: DedupStore[str] = store or InMemoryStore()
+        self._store: DedupStore[str] = store if store is not None else InMemoryStore()
         self._strategy = strategy
         self._max_fuzzy_keys = max_fuzzy_keys
         self._store_failure_policy = store_failure_policy
         # For fuzzy dedup: we also need an in-memory list of seen keys
         self._seen_keys: list[str] | None = [] if strategy is not None else None
+        self._pending_keys: set[str] = set()
+        self._pending_fuzzy_keys: list[str] = []
         self._fuzzy_overflow_warned: bool = False
 
     async def on_stop(self, ctx: PipelineContext) -> None:
+        self._pending_keys.clear()
+        self._pending_fuzzy_keys.clear()
         await self._store.close()
 
     def _handle_store_failure(
@@ -126,6 +131,26 @@ class DedupMiddleware(Middleware[T, T], Generic[T]):
             return record
         raise exc
 
+    def _register_commit_marker(self, record: T, ctx: PipelineContext, key: str) -> None:
+        self._pending_keys.add(key)
+
+        async def _commit() -> None:
+            try:
+                await self._store.add(key)
+                if self._seen_keys is not None and key not in self._seen_keys:
+                    self._seen_keys.append(key)
+            finally:
+                self._pending_keys.discard(key)
+                with suppress(ValueError):
+                    self._pending_fuzzy_keys.remove(key)
+
+        async def _discard() -> None:
+            self._pending_keys.discard(key)
+            with suppress(ValueError):
+                self._pending_fuzzy_keys.remove(key)
+
+        ctx.register_success_hook(record, _commit, on_discard=_discard)
+
     async def process(self, record: T, ctx: PipelineContext) -> T | None:
         key = self._key(record)
 
@@ -142,14 +167,14 @@ class DedupMiddleware(Middleware[T, T], Generic[T]):
                     self._fuzzy_overflow_warned = True
                 # Fallback: store-only check (no fuzzy comparison)
                 try:
-                    if await self._store.exists(key):
+                    if key in self._pending_keys or await self._store.exists(key):
                         return None
-                    await self._store.add(key)
+                    self._register_commit_marker(record, ctx, key)
                 except Exception as exc:
                     return self._handle_store_failure(record, ctx, key, exc)
                 return record
 
-            for seen in self._seen_keys:
+            for seen in [*self._seen_keys, *self._pending_fuzzy_keys]:
                 if self._strategy.is_duplicate(key, seen):
                     ctx.log.debug(
                         "dedup_fuzzy_skip",
@@ -159,16 +184,18 @@ class DedupMiddleware(Middleware[T, T], Generic[T]):
                     )
                     return None
             # Not a duplicate — remember this key
-            self._seen_keys.append(key)
+            self._pending_fuzzy_keys.append(key)
             try:
-                await self._store.add(key)
+                self._register_commit_marker(record, ctx, key)
             except Exception as exc:
                 return self._handle_store_failure(record, ctx, key, exc)
             return record
 
-        # Exact path: prefer atomic store capability when available.
+        # Exact path: reserve locally, but persist only after the record is
+        # committed by the delivery layer. This avoids losing records when a
+        # downstream sink fails after dedup has seen the key.
         try:
-            is_new = await self._store.mark_if_new(key)
+            is_new = key not in self._pending_keys and not await self._store.exists(key)
         except Exception as exc:
             return self._handle_store_failure(record, ctx, key, exc)
 
@@ -176,4 +203,5 @@ class DedupMiddleware(Middleware[T, T], Generic[T]):
             ctx.log.debug("dedup_exact_skip", key=key, middleware=self.name)
             return None
 
+        self._register_commit_marker(record, ctx, key)
         return record

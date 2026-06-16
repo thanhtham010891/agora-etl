@@ -21,6 +21,22 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseState:
+    """Local snapshot of a distributed pipeline lease."""
+
+    pipeline_id: str
+    run_number: int
+    worker_id: str
+    fencing_token: int
+    acquired_at: str
+    renewed_at: str | None = None
 
 
 @dataclass
@@ -91,6 +107,20 @@ class WorkerCoordinator(ABC):
         No-op if this worker does not currently hold the lease.
         """
 
+    def current_lease(self, pipeline_id: str) -> LeaseState | None:
+        """Return this worker's locally held lease for *pipeline_id*, if any."""
+        del pipeline_id
+        return None
+
+    async def validate_lease(self, pipeline_id: str, fencing_token: int) -> bool:
+        """Return whether *fencing_token* is still the active lease token.
+
+        Backends should override this with an authoritative shared-store check.
+        The default is a local fallback for simple test coordinators.
+        """
+        lease = self.current_lease(pipeline_id)
+        return lease is not None and lease.fencing_token == fencing_token
+
     @abstractmethod
     async def list_workers(self) -> list[WorkerInfo]:
         """Return all currently live workers visible to this coordinator."""
@@ -109,5 +139,19 @@ class WorkerCoordinator(ABC):
         Default is a no-op.
         """
 
+    # Invoked with a ``pipeline_id`` when a lease held by this worker is lost
+    # while the run is still in flight (e.g. renewal finds the lease taken over
+    # by another worker). ``WorkerPool`` registers a callback that aborts the
+    # in-flight run so a fenced-out worker stops writing.
+    _lease_lost_callback: Callable[[str], Awaitable[None]] | None = None
 
-__all__ = ["WorkerCoordinator", "WorkerInfo"]
+    def set_lease_lost_callback(self, callback: Callable[[str], Awaitable[None]] | None) -> None:
+        """Register a callback invoked when a held lease is lost mid-run.
+
+        Implementations that detect lease loss during renewal should invoke
+        the stored callback so the runtime can abort the in-flight run.
+        """
+        self._lease_lost_callback = callback
+
+
+__all__ = ["LeaseState", "WorkerCoordinator", "WorkerInfo"]

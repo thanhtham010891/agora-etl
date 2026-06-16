@@ -61,6 +61,7 @@ class LinearLaneStrategy:
                             source_record.checkpoint,
                             failure=result_failure,
                             on_success=source_record.on_success,
+                            hook_record=source_record.raw,
                         )
                         continue
 

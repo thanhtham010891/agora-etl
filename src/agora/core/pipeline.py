@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
     from agora.core.context import PipelineContext
     from agora.core.explain import PipelineExplain
+    from agora.core.fencing import RunFence
     from agora.core.metrics import PipelineRunSummary
     from agora.core.sink import BaseSink, SinkRouter
     from agora.core.source import BaseSource
@@ -188,6 +189,7 @@ class BoundPipeline(Generic[T]):
         )
         self._chain.set_acceleration_mode(self._config.acceleration_mode)
         self._live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None
+        self._run_fence: RunFence | None = None
 
     @property
     def pipeline_id(self) -> str:
@@ -208,6 +210,7 @@ class BoundPipeline(Generic[T]):
             config=self._config,
         )
         bound._live_metrics_callback = self._live_metrics_callback
+        bound._run_fence = self._run_fence
         return bound
 
     def set_live_metrics_callback(
@@ -215,6 +218,10 @@ class BoundPipeline(Generic[T]):
         callback: Callable[[PipelineContext], Awaitable[None]] | None,
     ) -> None:
         self._live_metrics_callback = callback
+
+    def set_run_fence(self, fence: RunFence | None) -> None:
+        """Attach a distributed run fence used to reject stale writes."""
+        self._run_fence = fence
 
     def _runtime_spec(self) -> PipelineRuntimeSpec:
         return PipelineRuntimeSpec(
@@ -224,6 +231,7 @@ class BoundPipeline(Generic[T]):
             pipeline_id=self._pipeline_id,
             config=self._config,
             live_metrics_callback=self._live_metrics_callback,
+            run_fence=self._run_fence,
         )
 
     def explain(self, max_records: int | None = None) -> PipelineExplain:
