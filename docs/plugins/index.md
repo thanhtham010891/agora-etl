@@ -3,11 +3,14 @@
 _When to read this: you want to understand which capabilities live in the official plugin ecosystem and when a plugin is the right boundary instead of core Agora._
 
 Agora plugins extend the core runtime with integrations that are better kept
-outside `agora-etl` itself.
+outside `agora-etl` itself. In the `0.4.x` line, this is a production boundary:
+core owns the runtime contract, while `agora-etl-plugins` owns official backend
+integrations and their backend-specific validation matrix.
 
 This section focuses on the public plugin story:
 
 - what the official plugin bundle includes
+- which plugin families are production-ready flagship surfaces
 - when to use each plugin family
 - what kind of system problem each family solves
 - how to build your own plugin package
@@ -49,7 +52,9 @@ The public first-party plugin distribution is
 [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/).
 
 Current official coverage includes Redis, Kafka, PostgreSQL, Anthropic
-completion support, cron scheduling, and distributed worker coordination.
+completion support, cron scheduling, and distributed worker coordination. The
+published plugin `0.4.x` line targets `agora-etl>=0.4.1,<1`; these docs are
+refreshed for the `agora-etl` `0.4.2` production metadata release.
 
 Install examples:
 
@@ -69,7 +74,19 @@ pip install "agora-etl-plugins[all]"
 | Kafka topic in, Kafka topic out | Kafka | [Kafka](kafka.md) |
 | Periodic sync every hour or every weekday | Scheduling | [Scheduling](scheduling.md) |
 | Same schedules deployed on multiple workers | Distributed coordination | [Distributed Coordination](distributed.md) |
-| Shared replay or dead-letter inspection | Redis or PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+| Shared replay or dead-letter inspection | Redis, Kafka, or PostgreSQL | [Redis](redis.md), [Kafka](kafka.md), [PostgreSQL](postgresql.md) |
+| Kafka source into Redis or PostgreSQL sink with wedge/runtime metrics | Kafka + Redis/PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+
+## Production maturity at a glance
+
+| Family | Production role | Boundary |
+|---|---|---|
+| Redis | Flagship backend | Streams, sink, state, DLQ, exact dedup, AI cache, observability, and Kafka-to-Redis runtime helpers. |
+| Kafka | Flagship backend | Topic source/sink, Kafka DLQ, Avro/JSON Schema/Protobuf registry helpers, security, tracing, and transactional hooks. |
+| PostgreSQL | Flagship backend | Source, sink, schema adapter, DLQ, HA read routing, `COPY`, `COPY + MERGE`, and Kafka-to-Postgres runtime helpers. |
+| Distributed coordination | Production coordination | Redis-backed leases, fencing tokens, fail-safe behavior, and optional Redlock quorum. |
+| Scheduling | Official helper | Cron parsing and next-run calculation for worker schedules. |
+| Anthropic | Official AI provider | Completion and structured output. Embeddings are deliberately out of scope. |
 
 ## Quick examples
 
@@ -164,7 +181,7 @@ Use a plugin when:
 - The capability depends on an external system
 - The integration has its own dependency footprint
 - The feature should evolve independently from the core runtime
-- The people may want multiple interchangeable backends
+- Operators may want multiple interchangeable backends
 
 Use the family pages in this section when the question is less about
 "what is a plugin?" and more about "which backend story matches my pipeline?"

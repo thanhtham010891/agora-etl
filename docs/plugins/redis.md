@@ -1,9 +1,13 @@
 # Redis Plugins
 
-_When to read this: you need shared fast state, stream ingestion, replay storage, or dedup behavior backed by Redis._
+_When to read this: the pipeline needs Redis Streams, Redis writes, shared
+state, DLQ/replay, deduplication, AI cache, or Redis-backed Kafka bridge
+helpers._
 
-Use the Redis family when your pipeline needs a fast shared backend for stream
-ingestion, state, replay, or deduplication.
+The Redis family in `agora-etl-plugins 0.4.x` is a production-ready flagship
+backend. It includes stream ingestion, sink writes, shared state, exact and
+embedding dedup stores, Redis-backed DLQ, distributed LLM cache, observability
+reports, Redis Sentinel/Cluster wiring, and Kafka-to-Redis runtime helpers.
 
 ## Install
 
@@ -11,118 +15,99 @@ ingestion, state, replay, or deduplication.
 pip install "agora-etl-plugins[redis]"
 ```
 
-## When Redis is a good fit
+## Public surface
 
-- ingest records from Redis Streams
-- publish lightweight outputs back into Redis
-- keep DLQ records in a shared store for replay
-- share state or dedup keys across workers
-- cache AI responses close to the runtime
+| Component | Kind | Use it for |
+|---|---|---|
+| `RedisStreamSource` | Source | Consuming Redis Streams through consumer groups. |
+| `RedisSink` | Sink | Writing `set`, `lpush`, `rpush`, or `xadd` mutations. |
+| `RedisDLQSink` | DLQ sink | Persisting dead-letter records in Redis hashes plus indexes. |
+| `RedisDLQSource` | DLQ source | Filtering and replaying Redis-backed DLQ records. |
+| `RedisBackend` | State backend | Shared synchronous state with TTL, prefix scans, `set_if_absent`, and CAS. |
+| `RedisStore` | Dedup store | Exact dedup built on `RedisBackend` and offloaded blocking calls. |
+| `RedisEmbeddingStore` | Dedup store | Small-to-medium semantic dedup using embeddings and cosine similarity. |
+| `RedisLLMCache` | AI cache | Distributed LLM response cache backed by Redis state. |
+| `RedisPrometheusExporter` | Observability | Prometheus rendering for Redis source/sink/DLQ metrics. |
+| `RedisEnterpriseAcceptanceGate` | Observability | Acceptance reports over source/sink/DLQ snapshots. |
+| `KafkaRedisRuntime` and builders | Runtime helper | Kafka-to-Redis wedge runtime, metrics, and acceptance reports. |
 
-## What the Redis family includes
+Entry-points installed by the package:
 
-### Redis Stream source
+| Group | Key | Target |
+|---|---|---|
+| `agora.sources` | `redis_stream` | `RedisStreamSource` |
+| `agora.sources` | `redis_dlq_source` | `RedisDLQSource` |
+| `agora.sinks` | `redis` | `RedisSink` |
+| `agora.sinks` | `redis_dlq` | `RedisDLQSink` |
+| `agora.ai.caches` | `redis` | `RedisLLMCache` |
+| `agora.middlewares.dedup.stores` | `redis` | `RedisStore` |
+| `agora.middlewares.dedup.stores` | `redis_embedding` | `RedisEmbeddingStore` |
+| `agora.state.backends` | `redis` | `RedisBackend` |
 
-`RedisStreamSource` is the event-ingestion piece.
+## RedisStreamSource
 
-It is built for Redis Streams consumer-group workflows:
+`RedisStreamSource` consumes with `XREADGROUP` and supports checkpoint resume.
 
-- reads with consumer groups
-- keeps checkpoints based on Redis stream message IDs
-- can acknowledge on success
-- can batch success acknowledgements
-- can reclaim stale pending messages with idle-time thresholds
-- can fail closed or log-and-continue on deserialize errors
+Important constructor options:
 
-Use it when records already land in Redis Streams and you want Agora to process
-them as a resumable pipeline.
+| Option | Meaning |
+|---|---|
+| `url`, `stream`, `group`, `consumer` | Required stream consumer-group identity. |
+| `deserializer` | Callable receiving the Redis field map. Defaults to identity. |
+| `block_ms`, `batch_size` | Read polling and batch size. |
+| `ack_on_success=True` | Acknowledges only after successful downstream delivery. |
+| `ack_batch_size` | Batches `XACK` calls. Defaults to `batch_size`. |
+| `decode_responses=True` | Use `False` for raw byte payloads. |
+| `reclaim_idle_ms` | Enables stale pending message reclaim through `XAUTOCLAIM`. |
+| `reclaim_batch_size` | Size of each reclaim batch. |
+| `max_consecutive_reclaim_batches` | Fairness guard so reclaim loops yield back to fresh reads. |
+| `on_deserialize_error` | Fail closed or log/drop/continue via core source failure policy. |
+| `redis_cluster`, `sentinel_service_name`, `sentinel_urls` | Cluster and Sentinel connection modes. |
+| `reconnect_retry_policy` | Retry policy for read/reclaim/ack reconnection. |
 
-If your deserializer prefers raw bytes instead of decoded strings, set
-`decode_responses=False` and deserialize directly from the Redis payload shape
-you expect.
+Resume uses `XGROUP SETID`, so it is guarded for single-consumer group resume.
+Multi-consumer groups should use a dedicated replay group or an
+operator-managed reset.
 
-### Redis sink
+The source exposes:
 
-`RedisSink` is the write side.
+- `current_checkpoint()` with stream, group, consumer, and message ID
+- `metrics_snapshot()`
+- `health_snapshot()`
+- `acceptance_report()`
+- `render_prometheus_metrics()`
 
-It supports several output patterns:
+## RedisSink
 
-- `set` for key-value writes
-- `lpush` and `rpush` for list-backed queues
-- `xadd` for writing back into Redis Streams
+`RedisSink` supports four modes:
 
-Practical rule:
+| Mode | Redis operation | Notes |
+|---|---|---|
+| `set` | `SET` / `MSET` | TTL supported. TTL-free non-cluster batches use `MSET`. |
+| `lpush` | Lua-wrapped `LPUSH` | Uses idempotency keys for retry-safe list writes. |
+| `rpush` | Lua-wrapped `RPUSH` | Uses idempotency keys for retry-safe list writes. |
+| `xadd` | `XADD` | Serializer must return a dict. Supports approximate `maxlen`. |
 
-- use `set` when each record has a stable key
-- use `xadd` when you want Redis to remain an event bus
-- use list modes for simple queue-like fan-out
+Important constructor options:
 
-For TTL-free `set` batches, Redis can use the multi-key path instead of issuing
-one write command per record.
+| Option | Meaning |
+|---|---|
+| `key_fn` | Required key resolver. |
+| `serializer` | Converts records to Redis values. Defaults to JSON-ish string serialization. |
+| `ttl_seconds` | Only valid for `mode="set"`. |
+| `maxlen` | List/stream trimming. For streams it is passed to `XADD` as approximate maxlen. |
+| `redis_cluster`, `redis_cluster_address_remap` | Cluster mode and address rewrite support. |
+| `sentinel_service_name`, `sentinel_urls` | Redis Sentinel mode. |
+| `retry_policy` | Overrides default Redis retry behavior. |
 
-### Redis DLQ
-
-`RedisDLQSink` and `RedisDLQSource` let you keep dead-letter records in Redis
-instead of local disk.
-
-This is useful when:
-
-- workers are ephemeral
-- more than one operator may need to inspect or replay failures
-- replay should happen from a shared backend instead of a local SQLite file
-
-The replay side is meant for operational filtering and bounded reads, not only
-for dumping the entire DLQ into memory at once.
-
-### Redis state backend
-
-`RedisBackend` gives Agora a shared key-value state store with TTL support.
-
-Use it when state must survive beyond one process, or when more than one worker
-needs to observe the same pipeline state.
-
-TTL-backed keys are handled with short-lived runtime state in mind, so expiry
-behavior stays close to the requested timestamp instead of drifting to coarse
-whole-second rounding.
-
-### Redis dedup stores
-
-The Redis family ships two different dedup backends:
-
-- `redis`: exact-match dedup using membership keys
-- `redis_embedding`: semantic dedup using embeddings and cosine similarity
-
-The semantic store is intentionally small-scale. It performs an O(N) scan over
-stored embeddings and is meant for modest datasets, not as a replacement for a
-real vector database.
-
-It now scans incrementally rather than assuming the full embedding index should
-be pulled into memory at once, but the architectural boundary is still the
-same: this is a pragmatic small-scale dedup helper, not a vector search system.
-
-### Redis AI cache
-
-`RedisLLMCache` lets AI-heavy workflows reuse completion results through Redis.
-
-Use it when the same prompt patterns repeat across runs and you want cache hits
-to survive process restarts.
+The sink exposes `metrics_snapshot()`, `acceptance_report()`, and
+`render_prometheus_metrics()`.
 
 ## Quickstart
-
-This example consumes JSON-like events from a Redis Stream and writes a compact
-status record back into Redis as a key-value entry.
 
 ```python
 from agora import DeliveryConfig, Pipeline
 from agora_plugins.redis import RedisSink, RedisStreamSource
-
-
-def deserialize(fields: dict[str, str]) -> dict[str, str]:
-    return {
-        "event_id": fields["event_id"],
-        "customer_id": fields["customer_id"],
-        "status": fields.get("status", "new"),
-    }
 
 
 source = RedisStreamSource(
@@ -130,10 +115,15 @@ source = RedisStreamSource(
     stream="orders:raw",
     group="orders-pipeline",
     consumer="worker-1",
-    deserializer=deserialize,
+    deserializer=lambda fields: {
+        "event_id": fields["event_id"],
+        "customer_id": fields["customer_id"],
+        "status": fields.get("status", "new"),
+    },
     ack_on_success=True,
     ack_batch_size=200,
     reclaim_idle_ms=60_000,
+    max_consecutive_reclaim_batches=5,
 )
 
 sink = RedisSink(
@@ -151,17 +141,10 @@ summary = await (
 )
 ```
 
-What this shows:
+## DLQ and replay
 
-- `RedisStreamSource` is the event-ingestion edge
-- checkpoints are based on stream message IDs
-- acknowledgements can be flushed in batches instead of one message at a time
-- `RedisSink` in `set` mode is good for lightweight derived state
-- TTL is only applied on `set`, not on list or stream modes
-
-## Quick recipes
-
-### Inspect only failed sink writes from a shared DLQ
+`RedisDLQSink` stores each DLQ record as a Redis hash and maintains ordered and
+secondary indexes for filtering. `RedisDLQSource` reads bounded replay windows.
 
 ```python
 from agora_plugins.redis import RedisDLQSource
@@ -180,10 +163,14 @@ async with source:
         print(record.error_type, record.error_message)
 ```
 
-Use this when operators need a bounded, shared replay view instead of a
-node-local SQLite file.
+Use a DLQ payload policy when payloads must be redacted or encrypted before
+being stored in Redis.
 
-### Keep short-lived shared pipeline state in Redis
+## Shared state and dedup
+
+`RedisBackend` implements Agora's synchronous `StateBackend` contract. That is
+intentional: core state operations are sync. Async callers should offload it
+through the core helpers or call it from a thread when needed.
 
 ```python
 import time
@@ -192,47 +179,83 @@ from agora_plugins.redis import RedisBackend
 
 
 backend = RedisBackend(url="redis://localhost:6379", prefix="agora:state:")
-backend.set(
+stored = backend.get("orders:last-success")
+
+updated = backend.compare_and_set(
     "orders:last-success",
-    {"cursor": 42},
+    expected=stored,
+    value={"cursor": 42},
     expires_at=time.time() + 3600,
 )
 
-stored = backend.get("orders:last-success")
-print(stored.value if stored else None)
 backend.close()
 ```
 
-Use this when more than one worker or process needs to observe the same runtime
-state.
+`RedisStore` builds exact dedup on top of this backend and offloads blocking
+state calls. `RedisEmbeddingStore` is a pragmatic semantic dedup helper for
+small-to-medium working sets; it is not a vector database replacement.
 
-## Common patterns
+## AI cache
 
-### Stream in, process, write elsewhere
+`RedisLLMCache` is an async cache backed by `RedisBackend`.
 
-- source from Redis Streams
-- transform with Agora middleware
-- write to PostgreSQL, Kafka, or file sinks
+```python
+from agora_plugins.redis import RedisLLMCache
 
-### Shared dedup for multiple workers
 
-- use Redis dedup keys
-- let every worker consult the same store
-- avoid duplicate work across a fleet
+cache = RedisLLMCache(
+    url="redis://localhost:6379",
+    key_prefix="agora:llm:",
+    default_ttl_s=3600,
+)
+```
 
-### Shared replay and operator workflows
+Use it when prompt/response reuse should survive process restarts and be shared
+across workers.
 
-- send failures to Redis DLQ
-- inspect and replay from a central backend
-- avoid node-local recovery state
+## Redis Cluster and Sentinel
+
+The Redis source, sink, state backend, and dedup store expose Cluster/Sentinel
+wiring where the underlying operation supports it:
+
+- `redis_cluster=True`
+- `redis_cluster_address_remap=...`
+- `sentinel_service_name="mymaster"`
+- `sentinel_urls=["redis://sentinel-a:26379", ...]`
+
+For Cluster list writes, use keys with hash tags when related idempotency keys
+must live in the same slot.
+
+## Observability
+
+Redis components expose:
+
+- health snapshots for streams
+- metrics snapshots for stream source, sink, and DLQ
+- Prometheus text rendering
+- acceptance reports with threshold objects
+- poison-loop risk snapshots for stream reclaim/deserialization loops
+
+These APIs are useful in release gates and health endpoints; they are not
+required for simple pipelines.
+
+## Production checklist
+
+- Use consumer groups for resumable stream processing.
+- Keep `ack_on_success=True` for normal pipelines.
+- Set `reclaim_idle_ms` only after choosing an idle window that matches the
+  slowest healthy downstream writes.
+- Use `max_consecutive_reclaim_batches` to avoid starving fresh messages during
+  large pending-list recovery.
+- Use Redis DLQ for shared operational replay, not long-term analytics.
+- Use CAS (`compare_and_set`) for conflict-detecting shared state writes.
+- Treat Redis embedding dedup as bounded helper infrastructure, not a search
+  database.
 
 ## Boundaries
 
-Redis is a strong fit when you want one fast shared system that can hold event
-streams, short-lived state, and replay metadata.
+Redis is a strong fit for fast shared runtime state, streams, replay metadata,
+lightweight queues, and cache-like workflows.
 
-It is a weak fit when:
-
-- records are large and relational
-- you need analytical queries
-- semantic search needs to scale well past small-to-medium working sets
+It is a weak fit for analytical querying, large relational datasets, or
+large-scale semantic search.

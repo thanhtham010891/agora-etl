@@ -6,13 +6,20 @@ _When to read this: you are deciding whether `agora-etl-plugins` is ready for a 
 The production-ready surface is intentionally centered on a small set of
 flagship backend families rather than a large connector catalog.
 
+For the `agora-etl` `0.4.2` release, this page is the public readiness map for
+the plugin ecosystem. It keeps three things separate:
+
+- core runtime maturity (`agora-etl`)
+- official integration maturity (`agora-etl-plugins`)
+- deployment-specific responsibility owned by the application team
+
 ## Compatibility Matrix
 
 | Package | Supported line | Notes |
 |---|---|---|
 | `agora-etl-plugins` | `0.4.x` | Official plugin bundle release line. |
-| `agora-etl` | `>=0.4.0,<1` | Required runtime contract for the plugin bundle. |
-| Python | `3.11`, `3.12` | Matches package classifiers and CI coverage. |
+| `agora-etl` | `>=0.4.1,<1` | Required runtime contract for the plugin bundle. The core `0.4.2` release refreshes docs and production metadata without changing the plugin manifest schema. |
+| Python | `3.11`, `3.12`, `3.13` | Matches package classifiers and CI compatibility coverage. |
 | Redis client | `redis>=7.0,<8` | Used by Redis, distributed coordination, Redis DLQ, state, dedup, and cache surfaces. |
 | Kafka client | `aiokafka>=0.11,<1` | Used by Kafka source, sink, DLQ, and Kafka-backed runtime helpers. |
 | PostgreSQL client | `psycopg[binary]>=3.1,<4`, `psycopg_pool>=3.2,<4` | Used by PostgreSQL source, sink, schema adapter, DLQ surfaces, and pooled sink writes. |
@@ -21,10 +28,10 @@ flagship backend families rather than a large connector catalog.
 
 | Surface | Maturity | Support boundary |
 |---|---|---|
-| PostgreSQL source, sink, schema adapter, and DLQ | Includes SQL, `COPY`, `COPY + MERGE`, checkpoint-aware source reads, schema-drift controls, HA routing tests, and SQL-backed DLQ/replay. |
-| Kafka source, sink, schema registry helpers, and DLQ | Includes consumer-group semantics, idempotent producer defaults, secure schema-registry paths, transactional delivery hooks, replay, and DLQ policy controls. |
-| Redis core: stream source, sink, DLQ, and state backend | Includes stream resume/reclaim, TLS/ACL, Sentinel, Cluster, Redis Stack matrix coverage, shared DLQ, `set_if_absent`, and `compare_and_set` state atomicity checks. |
-| Distributed coordination | Redis-backed lease/fencing semantics are covered for the default single-Redis lease model and opt-in Redlock-style quorum across independent Redis masters. |
+| PostgreSQL source, sink, schema adapter, and DLQ | Production-ready flagship | Includes SQL, `COPY`, `COPY + MERGE`, checkpoint-aware source reads, schema-drift controls, HA read routing, sink pool metrics, and SQL-backed DLQ/replay. |
+| Kafka source, sink, schema registry helpers, and DLQ | Production-ready flagship | Includes consumer-group semantics, idempotent producer defaults, Avro/JSON Schema/Protobuf registry paths, secure client config, transactional delivery hooks, replay, and DLQ policy controls. |
+| Redis core: stream source, sink, DLQ, and state backend | Production-ready flagship | Includes stream resume/reclaim, reclaim fairness, poison-loop risk metrics, TLS/ACL, Sentinel, Cluster, Redis Stack matrix coverage, shared DLQ, `set_if_absent`, and `compare_and_set` state atomicity checks. |
+| Distributed coordination | Production-ready coordination | Redis-backed lease/fencing semantics are covered for the default single-Redis lease model and opt-in Redlock-style quorum across independent Redis masters. |
 | Cron scheduling helpers | Official | Unit/contract covered. No external service is required. |
 | Anthropic provider | Official | Completion and structured-output provider surface. Live API behavior should be validated in application environments that own API cost and model policy. |
 | Redis embedding dedup and Redis AI cache | Official helper surfaces | Useful production helpers, but they should not inherit the same maturity claim as Redis Streams, Redis DLQ, Redis state, or Redis sink. |
@@ -40,7 +47,7 @@ make test-release-gate-postgres
 make test-release-gate-kafka-secure
 make test-release-gate-kafka-cluster
 make test-release-gate-redis
-make test-installed-package-smoke
+make test-release-gate-wheel
 ```
 
 These gates cover:
@@ -52,6 +59,20 @@ These gates cover:
 - Kafka multi-broker failover, rolling restart, coordinator failover, replay windows, and live tail
 - Redis TLS/ACL, Sentinel, Cluster, Redis Stack, and Redlock coordinator topology behavior
 - wheel build, installed package metadata, public extras, public imports, and entry-points
+- Python compatibility across `3.11`, `3.12`, and `3.13` in CI/release workflows
+
+## Security And Support
+
+Security reporting lives with the package that owns the integration promise:
+
+- `agora-etl-plugins` security policy in the plugin repository
+
+Do not report exploitable vulnerabilities in public issues. Follow the security
+policy so maintainers can coordinate a fix before details are disclosed.
+
+Support policy is intentionally not duplicated in this core documentation. Use
+the package README, release notes, and issue tracker for ordinary support and
+the security policy only for exploitable vulnerabilities.
 
 ## Deployment Notes
 
@@ -69,6 +90,8 @@ These gates cover:
 
 - Use `copy_merge` for large upsert-heavy loads and `copy` only for append-only writes.
 - Keep `conflict_key` backed by a real primary key or unique constraint.
+- Use `fetch_strategy="server_side"` for large source reads that should not materialize the whole result client-side.
+- Use `read_routing`, `max_replica_replay_lag_s`, and `on_replica_stale` deliberately in HA deployments.
 - Use `PostgresSchemaAdapter` only when automatic table creation or additive schema drift is intended.
 - `PostgresTLSConfig`, `PostgresConfig`, and `PostgresPluginConfig` default to `sslmode="verify-full"`; use an explicit DSN `sslmode` only when a deployment intentionally owns that override.
 - Monitor `*_sink_latency_seconds` histogram series for PostgreSQL sink connect, pool acquire, and flush latency.
@@ -80,6 +103,7 @@ These gates cover:
 - Use Redis Streams with consumer groups when records need resumable ingestion.
 - Enable `ack_on_success` for normal stream processing.
 - Configure reclaim windows deliberately; too-short idle windows can cause unnecessary reclaim churn.
+- Use `max_consecutive_reclaim_batches` when large pending-list recovery should not starve fresh stream reads.
 - Use Redis Sentinel or Cluster deployment patterns already validated by the integration matrix.
 - Use `RedisBackend.compare_and_set(...)` when multiple workers need conflict-detecting state updates.
 - Treat Redis embedding dedup as a small-to-medium working-set helper, not a vector database replacement.

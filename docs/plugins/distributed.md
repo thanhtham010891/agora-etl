@@ -1,9 +1,12 @@
 # Distributed Coordination
 
-_When to read this: more than one worker instance may contend for the same scheduled pipeline and you need shared lease ownership._
+_When to read this: more than one worker instance may contend for the same
+scheduled pipeline and the deployment needs shared lease ownership._
 
-Use distributed coordination when more than one worker instance may try to run
-the same scheduled pipeline and you need shared lease ownership.
+The distributed family in `agora-etl-plugins 0.4.x` provides Redis-backed
+worker coordination for Agora workers. It coordinates _who may run a scheduled
+pipeline now_; it does not move records and it does not replace Kafka,
+PostgreSQL, or Redis Streams.
 
 ## Install
 
@@ -11,52 +14,98 @@ the same scheduled pipeline and you need shared lease ownership.
 pip install "agora-etl-plugins[distributed]"
 ```
 
-## What it does
+The extra installs `redis`.
 
-The distributed family provides a Redis-backed worker coordinator.
+## Public surface
 
-Its job is not to move records. Its job is to coordinate ownership:
+| Component | Kind | Use it for |
+|---|---|---|
+| `RedisWorkerCoordinator` | Worker coordinator | Worker registration, heartbeats, per-pipeline leases, lease renewal, fencing tokens, and fleet discovery. |
+| `DistributedConfig` | Settings | Environment-backed Redis URL, TTL, heartbeat, key prefix, fallback, and Redlock settings. |
 
-- register workers with heartbeats
-- acquire per-pipeline leases
-- release leases safely
-- list visible workers
+`DistributedConfig` reads environment variables prefixed with
+`AGORA_DISTRIBUTED_`, for example:
 
-The lease model is TTL-based, so workers that disappear do not hold ownership
-forever.
+```bash
+AGORA_DISTRIBUTED_REDIS_URL=redis://redis:6379
+AGORA_DISTRIBUTED_LEASE_TTL_SECONDS=300
+AGORA_DISTRIBUTED_HEARTBEAT_INTERVAL=30
+AGORA_DISTRIBUTED_REDLOCK_REDIS_URLS='["redis://r1:6379","redis://r2:6379","redis://r3:6379"]'
+```
 
-## When it is a good fit
+## RedisWorkerCoordinator
 
-- the same pipelines are deployed on multiple worker instances
-- duplicate scheduled runs would be harmful
-- you already operate Redis and want lightweight coordination instead of a
-  heavier scheduler platform
+Important constructor options:
 
-## Operational behavior
+| Option | Meaning |
+|---|---|
+| `redis_url` | Primary Redis URL. Worker registry and fencing counters use this connection. |
+| `lease_ttl_seconds=300` | Lease TTL between renewals. |
+| `heartbeat_interval=30` | Worker heartbeat interval. Must be less than lease TTL. |
+| `key_prefix="agora:distributed:"` | Namespace for worker, lease, and fence keys. |
+| `fallback_to_local=False` | Fail-safe default. If `True`, Redis unavailability behaves as locally acquired leases and can duplicate runs. |
+| `fencing_key_ttl_seconds` | TTL for fencing-token counters. |
+| `lease_renewal_deadline_seconds` | Optional renewal deadline before a lease is considered lost. |
+| `redlock_redis_urls` | Optional list of at least three independent Redis master URLs for majority-quorum leases. |
+| `redlock_clock_drift_factor=0.01` | Redlock lease validity safety margin. |
 
-The coordinator is designed around a few deliberate choices:
+Lifecycle and operator APIs:
 
-- heartbeats refresh worker presence
-- leases are separate from worker registration
-- release is ownership-checked before delete
-- Redis outages can either fail safe or fall back to local behavior, depending
-  on configuration
+- `start(worker_id, pipeline_ids)`
+- `stop()`
+- `try_acquire_lease(pipeline_id, run_number)`
+- `release_lease(pipeline_id)`
+- `renew_lease(pipeline_id)`
+- `validate_lease(pipeline_id, fencing_token)`
+- `current_lease(pipeline_id)`
+- `set_lease_lost_callback(callback)`
+- `list_workers()`
+- `connect()` / `close()` for read-only fleet inspection
 
-That last point matters:
+## Lease model
 
-- fail-safe is safer for correctness
-- fallback-to-local is more permissive but can allow duplicate runs
+The default mode uses one Redis primary:
 
-For community-facing deployments, treat `fallback_to_local` as an explicit
-tradeoff, not a harmless convenience switch.
+1. workers register a heartbeat record
+2. each scheduled run attempts a per-pipeline lease
+3. lease acquisition increments a fencing token
+4. the coordinator renews held leases while the worker is alive
+5. release deletes the lease only when worker ID and fencing token still match
+6. lost leases are removed locally and can call a lease-lost callback
 
-## Sample
+Fencing tokens matter because they let downstream systems reject stale writers
+even if two workers overlap during failure recovery.
 
-This example shows two important moments: starting the coordinator for a worker
-and attempting lease ownership before a scheduled run.
+## Redlock mode
+
+Set `redlock_redis_urls` when lease acquisition and renewal should require a
+majority quorum across independent Redis masters.
 
 ```python
-from agora_plugins.distributed.coordinator import RedisWorkerCoordinator
+from agora_plugins.distributed import RedisWorkerCoordinator
+
+
+coordinator = RedisWorkerCoordinator(
+    redis_url="redis://redis-primary:6379",
+    redlock_redis_urls=[
+        "redis://redis-a:6379",
+        "redis://redis-b:6379",
+        "redis://redis-c:6379",
+    ],
+)
+```
+
+Important boundary: Redlock nodes must be independent Redis masters. Replicas,
+Sentinel members for one primary, or unrelated Cluster shards are not
+interchangeable quorum members.
+
+Worker registry and fencing-token generation still use `redis_url`; Redlock
+controls only per-pipeline lease acquisition, release, renewal, and validation.
+
+## Direct sample
+
+```python
+from agora_plugins.distributed import RedisWorkerCoordinator
 
 
 coordinator = RedisWorkerCoordinator(
@@ -72,7 +121,10 @@ await coordinator.start(
 
 acquired = await coordinator.try_acquire_lease("daily-orders", run_number=42)
 if acquired:
+    lease = coordinator.current_lease("daily-orders")
     try:
+        if lease is not None:
+            print(f"fencing token: {lease.fencing_token}")
         print("run the pipeline here")
     finally:
         await coordinator.release_lease("daily-orders")
@@ -80,16 +132,10 @@ if acquired:
 await coordinator.stop()
 ```
 
-What this shows:
-
-- worker registration and pipeline lease ownership are separate concerns
-- only the worker holding the lease should execute the scheduled run
-- graceful stop matters because it releases leases and deregisters the worker
-
 ## WorkerPool example
 
-This is the shape most teams actually use: a normal `WorkerPool` with scheduled
-pipelines, plus a coordinator that prevents duplicate runs across replicas.
+This is the common deployment shape: each replica starts the same
+`WorkerPool`, but only one replica owns each scheduled run.
 
 ```python
 from agora.runner import Schedule, ScheduledPipeline, WorkerPool
@@ -119,22 +165,50 @@ def get_worker() -> WorkerPool:
     return pool
 ```
 
-If you run two or five copies of the same worker deployment, each replica can
-start normally, but only one should acquire the lease for a given pipeline run.
+## Fail-safe versus fallback
 
-## Common pattern
+Default behavior is fail-safe:
 
-- several worker processes share the same schedule definitions
-- each tries to acquire the lease for a pipeline run
-- exactly one proceeds
-- the rest skip that run cleanly
+- if Redis cannot be reached, no shared lease is acquired
+- duplicate scheduled runs are avoided
+- availability is traded for correctness
 
-## Boundary
+`fallback_to_local=True` flips that tradeoff:
 
-Distributed coordination solves “who gets to run this pipeline right now?”
+- if Redis cannot be reached, the worker behaves as if it acquired the lease
+- pipelines keep running
+- duplicate runs are possible across replicas
+
+Use fallback only when duplicate work is acceptable or downstream fencing makes
+stale writes harmless.
+
+## Fleet inspection
+
+`list_workers()` scans worker heartbeat keys and returns `WorkerInfo` records.
+Use `connect()` / `close()` when an operator process only needs read-only fleet
+inspection and is not itself a running worker.
+
+## Production checklist
+
+- Keep `heartbeat_interval < lease_ttl_seconds`.
+- Choose a lease TTL longer than expected transient pauses but shorter than the
+  maximum acceptable stale-ownership window.
+- Keep `fallback_to_local=False` unless availability is more important than
+  exclusivity.
+- Persist or enforce fencing tokens in downstream critical writes.
+- Register a lease-lost callback for workloads that must stop immediately after
+  renewal failure.
+- Use Redlock only with at least three independent Redis masters.
+- Use a deployment-specific `key_prefix` when several environments share Redis.
+
+## Boundaries
+
+Distributed coordination answers one question: which worker owns this scheduled
+run right now?
 
 It does not replace:
 
 - Kafka for event transport
 - PostgreSQL for operational storage
 - Redis Streams for record ingestion
+- a full scheduler platform for complex calendar/business workflows

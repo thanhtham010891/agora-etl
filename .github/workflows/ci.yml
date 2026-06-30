@@ -1,21 +1,28 @@
-name: ci
+name: CI
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  ci:
+  unit-and-typecheck:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+          - "3.13"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -23,10 +30,12 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Setup environment
+        env:
+          BOOTSTRAP_PYTHON: python
         run: make setup
 
-      - name: Run CI
+      - name: Run non-integration CI
         run: make ci

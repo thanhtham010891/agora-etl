@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.4.2](docs/change-log/0.4.2.md) — production maturity classifier and full official plugin documentation refresh
 - [0.4.1](docs/change-log/0.4.1.md) — shared supportability contracts, recovery diagnostics, distributed run fencing, and AI budget governance
 - [0.4.0](docs/change-log/0.4.0.md) — optional Rust acceleration boundary, performance profiles, and benchmark-backed runtime visibility
 - [0.3.3](docs/change-log/0.3.3.md) — AI provider contract cleanup, Anthropic official bundle promotion, and config-driven OTel workers

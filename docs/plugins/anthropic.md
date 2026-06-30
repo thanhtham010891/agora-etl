@@ -10,6 +10,11 @@ the `anthropic` extra.
 The supported promise is intentionally focused: Claude completions and
 structured output, not embeddings.
 
+In the official `agora-etl-plugins 0.4.x` line, Anthropic is an official AI
+provider surface for completion-driven middleware. Production responsibility
+for API keys, model choice, data retention policy, and cost controls remains
+with the application deployment.
+
 ## Package position
 
 - Package: `agora-etl-plugins[anthropic]`
@@ -60,6 +65,15 @@ Set credentials with:
 
 - `ANTHROPIC_API_KEY` in the environment
 - `api_key=...` when constructing `AnthropicProvider`
+
+## Production checklist
+
+- Store API keys in the deployment secret manager, not in pipeline config files.
+- Set explicit model names instead of relying on changing provider defaults.
+- Use Agora AI governance and budget controls for unattended workloads.
+- Treat prompts and completions as potentially sensitive operational data.
+- Use completion and structured-output middleware only; choose an
+  embedding-capable provider for embedding workflows.
 
 ## End-to-end example
 

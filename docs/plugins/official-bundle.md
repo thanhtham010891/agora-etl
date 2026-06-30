@@ -7,8 +7,22 @@ The official first-party plugin package is `agora-etl-plugins`.
 It exists to keep the core runtime focused while still giving the ecosystem a
 clear, supported set of integrations.
 
-Anthropic completion support is now part of the official bundle through the
-`anthropic` extra in `agora-etl-plugins`.
+For the `0.4.x` production line, the bundle is documented as the official
+integration layer for Redis, Kafka, PostgreSQL, Anthropic, cron scheduling, and
+distributed coordination. The core package remains intentionally smaller:
+`agora-etl` supplies runtime contracts and registries; the plugin package
+supplies backend implementations.
+
+Anthropic completion support is part of the official bundle through the
+`anthropic` extra.
+
+## Compatibility
+
+| Package | Supported line |
+|---|---|
+| `agora-etl` | `>=0.4.1,<1` |
+| `agora-etl-plugins` | `0.4.x` |
+| Python | `3.11`, `3.12`, `3.13` |
 
 ## Install
 
@@ -33,12 +47,18 @@ pip install "agora-etl-plugins[all]"
 
 | If you need... | Install | First object to try |
 |---|---|---|
-| Redis Streams, shared state, Redis-backed DLQ | `agora-etl-plugins[redis]` | `RedisStreamSource`, `RedisSink`, `RedisBackend` |
-| Topic-based ingestion and delivery | `agora-etl-plugins[kafka]` | `KafkaSource`, `KafkaSink` |
-| SQL extraction, upsert, `COPY`, relational DLQ | `agora-etl-plugins[postgres]` | `PostgresSource`, `PostgresSink` |
+| Redis Streams, shared state, Redis-backed DLQ, exact dedup, AI cache | `agora-etl-plugins[redis]` | `RedisStreamSource`, `RedisSink`, `RedisBackend` |
+| Topic-based ingestion/delivery, schema registry, Kafka DLQ | `agora-etl-plugins[kafka]` | `KafkaSource`, `KafkaSink`, `KafkaDLQSink` |
+| SQL extraction, upsert, `COPY`, relational DLQ, schema adapter | `agora-etl-plugins[postgres]` | `PostgresSource`, `PostgresSink`, `PostgresSchemaAdapter` |
 | Claude completions and structured JSON output | `agora-etl-plugins[anthropic]` | `AnthropicProvider` |
 | Cron expressions in `Schedule.cron(...)` | `agora-etl-plugins[cron]` | `Schedule.cron(...)` |
 | Multi-worker lease ownership | `agora-etl-plugins[distributed]` | `RedisWorkerCoordinator` |
+
+## Production install rule
+
+Install the smallest extra set that matches the deployment. `all` is useful for
+local evaluation, but production images are easier to audit when they only
+include the backend clients they actually need.
 
 ## Example install profiles
 
@@ -51,6 +71,15 @@ pip install "agora-etl-plugins[redis,kafka]"
 Use this when Redis is the ingest/control plane and Kafka is the durable event
 backbone.
 
+### Kafka to operational store stack
+
+```bash
+pip install "agora-etl-plugins[kafka,postgres]"
+```
+
+Use this when Kafka owns ingestion and PostgreSQL owns queryable operational
+state or SQL-backed replay.
+
 ### Relational sync stack
 
 ```bash
@@ -59,6 +88,15 @@ pip install "agora-etl-plugins[postgres,cron]"
 
 Use this when jobs are scheduled and PostgreSQL is both the source of truth and
 the operational sink.
+
+### Multi-replica scheduled stack
+
+```bash
+pip install "agora-etl-plugins[postgres,cron,distributed]"
+```
+
+Use this when the same scheduled pipelines may run on more than one worker
+replica and exactly one worker should own each run.
 
 ## Pick the right family
 

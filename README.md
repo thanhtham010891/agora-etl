@@ -1,49 +1,58 @@
-# Agora ETL Framework
+# Agora ETL
 
 **Async-first ETL framework for Python.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-![Python](https://img.shields.io/badge/python-3.11%20|%203.12%20|%203.13-blue)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 [![PyPI](https://img.shields.io/pypi/v/agora-etl)](https://pypi.org/project/agora-etl/)
 
 `agora-etl` is the core Agora runtime: a builder-first ETL framework organized
-around `Source -> Middleware chain -> Sink(s)`.
+around a `Source → Middleware chain → Sink(s)` model.
 
-It stays focused on runtime semantics and extension contracts:
-
-- immutable pipeline composition
-- per-record, batched, and Arrow-aware execution
-- checkpointing and replay
-- DLQ and sink failure policies
-- backpressure, tracing, metrics, and health surfaces
-- scheduled workers and config-driven runs
-
-Official backend integrations such as Redis, Kafka, PostgreSQL, cron
-scheduling, and distributed coordination live in
-[`agora-etl-plugins`](docs/plugins/index.md). Optional acceleration belongs in
-`agora-etl-rs`.
+The core package owns runtime semantics, public contracts, CLI diagnostics,
+checkpointing, DLQ behavior, scheduling primitives, health/metrics surfaces,
+and plugin discovery. Backend integrations such as Redis, Kafka, PostgreSQL,
+cron scheduling, distributed coordination, and Anthropic live in the official
+[`agora-etl-plugins`](docs/plugins/index.md) package.
 
 ## Install
 
 ```bash
 pip install agora-etl
-pip install "agora-etl[file]"          # pyarrow + faster JSONL paths
-pip install "agora-etl-plugins[all]"   # official first-party integrations
 ```
 
-## Quick Start
+Optional core extras:
+
+```bash
+pip install "agora-etl[file]"       # pyarrow + faster JSONL/file paths
+pip install "agora-etl[rs]"         # optional Rust acceleration boundary
+pip install "agora-etl[benchmark]"  # local benchmarking helpers
+```
+
+Official integrations:
+
+```bash
+pip install "agora-etl-plugins[redis]"
+pip install "agora-etl-plugins[kafka]"
+pip install "agora-etl-plugins[postgres]"
+pip install "agora-etl-plugins[all]"
+```
+
+`agora-etl-plugins 0.4.x` targets `agora-etl>=0.4.1,<1`.
+
+## Quickstart
 
 ```python
 import asyncio
 
 from agora import DeliveryConfig, IterableSource, Pipeline
 from agora.core.dlq import SQLiteDLQSink
-from agora.sinks.file.jsonlines import JsonLinesSink
+
 
 records = [
     {"id": 1, "city": "Ho Chi Minh City", "confidence": 0.92},
-    {"id": 2, "city": "Da Nang",          "confidence": 0.41},
-    {"id": 3, "city": "Hanoi",            "confidence": 0.88},
+    {"id": 2, "city": "Da Nang", "confidence": 0.41},
+    {"id": 3, "city": "Hanoi", "confidence": 0.88},
 ]
 
 
@@ -52,7 +61,6 @@ async def main() -> None:
         Pipeline(IterableSource(records))
         .filter(lambda row: row["confidence"] >= 0.5, name="confidence_gate")
         .build(
-            JsonLinesSink(path="cities.jsonl"),
             config=DeliveryConfig(
                 dlq=SQLiteDLQSink(".agora_dlq.db"),
                 batch_size=100,
@@ -66,141 +74,105 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-What this does:
+`build()` without an explicit sink uses the default stdout sink. The example:
 
-- reads from an in-memory source
+- emits in-memory records
 - filters low-confidence rows
-- writes the survivors to `cities.jsonl`
-- sends failed records to a local SQLite DLQ
+- writes accepted records to stdout
+- routes failed records to a local SQLite DLQ
 - returns a `PipelineRunSummary` with counts, timing, and runtime signals
 
-## Why `0.3.0` Matters
+## Core capabilities
 
-Agora now exposes execution shape as a first-class contract.
+| Area | What core provides |
+|---|---|
+| Pipeline builder | Immutable `Pipeline`, `BoundPipeline`, `.pipe()`, `.build()`, `.fan_out()`, `.route()`, and `.explain()`. |
+| Runtime lanes | Linear, buffered, Python batch, and Arrow batch execution with one shared data-plane vocabulary. |
+| Reliability | Checkpoint stores, DLQ sinks, replay semantics, retry policies, sink failure policies, and conservative checkpoint advancement. |
+| Workers | `Schedule`, `ScheduledPipeline`, `WorkerPool`, graceful shutdown, health endpoints, and distributed-coordination hooks. |
+| Observability | Run summaries, runtime metrics, tracing, Prometheus rendering helpers, health snapshots, and doctor diagnostics. |
+| Extensibility | Public plugin entry-point groups, manifest compatibility diagnostics, registries, and stable core facades. |
+| AI runtime support | Provider contracts, AI middleware, cache contracts, budget/cost governance, and provider capability guards. |
 
-Three shared data planes:
+## Runtime guarantees
+
+Agora's public runtime contract is documented in
+[Runtime Guarantees](docs/guides/runtime-guarantees.md). The high-level model:
+
+- source order is preserved at the sink boundary
+- checkpoint advancement waits for handled outcomes
+- sink delivery is fail-closed by default
+- DLQ replay acknowledges only after durable replay success
+- batch, Arrow, and process-isolated paths keep the same correctness contract
+- at-least-once delivery is the model; exactly-once behavior requires external
+  idempotency or transactional systems
+
+## Execution lanes and data planes
+
+Agora selects the execution lane from explicit source, middleware, and sink
+contracts:
 
 - `python_rows`
 - `python_batches`
 - `arrow_batches`
 
-That vocabulary now shows up consistently across sources, middleware, writer
-planning, sink boundaries, runtime summaries, and tracing.
-
-You can inspect the plan before the run starts:
+Use `.explain()` before a run to inspect lane selection and sink downgrade
+decisions:
 
 ```python
 from agora import Pipeline
 from agora.sinks.file.csv import CsvSink
 
-bound = Pipeline(source).build(CsvSink(path="out.csv", row_mapper=lambda row: row))
 
+bound = Pipeline(source).build(CsvSink(path="out.csv", row_mapper=lambda row: row))
 plan = bound.explain(max_records=1_000)
+
 print(plan)
 print(plan.to_dict())
 ```
 
-`PipelineExplain` surfaces:
+`PipelineExplain` includes the selected lane, source data plane, writer input
+plane, middleware compatibility, sink plane, and downgrade markers.
 
-- selected execution lane
-- source and writer data planes
-- middleware compatibility matrix
-- per-sink selected plane and downgrade markers
+## Core vs plugins
 
-## Execution Shapes
+Keep the package boundary clear:
 
-Agora supports more than one runtime shape, but keeps them explicit:
+| Package | Owns |
+|---|---|
+| `agora-etl` | Runtime semantics, public contracts, CLI, docs, health, metrics, checkpointing, DLQ behavior, and plugin discovery. |
+| `agora-etl-plugins` | Official Redis, Kafka, PostgreSQL, cron, distributed coordination, Anthropic, backend DLQ, and backend-specific observability surfaces. |
+| `agora-etl-rs` | Optional acceleration primitives selected through the core acceleration boundary. |
 
-- row pipelines: standard `Middleware` / `MapMiddleware` / `FilterMiddleware`
-- Python batch pipelines: `stream_batches()` plus `BatchMiddleware`
-- Arrow pipelines: `pyarrow.RecordBatch` plus Arrow-native middleware and sinks
+If a capability depends on Redis, Kafka, PostgreSQL, cron parsing, distributed
+lease ownership, or a hosted AI provider, it belongs in a plugin package rather
+than core.
 
-The important rule is that one middleware chain must stay internally
-compatible:
+## CLI
 
-- Python-row chain is valid
-- all-Arrow chain is valid
-- mixed Arrow plus Python-row/list-batch chain is rejected during planning
+The package installs the `agora` command:
 
-For Arrow fan-out, Agora chooses the best path per sink:
-
-- Arrow-capable sinks receive the original `RecordBatch`
-- non-Arrow sinks downgrade only at the sink boundary
-
-## Builder Model
-
-The pipeline builder is immutable.
-
-```python
-base = (
-    Pipeline(source)
-    .pipe(NormalizeMiddleware())
-    .filter(lambda row: row["confidence"] >= 0.5)
-)
-
-csv_pipeline = base.build(CsvSink(path="clean.csv", row_mapper=lambda row: row))
-jsonl_pipeline = base.build(JsonLinesSink(path="clean.jsonl"))
+```bash
+agora --help
+agora doctor
+agora plugins list
+agora dlq replay --help
 ```
 
-Common composition patterns:
+Use `agora doctor` and `agora plugins list --json` in release gates and
+operator diagnostics when installed package behavior matters.
 
-- `.build(sink)` for one destination
-- `.fan_out([...])` for writing the same record to many sinks
-- `.route(router)` for sending each record to one matching sink
-- `.run(max_records=N)` for bounded runs, now enforced at the source boundary
-
-Delivery options are passed via `DeliveryConfig`, including:
-
-- `dlq`
-- `checkpoint`
-- `batch_size`
-- `sink_failure_policy`
-- `sink_concurrency`
-- `backpressure`
-- `tracer`
-
-## Public Data-Plane API
-
-The execution-shape contract is now public API:
-
-```python
-from agora import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
-```
-
-```python
-source_spec = source.data_plane_spec()
-sink_spec = sink.data_plane_spec()
-```
-
-Legacy data-plane booleans still work in `0.3.x`, but they are now a
-compatibility bridge and emit `DeprecationWarning` when Agora has to infer a
-non-row plane from them.
-
-Preferred direction:
-
-- sources override `data_plane_spec()`
-- sinks advertise `accepted_data_planes` and `native_data_planes`
-
-## Core vs Plugins
-
-Keep this mental model:
-
-- `agora-etl`: runtime semantics, pipeline contracts, CLI, docs
-- `agora-etl-plugins`: official integrations
-- `agora-etl-rs`: optional acceleration that preserves the same semantics
-
-If a capability depends on Redis, Kafka, PostgreSQL, cron parsing, or
-distributed lease ownership, it likely belongs in the plugin bundle rather
-than the core package.
-
-## Documentation Map
+## Documentation map
 
 - [Quickstart](docs/guides/quickstart.md)
 - [Pipelines](docs/guides/pipelines.md)
+- [Runtime Guarantees](docs/guides/runtime-guarantees.md)
 - [Failure Handling](docs/guides/failure-handling.md)
+- [Recovery Matrix](docs/guides/recovery-matrix.md)
 - [Checkpointing](docs/guides/checkpointing.md)
+- [Scheduling and Workers](docs/guides/scheduling.md)
 - [Observability](docs/guides/observability.md)
-- [Scheduling](docs/guides/scheduling.md)
+- [Performance](docs/guides/performance.md)
 - [Plugins](docs/plugins/index.md)
 - [Architecture](docs/architecture.md)
 - [CLI](docs/cli.md)
@@ -211,7 +183,34 @@ Reference sections:
 - [Sources](docs/source/index.md)
 - [Sinks](docs/sink/index.md)
 - [Middlewares](docs/middleware/index.md)
+- [Schema](docs/schema.md)
+- [State](docs/state.md)
+
+## Development
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -e ".[file,dev,benchmark]"
+make ci
+```
+
+Useful focused checks:
+
+```bash
+make docs-check
+make test-core
+make contracts
+make preservation
+```
+
+The GitHub CI matrix runs on Python `3.11`, `3.12`, and `3.13`.
+
+## Security
+
+Security reporting instructions live in [SECURITY.md](SECURITY.md). Do not
+include exploitable details, credentials, payloads, production hostnames, or
+private stack traces in public issues.
 
 ## License
 
-Apache 2.0 - see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).

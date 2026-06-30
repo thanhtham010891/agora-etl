@@ -18,6 +18,10 @@ object that plugins can declare changes — for example, if a new required field
 is added or an existing field is renamed. It does not bump on every
 `agora-etl` release.
 
+`agora-etl` `0.4.2` does not change the manifest schema. Plugins compatible
+with the `0.4.x` manifest contract do not need a manifest update solely because
+the core package moved to production maturity metadata.
+
 ## What is a MANIFEST?
 
 `MANIFEST` is an optional object you can expose at the root of your plugin package. Agora reads it during entry-point discovery to populate compatibility diagnostics and `agora plugins list` output.
@@ -131,3 +135,7 @@ agora plugins list
 ```
 
 This shows every discovered plugin across all groups, including incompatible ones, with their package, version, and compatibility status.
+
+Use `agora plugins list --json` in plugin release gates when the package wants
+machine-checkable evidence that the installed wheel exposes the expected
+entry-points and compatibility metadata.

@@ -5,6 +5,11 @@ _When to read this: Agora's built-in interval schedules are not expressive enoug
 Use the scheduling family when simple fixed intervals are not expressive enough
 for how your jobs should run.
 
+In the official `agora-etl-plugins 0.4.x` line, cron scheduling is an official
+helper surface. It is intentionally narrow: it calculates and validates
+calendar timing, while Agora core owns the worker runtime and distributed
+coordination owns multi-replica lease safety.
+
 ## Install
 
 ```bash
@@ -30,6 +35,16 @@ instead of just “every N seconds.”
 - every hour at minute 15
 - first day of the month
 - jobs that should align with business calendars instead of raw intervals
+
+## Production checklist
+
+- Give every scheduled pipeline a stable `pipeline_id`.
+- Use cron expressions for wall-clock schedules and fixed intervals for simple
+  recurring delays.
+- Pair cron schedules with distributed coordination when the same schedule runs
+  on more than one worker replica.
+- Keep business-calendar exceptions in application code unless they become a
+  reusable scheduling abstraction.
 
 ## Sample
 

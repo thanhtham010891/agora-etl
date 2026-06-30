@@ -4,6 +4,7 @@
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 VENV   := .venv
+BOOTSTRAP_PYTHON ?= $(or $(shell command -v python 2>/dev/null),$(shell command -v python3.11 2>/dev/null),$(shell command -v python3 2>/dev/null))
 PYTHON := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 RUFF   := $(VENV)/bin/ruff
@@ -19,7 +20,7 @@ help:  ## Show available targets
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 setup:  ## Create .venv and install all dependencies (first-time setup)
-	python3.11 -m venv $(VENV)
+	$(BOOTSTRAP_PYTHON) -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) cache purge
 	$(PIP) install -e ".[file,dev,benchmark]"

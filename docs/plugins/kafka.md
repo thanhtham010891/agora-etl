@@ -1,9 +1,13 @@
 # Kafka Plugins
 
-_When to read this: your pipeline boundary is Kafka topics and partitions rather than files or direct database reads._
+_When to read this: your pipeline boundary is Kafka topics, partitions,
+consumer groups, schema registry contracts, or Kafka-backed replay._
 
-Use the Kafka family when your pipeline lives on topics, partitions, and
-consumer groups rather than on files or direct database reads.
+The Kafka family in `agora-etl-plugins 0.4.x` is a production-ready flagship
+backend. It is no longer just a source/sink pair: it includes topic ingestion,
+topic publishing, poison-record handling, Kafka-backed DLQ/replay,
+schema-registry serializers, optional OpenTelemetry propagation, runtime
+metrics, and transactional delivery hooks.
 
 ## Install
 
@@ -11,81 +15,109 @@ consumer groups rather than on files or direct database reads.
 pip install "agora-etl-plugins[kafka]"
 ```
 
-## When Kafka is a good fit
+The extra installs `aiokafka`, `fastavro`, `jsonschema`, and `protobuf`.
 
-- ingest records from one or more topics
-- fan out processed records to downstream topics
-- keep producer and consumer behavior async and backpressure-aware
-- use schema-registry-backed Avro payloads
+## Public surface
 
-## What the Kafka family includes
+| Component | Kind | Use it for |
+|---|---|---|
+| `KafkaSource` | Source | Consuming topics, topic patterns, or manual partition assignments. |
+| `KafkaSink` | Sink | Publishing records with bounded pending acks, idempotent defaults, optional transactions, and per-record routing. |
+| `KafkaSinkMessage` | Envelope | Overriding topic, key, partition, headers, timestamp, or value per record. |
+| `KafkaDLQSink` | DLQ sink | Writing failed records to a compactable Kafka error topic. |
+| `KafkaDLQSource` | DLQ source | Reconstructing replayable DLQ state from Kafka put/delete envelopes. |
+| `KafkaSecurityConfig`, `KafkaTLSConfig`, `KafkaSASLConfig` | Config | First-class PLAINTEXT, SSL, SASL_PLAINTEXT, and SASL_SSL wiring. |
+| `ConfluentSchemaRegistryClient` | Schema registry | Standard HTTP registry client. |
+| `PooledConfluentSchemaRegistryClient` | Schema registry | Reused transport for heavier registry traffic. |
+| `AvroSchemaRegistrySerializer` / `Deserializer` | Serializer | Confluent wire-format Avro. |
+| `JsonSchemaRegistrySerializer` / `Deserializer` | Serializer | Confluent wire-format JSON Schema with optional payload validation. |
+| `ProtobufSchemaRegistrySerializer` / `Deserializer` | Serializer | Confluent wire-format Protobuf with message-index binding checks. |
+| `KafkaOpenTelemetryTracing` | Observability | Fail-open W3C trace propagation through Kafka headers. |
+| `KafkaSourceRuntime`, `KafkaTransformSinkRuntime` | Runtime helpers | Advanced source/sink runtime coordination and transactional offset handoff. |
+| `KafkaSourcePrometheusExporter`, `KafkaDLQPrometheusExporter` | Observability | Rendering source and DLQ metrics snapshots as Prometheus text. |
 
-### Kafka source
+Entry-points installed by the package:
 
-`KafkaSource` is an async consumer backed by `aiokafka`.
+| Group | Key | Target |
+|---|---|---|
+| `agora.sources` | `kafka` | `KafkaSource` |
+| `agora.sources` | `kafka_dlq_source` | `KafkaDLQSource` |
+| `agora.sinks` | `kafka` | `KafkaSink` |
+| `agora.sinks` | `kafka_dlq` | `KafkaDLQSink` |
 
-It supports:
+## KafkaSource
 
-- multiple topics
-- explicit consumer groups
-- checkpoint-aware resume through topic-partition offsets
-- configurable commit cadence
-- fail-closed or log-and-continue deserialize error handling
+`KafkaSource` is an async `aiokafka` consumer with checkpoint support.
 
-Startup and shutdown paths are cleanup-aware, so failed startup or final commit
-problems do not silently skip consumer teardown.
+It can subscribe by:
 
-Use it when Agora should sit directly on top of a Kafka consumer flow instead
-of polling an API or reading files.
+- `topics=["orders.raw"]`
+- `topic_pattern="orders\\..*"`
+- `assignments=[("orders.raw", 0), ("orders.raw", 1)]`
 
-### Kafka sink
+Important constructor options:
 
-`KafkaSink` is an async producer sink.
+| Option | Meaning |
+|---|---|
+| `group_id` | Consumer-group identity. Keep stable for production resume. |
+| `deserializer` | Sync or async callable. May accept Kafka metadata when its signature supports it. |
+| `batch_deserializer` | Optional callable for decoding one Kafka message into multiple records. |
+| `enable_auto_commit=False` | Default manual offset discipline. |
+| `commit_every=100` | Manual commit cadence. |
+| `start_offsets` | Exact topic-partition offsets to seek at startup. |
+| `rebalance_listener` | Optional listener wrapped by the source. |
+| `on_deserialize_error` | Core source failure policy. |
+| `poison_record_policy` | Kafka-specific poison handling. |
+| `poison_record_sink` | Required when a DLQ poison policy is selected. |
+| `tracing` | `False`, `True`, or a `KafkaOpenTelemetryTracing` instance. |
 
-It is built around a few strong defaults:
+Runtime methods/operators can also call:
 
-- bounded pending acknowledgements
-- producer flush on shutdown
-- retries around send and flush
-- idempotence enabled by default
-- `acks=all` enforced when idempotence is on
+- `commit_now()` to flush tracked offsets immediately
+- `seek_to_offsets(...)` for operator-driven repositioning
+- `runtime_metrics()` and `operational_metrics()`
+- health/partition snapshots through exported source health models
 
-That makes it a good fit for pipelines where delivery discipline matters more
-than chasing the absolute loosest producer settings.
+## KafkaSink
 
-If producer startup fails, serializer lifecycle is rolled back instead of being
-left half-open, and the producer object is cleaned up best-effort as well.
+`KafkaSink` is an async `aiokafka` producer sink.
 
-Batch writes also stay on a leaner success path, so synchronous serializers do
-not pay extra coroutine/inspection churn on every record in a healthy producer
-run.
+Production defaults are intentionally conservative:
 
-Async callable serializers are also supported, including serializer objects
-that expose `open()` and `close()` lifecycle hooks.
+- `linger_ms=5`
+- `compression_type="gzip"`
+- `enable_idempotence=True`
+- `acks="all"` when idempotence is enabled
+- retry on Kafka send/flush failures
+- bounded in-flight delivery futures through `max_pending_acks`
 
-### Schema registry helpers
+Important constructor options:
 
-The Kafka family also ships Confluent-compatible schema registry helpers.
+| Option | Meaning |
+|---|---|
+| `serializer` | Sync/async callable returning bytes. Serializer objects may expose `open()` and `close()`. |
+| `message_fn` | Full per-record `KafkaSinkMessage` override. |
+| `topic_fn`, `key_fn`, `partition_fn`, `headers_fn`, `timestamp_ms_fn` | Narrow per-record routing hooks. |
+| `transactional_id` | Enables Kafka transactions. |
+| `transaction_per_batch=True` | Wraps each batch in a transaction; requires `transactional_id`. |
+| `security` | First-class Kafka security config. |
+| `tracing` | Injects trace headers and emits producer/client spans when enabled. |
 
-This includes:
+Use `message_fn` when record-level routing needs more than a key or header:
 
-- a minimal schema registry client
-- Avro serializer using Confluent wire format
-- Avro deserializer that resolves writer schemas by schema ID
+```python
+from agora_plugins.kafka import KafkaSinkMessage
 
-Use these when:
 
-- topics are schema-managed
-- different services need the same payload contract
-- you want registry-backed Avro without adding another integration layer
-
-Registry subjects are treated as path segments rather than raw URL fragments, so
-names that include characters like `/` stay safe and unambiguous.
+def route(record: dict) -> KafkaSinkMessage:
+    return KafkaSinkMessage(
+        topic=f"orders.{record['region']}",
+        key=str(record["order_id"]).encode("utf-8"),
+        headers=[("event-type", b"order-updated")],
+    )
+```
 
 ## Quickstart
-
-This example consumes JSON payloads from one topic, enriches them, and publishes
-the result to another topic.
 
 ```python
 import json
@@ -107,8 +139,6 @@ sink = KafkaSink(
     bootstrap_servers="localhost:9092",
     serializer=lambda record: json.dumps(record).encode("utf-8"),
     key_fn=lambda record: str(record["order_id"]).encode("utf-8"),
-    linger_ms=5,
-    compression_type="gzip",
 )
 
 summary = await (
@@ -118,31 +148,38 @@ summary = await (
 )
 ```
 
-What this shows:
+## Secure client configuration
 
-- `KafkaSource` owns the consumer-group edge
-- commits are explicit and cadence-controlled
-- `KafkaSink` is async, bounded, and idempotence-friendly by default
-- record keys are optional but useful when downstream partitioning matters
-
-If you want a preset project instead of starting from an empty file:
-
-```bash
-agora new my-consumer --preset kafka-consumer
-cd my-consumer
-pip install -e '.[dev]'
-```
-
-That scaffold gives a runnable consumer pipeline, test, and local project
-layout to extend.
-
-## Schema registry example
-
-This example uses Confluent-compatible schema registry helpers so both the
-consumer and producer work with Avro payloads instead of raw JSON.
+Prefer `KafkaSecurityConfig` for new code. It validates protocol/SASL/TLS
+combinations before `aiokafka` sees them.
 
 ```python
-from agora import DeliveryConfig, Pipeline
+from pydantic import SecretStr
+
+from agora_plugins.kafka import KafkaSASLConfig, KafkaSecurityConfig, KafkaTLSConfig
+
+
+security = KafkaSecurityConfig(
+    security_protocol="SASL_SSL",
+    tls=KafkaTLSConfig(cafile="/etc/ssl/certs/ca.pem"),
+    sasl=KafkaSASLConfig(
+        mechanism="SCRAM-SHA-512",
+        username="etl",
+        password=SecretStr("secret"),
+    ),
+)
+```
+
+Supported security protocols are `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and
+`SASL_SSL`. Supported SASL mechanisms include `PLAIN`, `SCRAM-SHA-256`,
+`SCRAM-SHA-512`, `OAUTHBEARER`, and `GSSAPI`.
+
+## Schema registry
+
+Schema registry serializers are lifecycle-aware: the runtime opens them before
+use, resolves or registers the schema, then calls them as serializers.
+
+```python
 from agora_plugins.kafka import (
     AvroSchemaRegistryDeserializer,
     AvroSchemaRegistrySerializer,
@@ -154,7 +191,7 @@ from agora_plugins.kafka import (
 
 registry = ConfluentSchemaRegistryClient("http://localhost:8081")
 
-event_schema = {
+schema = {
     "type": "record",
     "name": "OrderEvent",
     "fields": [
@@ -163,63 +200,110 @@ event_schema = {
     ],
 }
 
-summary = await (
-    Pipeline(
-        KafkaSource(
-            topics=["orders.raw"],
-            bootstrap_servers="localhost:9092",
-            group_id="orders-avro",
-            deserializer=AvroSchemaRegistryDeserializer(
-                registry_client=registry,
-            ),
-        )
-    )
-    .build(
-        KafkaSink(
-            topic="orders.validated",
-            bootstrap_servers="localhost:9092",
-            serializer=AvroSchemaRegistrySerializer(
-                registry_client=registry,
-                subject="orders.validated-value",
-                schema=event_schema,
-            ),
-        ),
-        config=DeliveryConfig(batch_size=100),
-    )
-    .run(max_records=1_000)
+source = KafkaSource(
+    topics=["orders.raw"],
+    bootstrap_servers="localhost:9092",
+    group_id="orders-avro",
+    deserializer=AvroSchemaRegistryDeserializer(registry_client=registry),
+)
+
+sink = KafkaSink(
+    topic="orders.validated",
+    bootstrap_servers="localhost:9092",
+    serializer=AvroSchemaRegistrySerializer(
+        registry_client=registry,
+        subject="orders.validated-value",
+        schema=schema,
+        auto_register="missing_subject",
+    ),
 )
 ```
 
-Use this when multiple services share the same topic contract and you want the
-wire format to stay registry-governed.
+`auto_register` accepts the schema auto-register modes exported by the package.
+For governed production topics, prefer an explicit mode such as
+`"missing_subject"` or disabled registration rather than silently mutating
+schemas in every environment.
 
-## Common patterns
+## DLQ and poison records
 
-### Topic to topic enrichment
+Use `KafkaDLQSink` when poison records should stay inside Kafka:
 
-- consume raw events from Kafka
-- normalize or enrich in middleware
-- publish the cleaned record to a downstream topic
+```python
+from agora.core.types import SourceRecordFailurePolicy
+from agora_plugins.kafka import KafkaDLQSink, KafkaPoisonRecordPolicy, KafkaSource
 
-### Kafka as the shared event backbone
 
-- ingest from Kafka
-- branch to PostgreSQL, files, or APIs through sinks
-- keep Kafka as the durable event log
+dlq = KafkaDLQSink(
+    topic="orders.dlq",
+    bootstrap_servers="localhost:9092",
+)
 
-### Schema-governed pipelines
+source = KafkaSource(
+    topics=["orders.raw"],
+    bootstrap_servers="localhost:9092",
+    group_id="orders-worker",
+    deserializer=decode_order,
+    on_deserialize_error=SourceRecordFailurePolicy.FAIL_CLOSED,
+    poison_record_policy=KafkaPoisonRecordPolicy.DLQ_AND_CONTINUE,
+    poison_record_sink=dlq,
+)
+```
 
-- deserialize Avro using the registry
-- transform as Python records
-- serialize back with the matching subject contract
+`KafkaDLQSink` writes upsert/delete envelopes keyed by a stable storage key.
+`KafkaDLQSource` reconstructs the current replayable state by scanning the DLQ
+topic, applying deletes, and optionally filtering by `pipeline_id`, `stage`,
+and `limit`.
+
+For large DLQ topics, `KafkaDLQSource(compaction_spill_threshold=...)` can spill
+compaction state instead of keeping everything in memory. Set
+`payload_policy` when redacted or encrypted DLQ payloads are used.
+
+## Observability
+
+Kafka components expose metrics snapshots and Prometheus renderers:
+
+- `KafkaSourceRuntime.metrics_snapshot()`
+- `KafkaSourceRuntime.render_prometheus_metrics()`
+- `KafkaDLQSink.metrics_snapshot()`
+- `KafkaDLQSource.metrics_snapshot()`
+- `KafkaDLQPrometheusExporter`
+
+Tracing is opt-in and fail-open:
+
+```python
+from agora_plugins.kafka import KafkaOpenTelemetryTracing, KafkaSink
+
+
+sink = KafkaSink(
+    topic="orders.cleaned",
+    bootstrap_servers="localhost:9092",
+    serializer=encode,
+    tracing=KafkaOpenTelemetryTracing(enabled=True),
+)
+```
+
+If OpenTelemetry is not installed or propagation fails, Kafka processing
+continues and logs a warning.
+
+## Production checklist
+
+- Keep `group_id` stable for resumable consumers.
+- Leave `enable_auto_commit=False` unless the application explicitly owns the
+  weaker offset discipline.
+- Keep producer idempotence enabled and use `acks=all`.
+- Use `transactional_id` only when the broker/topic setup supports Kafka
+  transactions and operators understand transaction timeout behavior.
+- Route poison records to `KafkaDLQSink` or another DLQ before unattended
+  production runs.
+- Use schema-registry serializers for governed topics.
+- Treat tracing as deployment policy: it propagates headers and emits spans, so
+  the telemetry backend must be trusted for that data.
 
 ## Boundaries
 
-Kafka is the right choice when event transport, partitioned throughput, and
-consumer-group coordination are already part of your system design.
+Kafka is the right fit when event transport, partitioned throughput,
+consumer-group coordination, and replayable topic history are core to the
+system design.
 
-It is usually the wrong choice when:
-
-- the pipeline is really a one-off file import
-- a single relational query is your source of truth
-- the team does not want to operate topic and broker concerns
+It is the wrong fit for one-off imports, simple relational extraction, or teams
+that do not want to operate broker/topic semantics.

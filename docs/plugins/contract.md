@@ -2,7 +2,13 @@
 
 _When to read this: you are building a third-party plugin package and need to know which extension points are safe to build on, and what the compatibility expectations are in the current `0.4.x` public contract._
 
-This page is the single source of truth for the plugin author contract. It is the plugin-layer equivalent of [Runtime Guarantees](../guides/runtime-guarantees.md).
+This page is the single source of truth for the plugin author contract. It is
+the plugin-layer equivalent of [Runtime Guarantees](../guides/runtime-guarantees.md).
+
+For the `agora-etl` `0.4.2` production metadata release, the important promise
+is simple: the plugin contract remains on the `0.4.x` line. The release changes
+docs and public maturity metadata; it does not change the plugin manifest
+schema.
 
 ## Stability labels
 
@@ -177,7 +183,7 @@ sink_spec = sink_data_plane_spec(MySink())
 ```
 
 Those helpers use the same normalization and validation path the runtime uses.
-In `0.4.0`, plugin sources and sinks must declare explicit data-plane
+In the `0.4.x` line, plugin sources and sinks must declare explicit data-plane
 contracts. Legacy bool-flag inference is no longer supported.
 
 ### Sinks — `agora.sinks`
@@ -248,6 +254,19 @@ the default plugin boundary. Reach for it only when building runtime-adjacent
 tooling that genuinely needs coordination-level types.
 
 Importing from internal paths may break at any minor release without notice.
+
+## Production release checklist for plugin authors
+
+Before publishing a plugin against the `0.4.x` contract:
+
+1. Register only documented entry-point groups.
+2. Import contracts through public facades, not underscore-prefixed modules.
+3. Declare explicit source and sink data-plane contracts.
+4. Add a package-root `MANIFEST` when compatibility diagnostics matter.
+5. Run `agora plugins list --json` against an installed wheel, not only an
+   editable checkout.
+6. Document which external systems, credentials, and operational guarantees are
+   owned by the plugin versus the application deployment.
 
 ## When this page changes
 

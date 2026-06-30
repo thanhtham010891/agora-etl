@@ -9,6 +9,10 @@ For the compatibility rules behind those entry points, read
 [Plugin Contract](contract.md) alongside this page. This page is about the
 mechanics; the contract page is about what stays stable.
 
+For production plugins, treat the installed wheel as the source of truth. An
+editable checkout can hide missing package data, undeclared dependencies, and
+entry-point drift that only appears after publishing.
+
 ## Entry-point groups
 
 | Group | Purpose |
@@ -43,6 +47,13 @@ After installation:
 
 ```bash
 agora plugins list
+```
+
+For release candidates, also run the JSON form and assert that the expected
+entries are loaded, compatible, and attached to the intended registry:
+
+```bash
+agora plugins list --json
 ```
 
 ## Config-driven usage
@@ -177,3 +188,13 @@ discover_plugins()
 
 In most projects you do not need to call this manually. The CLI and config
 assembly paths load plugin entry points for you.
+
+## Publishing checklist
+
+- Build both sdist and wheel.
+- Install the wheel into a clean environment with the minimum supported
+  `agora-etl` version.
+- Run plugin discovery from the installed package.
+- Run at least one smoke pipeline for each advertised extra.
+- Keep public docs limited to the shipped support boundary; internal roadmap or
+  commercial planning belongs outside package docs.
