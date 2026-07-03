@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -184,6 +186,77 @@ async def test_sqlite_checkpoint_store_persists_resume_state(tmp_path: Path) -> 
     assert second_sink.records == [3]
     assert summary.last_checkpoint is not None
     assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_sqlite_checkpoint_store_loads_from_legacy_backend_schema(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-checkpoint.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE state_store (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO state_store (key, value) VALUES (?, ?)",
+            (
+                "checkpoint:orders",
+                json.dumps(
+                    {
+                        "pipeline_id": "orders",
+                        "run_id": "run-1",
+                        "source": "orders_source",
+                        "value": {"index": 7},
+                        "recorded_at": "2026-01-02T03:04:05+00:00",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = SQLiteCheckpointStore(path=path)
+    try:
+        checkpoint = await store.load("orders")
+        assert checkpoint is not None
+        assert checkpoint.pipeline_id == "orders"
+        assert checkpoint.run_id == "run-1"
+        assert checkpoint.source == "orders_source"
+        assert checkpoint.value == {"index": 7}
+
+        await store.save(
+            "payments",
+            checkpoint.__class__(
+                pipeline_id="payments",
+                run_id="run-2",
+                source="payments_source",
+                value={"index": 9},
+            ),
+        )
+    finally:
+        await store.close()
+
+    check_conn = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1] for row in check_conn.execute("PRAGMA table_info(state_store)").fetchall()
+        }
+        payments_row = check_conn.execute(
+            "SELECT value, expires_at FROM state_store WHERE key = ?",
+            ("checkpoint:payments",),
+        ).fetchone()
+    finally:
+        check_conn.close()
+
+    assert "expires_at" in columns
+    assert payments_row is not None
+    assert json.loads(payments_row[0])["value"] == {"index": 9}
+    assert payments_row[1] is None
 
 
 @pytest.mark.asyncio

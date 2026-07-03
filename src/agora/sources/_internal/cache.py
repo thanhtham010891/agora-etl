@@ -210,8 +210,12 @@ class HttpCache:
     # ------------------------------------------------------------------ #
 
     def stats(self) -> dict[str, int]:
+        cutoff = time.time() - self.ttl
         with self._lock:
-            count = self._execute("SELECT COUNT(*) FROM http_cache").fetchone()[0]
+            count = self._execute(
+                "SELECT COUNT(*) FROM http_cache WHERE cached_at >= ?",
+                (cutoff,),
+            ).fetchone()[0]
         return {
             "http_cache": count,
             "kv_store": self._kv_store.count(),

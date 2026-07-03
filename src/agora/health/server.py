@@ -135,6 +135,8 @@ class HealthServer:
 
     async def serve(self) -> None:
         """Start the HTTP server.  Blocks until ``stop()`` is called."""
+        if self._server is not None or self._stop_event is not None:
+            raise RuntimeError("HealthServer is already serving")
         self._stop_event = asyncio.Event()
         self._server = await asyncio.start_server(
             self._handle_connection,
@@ -159,6 +161,8 @@ class HealthServer:
         except asyncio.CancelledError:
             pass
         finally:
+            self._server = None
+            self._stop_event = None
             logger.info("health_server_stopped", port=self._port)
 
     def stop(self) -> None:
@@ -192,6 +196,10 @@ class HealthServer:
                 return hmac.compare_digest(value, expected)
         return False
 
+    @staticmethod
+    def _requires_auth(path: str) -> bool:
+        return path in {"/health", "/metrics", "/ready"}
+
     async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
@@ -217,7 +225,7 @@ class HealthServer:
             return
 
         method, path = _parse_request_line(raw_request)
-        if not self._check_auth(raw_request):
+        if self._requires_auth(path) and not self._check_auth(raw_request):
             _write_response(
                 writer,
                 _HTTP_401,

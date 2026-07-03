@@ -200,6 +200,10 @@ def _ensure_sqlite_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dlq_records ADD COLUMN processed_record TEXT")
     if "details" not in existing:
         conn.execute("ALTER TABLE dlq_records ADD COLUMN details TEXT")
+    if "attempt" not in existing:
+        conn.execute("ALTER TABLE dlq_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0")
+    if "max_attempts" not in existing:
+        conn.execute("ALTER TABLE dlq_records ADD COLUMN max_attempts INTEGER")
     conn.commit()
 
 

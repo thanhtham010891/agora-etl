@@ -281,7 +281,6 @@ async def test_pipeline_tracing_captures_arrow_fast_path_metadata() -> None:
 @pytest.mark.asyncio
 async def test_noop_tracer_trace_span_returns_singleton_and_allocates_no_spans() -> None:
     from agora.core.context import PipelineContext
-    from agora.core.context._tracing import _NOOP_SPAN_SCOPE
     from agora.core.metrics import PipelineMetrics
     from agora.core.tracing import NoopTracer
 
@@ -294,12 +293,11 @@ async def test_noop_tracer_trace_span_returns_singleton_and_allocates_no_spans()
     scope1 = ctx.trace_span("middleware.process", middleware="m1")
     scope2 = ctx.trace_span("writer.write", writer="SinkFanOut")
 
-    assert scope1 is _NOOP_SPAN_SCOPE
-    assert scope2 is _NOOP_SPAN_SCOPE
-    assert ctx._trace_stack == []
+    assert scope1 is scope2
+    assert ctx.trace_depth == 0
 
     with ctx.trace_span("some.span"):
-        assert ctx._trace_stack == []
+        assert ctx.trace_depth == 0
 
 
 @pytest.mark.asyncio
@@ -315,12 +313,12 @@ async def test_real_tracer_trace_span_pushes_and_pops_stack() -> None:
     )
 
     with ctx.trace_span("outer", key="val") as outer_span:
-        assert len(ctx._trace_stack) == 1
+        assert ctx.trace_depth == 1
         assert ctx.current_span() is outer_span
         with ctx.trace_span("inner"):
-            assert len(ctx._trace_stack) == 2
-        assert len(ctx._trace_stack) == 1
-    assert ctx._trace_stack == []
+            assert ctx.trace_depth == 2
+        assert ctx.trace_depth == 1
+    assert ctx.trace_depth == 0
     assert len(tracer.spans) == 2
     assert tracer.spans[0].name == "outer"
     assert tracer.spans[0].attributes["key"] == "val"
@@ -361,23 +359,23 @@ async def test_inmemory_tracer_shared_attributes_use_copy_on_write_for_error_fla
         "execution_mode": "linear",
     }
 
-    span = ctx._start_trace_span(
+    span = ctx.start_trace_span(
         "middleware.process",
         attributes=shared_attrs,
         normalize=False,
         share_attributes=True,
     )
     assert span is not None
-    ctx._finish_trace_span(span, RuntimeError("boom"))
+    ctx.finish_trace_span(span, RuntimeError("boom"))
 
-    second_span = ctx._start_trace_span(
+    second_span = ctx.start_trace_span(
         "middleware.process",
         attributes=shared_attrs,
         normalize=False,
         share_attributes=True,
     )
     assert second_span is not None
-    ctx._finish_trace_span(second_span)
+    ctx.finish_trace_span(second_span)
 
     assert shared_attrs == {
         "middleware": "shared_stage",

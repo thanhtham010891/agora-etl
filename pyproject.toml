@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agora-etl"
-version = "0.4.2"
+version = "0.4.3"
 description = "Agora — async-first ETL framework for Python."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -119,6 +119,7 @@ markers = [
     "contract: public runtime, recovery, and preservation contract suites",
     "integration: requires external services such as Kafka, Postgres, or Redis",
     "preservation: broader baseline compatibility suites",
+    "requires_process_pool: requires working multiprocessing process pools",
 ]
 
 [tool.mypy]

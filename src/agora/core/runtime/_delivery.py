@@ -266,6 +266,8 @@ class DeliveryEngine:
             state.ctx.metrics.records_errored += 1
             if self.dlq_sink is not None and not routed:
                 await state.ctx.discard_success_hooks(failure.record)
+                if self.checkpoint_store is not None and checkpoint_value is not None:
+                    raise RecordDeliveryError(failure.exception) from failure.exception
                 return
         else:
             state.ctx.metrics.records_dropped += 1

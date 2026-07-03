@@ -129,6 +129,37 @@ class PipelineContext:
             return None
         return self._trace_stack[-1]
 
+    @property
+    def trace_depth(self) -> int:
+        """Return the current nesting depth of active trace spans."""
+        return len(self._trace_stack)
+
+    def start_trace_span(
+        self,
+        name: str,
+        *,
+        attributes: dict[str, Any] | None = None,
+        normalize: bool = True,
+        push: bool = True,
+        share_attributes: bool = False,
+    ) -> TraceSpan | None:
+        """Start a span using the same fast-path rules as runtime internals."""
+        return self._start_trace_span(
+            name,
+            attributes=attributes,
+            normalize=normalize,
+            push=push,
+            share_attributes=share_attributes,
+        )
+
+    def finish_trace_span(
+        self,
+        span: TraceSpan | None,
+        exc: BaseException | None = None,
+    ) -> None:
+        """Finish a span previously created by ``start_trace_span()``."""
+        self._finish_trace_span(span, exc)
+
     def _start_trace_span(
         self,
         name: str,

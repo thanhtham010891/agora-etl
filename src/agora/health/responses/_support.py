@@ -10,6 +10,7 @@ from agora.health.responses._models import ResponseSpec
 
 HTTP_200 = b"HTTP/1.1 200 OK\r\n"
 HTTP_301 = b"HTTP/1.1 301 Moved Permanently\r\n"
+HTTP_405 = b"HTTP/1.1 405 Method Not Allowed\r\n"
 HTTP_404 = b"HTTP/1.1 404 Not Found\r\n"
 HTTP_503 = b"HTTP/1.1 503 Service Unavailable\r\n"
 

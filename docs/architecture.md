@@ -43,7 +43,12 @@ Every pipeline is composed of five parts. Understanding what each one owns makes
 
 **Source** emits records via an async generator. It owns the cursor into the data — file position, page number, Kafka offset, whatever makes sense for that source. The runtime never pulls faster than the source yields.
 
-**MiddlewareChain** is the ordered list of middlewares you registered with `.pipe()`. Records flow through it left to right. If any middleware returns `None`, the record is dropped and does not continue. If any middleware raises, the record is routed to the DLQ (if configured) and the chain stops for that record.
+**MiddlewareChain** is the ordered list of middlewares you registered with
+`.pipe()`. Records flow through it left to right. If any middleware returns
+`None`, the record is dropped and does not continue. If any middleware raises,
+the runtime attempts DLQ routing (if configured) and the chain stops for that
+record. Later records do not advance checkpoint state past that failure unless
+the record reaches a handled terminal outcome.
 
 **Writer** delivers processed records to one or more sinks. It handles fan-out,
 batching, sink concurrency, and native batch write result normalization. You

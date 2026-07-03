@@ -30,6 +30,8 @@ from agora.core.runtime._process import (
 from agora.core.runtime._process_codec import ArrowBatchCodec, BatchCodecError, PythonObjectCodec
 from agora.middlewares.process import ArrowProcessBatchMiddleware, ProcessBatchMiddleware
 
+requires_process_pool = pytest.mark.requires_process_pool
+
 # ======================================================================
 # Helpers
 # ======================================================================
@@ -245,6 +247,7 @@ def test_arrow_batch_codec_rejects_row_count_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_returns_batch_result() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     codec = PythonObjectCodec()
@@ -263,6 +266,7 @@ async def test_runner_returns_batch_result() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_raises_process_batch_error_on_worker_exception() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     codec = PythonObjectCodec()
@@ -284,6 +288,7 @@ async def test_runner_raises_process_batch_error_on_worker_exception() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_raises_process_batch_error_on_timeout() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     codec = PythonObjectCodec()
@@ -303,6 +308,7 @@ async def test_runner_raises_process_batch_error_on_timeout() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_drain_reports_pending_work_after_timeout() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     codec = PythonObjectCodec()
@@ -322,6 +328,7 @@ async def test_runner_drain_reports_pending_work_after_timeout() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_raises_when_closed() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     codec = PythonObjectCodec()
@@ -332,6 +339,7 @@ async def test_runner_raises_when_closed() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_runner_uses_codec_worker_wrapper() -> None:
     runner = ProcessPoolRunner(max_workers=1, middleware_name="test")
     runner.open()
@@ -369,6 +377,7 @@ def test_runner_open_surfaces_process_pool_unavailable_error(
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_transforms_batch() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_double, max_workers=1, name="doubler"
@@ -383,6 +392,7 @@ async def test_middleware_transforms_batch() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_multiple_batches_ordered() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_double, max_workers=2, max_in_flight_batches=4, name="doubler"
@@ -409,6 +419,7 @@ async def test_middleware_raises_before_on_start() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_worker_exception_propagates() -> None:
     mw: ProcessBatchMiddleware[Any, Any] = ProcessBatchMiddleware(
         fn=_raise_value_error, max_workers=1, name="failing"
@@ -432,6 +443,7 @@ async def test_middleware_rejects_per_record_execution() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_result_length_mismatch_raises() -> None:
     mw: ProcessBatchMiddleware[Any, Any] = ProcessBatchMiddleware(
         fn=_drop_one, max_workers=1, name="bad_length"
@@ -446,6 +458,7 @@ async def test_middleware_result_length_mismatch_raises() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_on_stop_is_idempotent() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(fn=_double, max_workers=1)
     ctx = _make_ctx()
@@ -470,6 +483,7 @@ async def test_middleware_rejects_unordered_pipelined_mode_for_now() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_apply_in_batch_returns_failure_on_worker_error() -> None:
     """apply_in_batch (called by MiddlewareChain) must return BatchProcessResult on failure."""
     from agora.core.batch import BatchProcessResult
@@ -491,6 +505,7 @@ async def test_middleware_apply_in_batch_returns_failure_on_worker_error() -> No
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_metrics_not_double_counted_in_apply_in_batch() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_double, max_workers=1, name="metrics"
@@ -510,6 +525,7 @@ async def test_middleware_metrics_not_double_counted_in_apply_in_batch() -> None
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_recycles_pool_after_timeout_and_next_batch_succeeds() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_timeout_then_double,
@@ -534,6 +550,7 @@ async def test_middleware_recycles_pool_after_timeout_and_next_batch_succeeds() 
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_process_batch_submit_batch_returns_concurrent_tasks() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_sleepy_double,
@@ -559,6 +576,7 @@ async def test_process_batch_submit_batch_returns_concurrent_tasks() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_timeout_invalidates_unresolved_sibling_batch_in_same_generation() -> None:
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
         fn=_timeout_then_invalidate_sibling,
@@ -596,6 +614,7 @@ async def test_timeout_invalidates_unresolved_sibling_batch_in_same_generation()
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_repeated_runs_do_not_leak_resources() -> None:
     """on_start / on_stop cycles must not leak process pool resources."""
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
@@ -621,6 +640,7 @@ async def test_middleware_on_stop_without_on_start_is_safe() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_clean_shutdown_after_successful_run() -> None:
     """Pool shuts down cleanly after a normal pipeline run."""
     mw: ProcessBatchMiddleware[int, int] = ProcessBatchMiddleware(
@@ -636,6 +656,7 @@ async def test_middleware_clean_shutdown_after_successful_run() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_middleware_pool_closed_after_worker_failure() -> None:
     """Pool must close cleanly even when the last batch raised a worker error."""
     mw: ProcessBatchMiddleware[Any, Any] = ProcessBatchMiddleware(
@@ -677,6 +698,7 @@ async def test_middleware_on_start_surfaces_process_pool_unavailable_error(
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_arrow_process_middleware_transforms_record_batch() -> None:
     pa = pytest.importorskip("pyarrow")
     mw = ArrowProcessBatchMiddleware(fn=_arrow_double, max_workers=1, name="arrow_doubler")
@@ -692,6 +714,7 @@ async def test_arrow_process_middleware_transforms_record_batch() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_arrow_process_middleware_rejects_row_count_change() -> None:
     pa = pytest.importorskip("pyarrow")
     mw = ArrowProcessBatchMiddleware(fn=_arrow_drop_row, max_workers=1, name="arrow_bad_rows")
@@ -706,6 +729,7 @@ async def test_arrow_process_middleware_rejects_row_count_change() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_arrow_process_middleware_recycles_pool_after_timeout() -> None:
     pa = pytest.importorskip("pyarrow")
     mw = ArrowProcessBatchMiddleware(
@@ -738,6 +762,7 @@ async def test_arrow_process_middleware_recycles_pool_after_timeout() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_process_batch_error_includes_middleware_name() -> None:
     mw: ProcessBatchMiddleware[Any, Any] = ProcessBatchMiddleware(
         fn=_raise_value_error, max_workers=1, name="named_mw"
@@ -753,6 +778,7 @@ async def test_process_batch_error_includes_middleware_name() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_process_batch_error_includes_batch_index() -> None:
     from agora.core.runtime._process import ProcessBatchError
 
@@ -771,6 +797,7 @@ async def test_process_batch_error_includes_batch_index() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_timeout_error_includes_timed_out_flag() -> None:
     from agora.core.runtime._process import ProcessBatchError
 
@@ -789,6 +816,7 @@ async def test_timeout_error_includes_timed_out_flag() -> None:
 
 
 @pytest.mark.asyncio
+@requires_process_pool
 async def test_non_pickleable_fn_fails_at_submission() -> None:
     """A lambda (non-pickleable) must fail clearly, not silently hang."""
     from agora.core.runtime._process import ProcessBatchError

@@ -8,7 +8,9 @@ All tests are purely in-process — no external services needed.
 from __future__ import annotations
 
 import asyncio
+import signal
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -220,6 +222,53 @@ class TestScheduledPipeline:
         await sp.start()
         assert len(completed) == 1
 
+    async def test_observers_property_returns_snapshot(self) -> None:
+        factory, _ = _make_factory()
+        called: list[str] = []
+
+        async def observer(record: RunRecord) -> None:
+            del record
+            called.append("base")
+
+        async def injected(record: RunRecord) -> None:
+            del record
+            called.append("injected")
+
+        sp = ScheduledPipeline(factory=factory, schedule=Schedule.once())
+        sp.add_observer(observer)
+        observers = sp.observers
+        observers.append(injected)
+
+        await sp.start()
+
+        assert called == ["base"]
+
+    async def test_observer_added_during_notification_runs_on_next_run_only(self) -> None:
+        factory, _ = _make_factory()
+        called: list[str] = []
+        added = False
+
+        async def late_observer(record: RunRecord) -> None:
+            del record
+            called.append("late")
+
+        async def observer(record: RunRecord) -> None:
+            nonlocal added
+            del record
+            called.append("base")
+            if not added:
+                sp.add_observer(late_observer)
+                added = True
+
+        sp = ScheduledPipeline(factory=factory, schedule=Schedule.once())
+        sp.add_observer(observer)
+
+        await sp.start()
+        assert called == ["base"]
+
+        await sp.start()
+        assert called == ["base", "base", "late"]
+
     async def test_error_backoff_is_interruptible(self) -> None:
         """stop() must wake error backoff immediately (B1 fix).
 
@@ -274,8 +323,73 @@ class TestScheduledPipeline:
         await sp.start()
         assert waits == [1, 2]
 
+    async def test_skipped_interval_run_retries_on_schedule_cadence(self) -> None:
+        build_calls = 0
+        hook_calls = 0
+
+        async def factory():
+            nonlocal build_calls
+            build_calls += 1
+            raise AssertionError("factory should not run when pre_run_hook skips")
+
+        sp = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.every(seconds=0.01),
+        )
+
+        async def hook() -> bool:
+            nonlocal hook_calls
+            hook_calls += 1
+            if hook_calls >= 2:
+                sp.stop()
+            return False
+
+        sp.set_pre_run_hook(hook)
+
+        start = time.monotonic()
+        await asyncio.wait_for(sp.start(), timeout=0.5)
+        elapsed = time.monotonic() - start
+
+        assert hook_calls == 2
+        assert build_calls == 0
+        assert elapsed < 0.3
+
 
 class TestWorkerPool:
+    def test_worker_pool_rejects_duplicate_pipeline_instance(self) -> None:
+        factory, _ = _make_factory()
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="dup_instance",
+        )
+        pool = WorkerPool()
+
+        pool.register(scheduled)
+
+        with pytest.raises(ValueError, match="already registered"):
+            pool.register(scheduled)
+
+    def test_worker_pool_rejects_duplicate_pipeline_id(self) -> None:
+        factory, _ = _make_factory()
+        pool = WorkerPool()
+        pool.register(
+            ScheduledPipeline(
+                factory=factory,
+                schedule=Schedule.once(),
+                pipeline_id="dup_id",
+            )
+        )
+
+        with pytest.raises(ValueError, match="pipeline_id 'dup_id' is already registered"):
+            pool.register(
+                ScheduledPipeline(
+                    factory=factory,
+                    schedule=Schedule.once(),
+                    pipeline_id="dup_id",
+                )
+            )
+
     async def test_worker_pool_returns_when_all_once_pipelines_complete(self) -> None:
         async def factory():
             class SuccessPipeline:
@@ -361,6 +475,148 @@ class TestWorkerPool:
         with pytest.raises(RuntimeError, match="health exploded"):
             await pool.run()
 
+    async def test_worker_pool_stops_started_coordinator_when_metrics_registration_fails(
+        self,
+    ) -> None:
+        class FailingMetrics:
+            async def register_pipeline(self, pipeline_id: str, schedule: str) -> None:
+                del pipeline_id, schedule
+                raise RuntimeError("metrics exploded")
+
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.start_calls = 0
+                self.stop_calls = 0
+                self.callback = None
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+                self.start_calls += 1
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                del pipeline_id, run_number
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                del pipeline_id
+
+            def set_lease_lost_callback(self, callback) -> None:
+                self.callback = callback
+
+            async def list_workers(self):
+                return []
+
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        coordinator = FakeCoordinator()
+        pool = WorkerPool(metrics=FailingMetrics(), coordinator=coordinator)
+        pool.register(
+            ScheduledPipeline(factory=factory, schedule=Schedule.once(), pipeline_id="once_a")
+        )
+
+        with pytest.raises(RuntimeError, match="metrics exploded"):
+            await pool.run()
+
+        assert coordinator.start_calls == 1
+        assert coordinator.stop_calls == 1
+        assert pool._tasks == []
+        assert pool._shutdown_event is None
+
+    async def test_worker_pool_cleans_up_when_health_server_init_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class LoopProxy:
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                self._loop = loop
+                self.added: list[signal.Signals] = []
+                self.removed: list[signal.Signals] = []
+
+            def add_signal_handler(self, sig: signal.Signals, callback, *args) -> None:
+                del callback, args
+                self.added.append(sig)
+
+            def remove_signal_handler(self, sig: signal.Signals) -> bool:
+                self.removed.append(sig)
+                return True
+
+            def __getattr__(self, name: str):
+                return getattr(self._loop, name)
+
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.start_calls = 0
+                self.stop_calls = 0
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+                self.start_calls += 1
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                del pipeline_id, run_number
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                del pipeline_id
+
+            def set_lease_lost_callback(self, callback) -> None:
+                self.callback = callback
+
+            async def list_workers(self):
+                return []
+
+        class FailingHealthServer:
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+                raise RuntimeError("health init exploded")
+
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    await asyncio.sleep(10.0)
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        import agora.health
+        import agora.runner.worker as worker_module
+
+        monkeypatch.setattr(agora.health, "HealthServer", FailingHealthServer)
+        loop_proxy = LoopProxy(asyncio.get_running_loop())
+        monkeypatch.setattr(worker_module.asyncio, "get_running_loop", lambda: loop_proxy)
+
+        coordinator = FakeCoordinator()
+        pool = WorkerPool(
+            health_port=8080,
+            graceful_shutdown_timeout=0.01,
+            coordinator=coordinator,
+        )
+        pool.register(
+            ScheduledPipeline(factory=factory, schedule=Schedule.once(), pipeline_id="once_a")
+        )
+
+        with pytest.raises(RuntimeError, match="health init exploded"):
+            await pool.run()
+
+        assert coordinator.start_calls == 1
+        assert coordinator.stop_calls == 1
+        assert pool._tasks == []
+        assert pool._health_server is None
+        assert pool._shutdown_event is None
+        assert loop_proxy.added == [signal.SIGINT, signal.SIGTERM]
+        assert loop_proxy.removed == [signal.SIGINT, signal.SIGTERM]
+
     async def test_worker_pool_repeated_run_does_not_duplicate_metrics_observers(self) -> None:
         async def factory():
             class SuccessPipeline:
@@ -415,6 +671,50 @@ class TestWorkerPool:
         release.set()
         await asyncio.wait_for(task, timeout=1.0)
 
+    async def test_worker_pool_removes_signal_handlers_after_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class LoopProxy:
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                self._loop = loop
+                self.added: list[signal.Signals] = []
+                self.removed: list[signal.Signals] = []
+
+            def add_signal_handler(self, sig: signal.Signals, callback, *args) -> None:
+                del callback, args
+                self.added.append(sig)
+
+            def remove_signal_handler(self, sig: signal.Signals) -> bool:
+                self.removed.append(sig)
+                return True
+
+            def __getattr__(self, name: str):
+                return getattr(self._loop, name)
+
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    del max_records
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        import agora.runner.worker as worker_module
+
+        loop_proxy = LoopProxy(asyncio.get_running_loop())
+        monkeypatch.setattr(worker_module.asyncio, "get_running_loop", lambda: loop_proxy)
+
+        pool = WorkerPool()
+        pool.register(
+            ScheduledPipeline(factory=factory, schedule=Schedule.once(), pipeline_id="signal_once")
+        )
+
+        await pool.run()
+
+        assert loop_proxy.added == [signal.SIGINT, signal.SIGTERM]
+        assert loop_proxy.removed == [signal.SIGINT, signal.SIGTERM]
+
     async def test_worker_pool_repeated_run_does_not_duplicate_release_observers(self) -> None:
         class FakeCoordinator:
             def __init__(self) -> None:
@@ -467,6 +767,312 @@ class TestWorkerPool:
         assert coordinator.acquire_calls == [("once_coord", 1), ("once_coord", 2)]
         assert coordinator.release_calls == ["once_coord", "once_coord"]
         assert len(scheduled._observers) == 2
+
+    async def test_worker_pool_preserves_existing_pre_run_hook_before_lease_gating(self) -> None:
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.acquire_calls: list[tuple[str, int]] = []
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+
+            async def stop(self) -> None:
+                return None
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                self.acquire_calls.append((pipeline_id, run_number))
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                del pipeline_id
+
+            def set_lease_lost_callback(self, callback) -> None:
+                self._lease_lost_callback = callback
+
+            async def list_workers(self):
+                return []
+
+        hook_calls = 0
+        build_calls = 0
+
+        async def factory():
+            nonlocal build_calls
+            build_calls += 1
+            raise AssertionError("factory should not run when user hook skips")
+
+        async def user_hook() -> bool:
+            nonlocal hook_calls
+            hook_calls += 1
+            return False
+
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="coord_hook",
+            pre_run_hook=user_hook,
+        )
+        pool = WorkerPool(coordinator=FakeCoordinator())
+        pool.register(scheduled)
+
+        await pool.run()
+
+        assert hook_calls == 1
+        assert build_calls == 0
+        assert pool._coordinator is not None
+        assert pool._coordinator.acquire_calls == []
+
+    async def test_worker_pool_composes_live_metrics_callback_with_existing_callback(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        custom_called = asyncio.Event()
+
+        class FakeMetrics:
+            def snapshot(self, *, pipeline_id: str, run_id: str):
+                return _make_fake_summary(
+                    pipeline_id=pipeline_id,
+                    run_id=run_id,
+                    records_consumed=3,
+                    records_written=2,
+                    records_dropped=0,
+                    records_errored=0,
+                    elapsed_seconds=0.5,
+                )
+
+        class FakePipeline:
+            def __init__(self) -> None:
+                self._callback = None
+
+            def set_live_metrics_callback(self, callback) -> None:
+                self._callback = callback
+
+            async def run(self, max_records=None):
+                del max_records
+                started.set()
+                assert self._callback is not None
+
+                class FakeCtx:
+                    def __init__(self) -> None:
+                        self.metrics = FakeMetrics()
+                        self.run_id = "run-live"
+                        self.started_at = datetime.now(UTC)
+
+                await self._callback(FakeCtx())
+                await release.wait()
+                return _make_fake_summary(
+                    pipeline_id="live_composed",
+                    run_id="run-live",
+                    records_consumed=3,
+                    records_written=3,
+                    records_dropped=0,
+                    records_errored=0,
+                    elapsed_seconds=0.5,
+                )
+
+        async def factory():
+            return FakePipeline()
+
+        async def custom_live_metrics_callback(ctx) -> None:
+            del ctx
+            custom_called.set()
+
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="live_composed",
+            live_metrics_callback=custom_live_metrics_callback,
+        )
+        pool = WorkerPool(graceful_shutdown_timeout=0.01)
+        pool.register(scheduled)
+
+        task = asyncio.create_task(pool.run())
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.wait_for(custom_called.wait(), timeout=1.0)
+
+        stats = pool.metrics.get("live_composed")
+        assert stats is not None
+        assert stats.is_running is True
+        assert stats.active_run_id == "run-live"
+        assert stats.live_records_consumed == 3
+        assert stats.live_records_written == 2
+
+        release.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    async def test_worker_pool_rewires_updated_pre_run_hook_without_losing_lease_gating(
+        self,
+    ) -> None:
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.acquire_calls: list[tuple[str, int]] = []
+                self.release_calls: list[str] = []
+
+            async def start(self, worker_id: str, pipeline_ids: list[str]) -> None:
+                del worker_id, pipeline_ids
+
+            async def stop(self) -> None:
+                return None
+
+            async def try_acquire_lease(self, pipeline_id: str, run_number: int) -> bool:
+                self.acquire_calls.append((pipeline_id, run_number))
+                return True
+
+            async def release_lease(self, pipeline_id: str) -> None:
+                self.release_calls.append(pipeline_id)
+
+            def set_lease_lost_callback(self, callback) -> None:
+                self._lease_lost_callback = callback
+
+            async def list_workers(self):
+                return []
+
+        hook_calls = 0
+
+        async def factory():
+            class SuccessPipeline:
+                async def run(self, max_records=None):
+                    return _make_fake_summary(records_consumed=1, records_written=1)
+
+            return SuccessPipeline()
+
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="rewire_hook",
+        )
+        coordinator = FakeCoordinator()
+        pool = WorkerPool(coordinator=coordinator)
+        pool.register(scheduled)
+
+        await pool.run()
+
+        async def user_hook() -> bool:
+            nonlocal hook_calls
+            hook_calls += 1
+            return True
+
+        scheduled.set_pre_run_hook(user_hook)
+        await pool.run()
+
+        assert hook_calls == 1
+        assert coordinator.acquire_calls == [("rewire_hook", 1), ("rewire_hook", 2)]
+        assert coordinator.release_calls == ["rewire_hook", "rewire_hook"]
+
+    async def test_worker_pool_rewires_updated_live_metrics_callback_without_losing_worker_metrics(
+        self,
+    ) -> None:
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+        second_release = asyncio.Event()
+        updated_custom_called = asyncio.Event()
+
+        class FakeMetrics:
+            def __init__(self, *, consumed: int, written: int) -> None:
+                self._consumed = consumed
+                self._written = written
+
+            def snapshot(self, *, pipeline_id: str, run_id: str):
+                return _make_fake_summary(
+                    pipeline_id=pipeline_id,
+                    run_id=run_id,
+                    records_consumed=self._consumed,
+                    records_written=self._written,
+                    records_dropped=0,
+                    records_errored=0,
+                    elapsed_seconds=0.5,
+                )
+
+        class FakePipeline:
+            def __init__(
+                self,
+                *,
+                started_event: asyncio.Event | None,
+                release_event: asyncio.Event,
+                consumed: int,
+                written: int,
+            ) -> None:
+                self._callback = None
+                self._started_event = started_event
+                self._release_event = release_event
+                self._metrics = FakeMetrics(consumed=consumed, written=written)
+
+            def set_live_metrics_callback(self, callback) -> None:
+                self._callback = callback
+
+            async def run(self, max_records=None):
+                del max_records
+                if self._started_event is not None:
+                    self._started_event.set()
+                assert self._callback is not None
+
+                class FakeCtx:
+                    def __init__(self, metrics, run_id: str) -> None:
+                        self.metrics = metrics
+                        self.run_id = run_id
+                        self.started_at = datetime.now(UTC)
+
+                await self._callback(FakeCtx(self._metrics, "run-live"))
+                await self._release_event.wait()
+                return _make_fake_summary(
+                    pipeline_id="rewire_live",
+                    run_id="run-live",
+                    records_consumed=self._metrics._consumed,
+                    records_written=self._metrics._consumed,
+                    records_dropped=0,
+                    records_errored=0,
+                    elapsed_seconds=0.5,
+                )
+
+        build_count = 0
+
+        async def factory():
+            nonlocal build_count
+            build_count += 1
+            if build_count == 1:
+                return FakePipeline(
+                    started_event=None,
+                    release_event=first_release,
+                    consumed=1,
+                    written=1,
+                )
+            return FakePipeline(
+                started_event=second_started,
+                release_event=second_release,
+                consumed=4,
+                written=3,
+            )
+
+        scheduled = ScheduledPipeline(
+            factory=factory,
+            schedule=Schedule.once(),
+            pipeline_id="rewire_live",
+        )
+        pool = WorkerPool(graceful_shutdown_timeout=0.01)
+        pool.register(scheduled)
+
+        first_task = asyncio.create_task(pool.run())
+        await asyncio.sleep(0)
+        first_release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+
+        async def updated_custom_callback(ctx) -> None:
+            del ctx
+            updated_custom_called.set()
+
+        scheduled.set_live_metrics_callback(updated_custom_callback)
+
+        second_task = asyncio.create_task(pool.run())
+        await asyncio.wait_for(second_started.wait(), timeout=1.0)
+        await asyncio.wait_for(updated_custom_called.wait(), timeout=1.0)
+
+        stats = pool.metrics.get("rewire_live")
+        assert stats is not None
+        assert stats.is_running is True
+        assert stats.active_run_id == "run-live"
+        assert stats.live_records_consumed == 4
+        assert stats.live_records_written == 3
+
+        second_release.set()
+        await asyncio.wait_for(second_task, timeout=1.0)
 
     async def test_worker_pool_fence_blocks_write_when_coordinator_token_is_stale(self) -> None:
         class RecordingSink(BaseSink[int]):

@@ -79,6 +79,16 @@ def test_http_cache_kv_store_expires_values(tmp_path):
     assert cache.kv_get("short") is None
 
 
+def test_http_cache_stats_ignore_expired_entries(tmp_path):
+    cache = HttpCache(db_path=tmp_path / "http_cache.db", ttl=1)
+
+    cache.set("https://api.example.com/places", "body", source="source")
+    cache.kv_set("cursor", {"page": 1}, ttl=1)
+    time.sleep(1.1)
+
+    assert cache.stats() == {"http_cache": 0, "kv_store": 0}
+
+
 def test_http_cache_reset_clears_http_and_kv_entries(tmp_path):
     cache = HttpCache(db_path=tmp_path / "http_cache.db", ttl=3600)
     cache.set("https://api.example.com/places", "body", source="source")

@@ -9,7 +9,11 @@ def test_middleware_package_reexports_public_api() -> None:
     expected_names = {
         "BatchFilterMiddleware",
         "BatchMapMiddleware",
+        "BufferedSubmitMiddleware",
+        "DrainableBufferedMiddleware",
+        "DrainablePipelinedBatchMiddleware",
         "FilterMiddleware",
+        "PipeableMiddleware",
         "MapMiddleware",
         "Middleware",
         "MiddlewareChain",
@@ -17,9 +21,14 @@ def test_middleware_package_reexports_public_api() -> None:
         "MiddlewareFailure",
         "MiddlewareModeSpec",
         "MiddlewareProcessResult",
+        "PipelinedBatchMiddleware",
         "PipelinedBatchStageSpec",
         "RetryMiddleware",
         "RouteMiddleware",
+        "is_buffered_submit_middleware",
+        "is_drainable_buffered_middleware",
+        "is_drainable_pipelined_batch_middleware",
+        "is_pipelined_batch_middleware",
     }
 
     for name in expected_names:

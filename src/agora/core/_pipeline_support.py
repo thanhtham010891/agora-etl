@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from agora.core.writer import Writer
 
 TResult = TypeVar("TResult")
+TRecord = TypeVar("TRecord")
 
 
 def normalize_performance_profile(profile: str) -> str:
@@ -117,12 +118,12 @@ def resolved_performance_profile_settings(
 
 
 def build_sink_fanout_writer(
-    sinks: list[BaseSink[Any]],
+    sinks: list[BaseSink[TRecord]],
     *,
     sink_concurrency: int | None,
-) -> SinkFanOut[Any]:
+) -> SinkFanOut[TRecord]:
     """Construct the canonical sink fan-out writer for a pipeline."""
-    writer: SinkFanOut[Any] = SinkFanOut(sinks)
+    writer: SinkFanOut[TRecord] = SinkFanOut(sinks)
     if sink_concurrency is not None:
         writer = writer.with_concurrency(sink_concurrency)
     return writer

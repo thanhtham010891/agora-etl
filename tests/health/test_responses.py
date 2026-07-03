@@ -94,3 +94,13 @@ def test_unknown_path_returns_not_found_response() -> None:
     )
     response = builder.build("GET", "/missing")
     assert response.body == b"Not found"
+
+
+def test_non_get_health_request_returns_method_not_allowed() -> None:
+    builder = HealthResponseBuilder(
+        collector=MetricsCollector(),
+        metrics_exporter=_FakeExporter(),
+    )
+    response = builder.build("POST", "/health")
+    assert b"405" in response.status_line
+    assert response.body == b"Method not allowed"

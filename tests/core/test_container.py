@@ -53,12 +53,13 @@ async def test_build_ai_middleware_component_resolves_provider_and_backend_cache
     )
 
     assert isinstance(middleware, AIEnrichMiddleware)
-    assert isinstance(middleware._provider, _FakeProvider)
-    assert isinstance(middleware._cache, StateBackendLLMCache)
+    assert isinstance(middleware.provider, _FakeProvider)
+    assert isinstance(middleware.cache, StateBackendLLMCache)
 
-    await middleware._cache.set("k", "v")
-    assert await middleware._cache.get("k") == "v"
-    await middleware._cache.close()
+    assert middleware.cache is not None
+    await middleware.cache.set("k", "v")
+    assert await middleware.cache.get("k") == "v"
+    await middleware.cache.close()
 
 
 @pytest.mark.asyncio
@@ -102,8 +103,8 @@ def test_container_build_pipeline_carries_acceleration_mode() -> None:
 
     bound = container.build_pipeline()
 
-    assert bound._config.acceleration_mode == AccelerationMode.OFF
-    assert bound._config.performance_profile == "throughput"
+    assert bound.config.acceleration_mode == AccelerationMode.OFF
+    assert bound.config.performance_profile == "throughput"
 
 
 @dataclass

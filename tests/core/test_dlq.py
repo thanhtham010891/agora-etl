@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -793,6 +794,77 @@ async def test_sqlite_dlq_acknowledge_uses_storage_identity_for_duplicate_metada
 
         assert [record.record for record in remaining] == [{"id": 1}]
         assert remaining[0].attempt == 0
+    finally:
+        await sink.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_dlq_open_upgrades_legacy_schema_with_retry_columns(tmp_path) -> None:
+    path = tmp_path / "legacy-dlq.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE dlq_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pipeline_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                record TEXT,
+                source TEXT,
+                checkpoint TEXT,
+                middleware TEXT,
+                sink TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sink = SQLiteDLQSink(path)
+    source = SQLiteDLQSource(path, pipeline_id="orders")
+    record = DLQRecord(
+        pipeline_id="orders",
+        run_id="run-1",
+        stage="sink_write",
+        error_type="RuntimeError",
+        error_message="boom",
+        record={"id": 1},
+    )
+
+    await sink.open()
+    try:
+        await sink.write(record)
+
+        await source.open()
+        try:
+            records = [item async for item in source.stream()]
+        finally:
+            await source.close()
+
+        assert [item.record for item in records] == [{"id": 1}]
+        assert records[0].attempt == 0
+        assert records[0].max_attempts is None
+
+        check_conn = sqlite3.connect(path)
+        try:
+            columns = {
+                row[1] for row in check_conn.execute("PRAGMA table_info(dlq_records)").fetchall()
+            }
+        finally:
+            check_conn.close()
+
+        assert {
+            "original_record",
+            "processed_record",
+            "details",
+            "attempt",
+            "max_attempts",
+        } <= columns
     finally:
         await sink.close()
 

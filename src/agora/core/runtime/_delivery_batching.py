@@ -37,7 +37,6 @@ async def flush_batch_outcomes(
     pending_checkpoint: Checkpoint | None = None
     pending_checkpoint_batch_size = 0
     delivered_hooks: list[Callable[[], Awaitable[None]]] = []
-    unrouted_error: Exception | None = None
 
     for raw, processed, checkpoint_value, on_success in zip(
         raw_list, processed_list, checkpoint_list, on_success_list, strict=True
@@ -59,7 +58,7 @@ async def flush_batch_outcomes(
                 pending_checkpoint_batch_size += 1
             if routed and on_success is not None:
                 delivered_hooks.append(on_success)
-        elif unrouted_error is None:
+        else:
             if pending_checkpoint is not None:
                 await persist_checkpoint(
                     state.ctx,
@@ -69,7 +68,9 @@ async def flush_batch_outcomes(
                 )
                 pending_checkpoint = None
                 pending_checkpoint_batch_size = 0
-            unrouted_error = exc
+            for hook in delivered_hooks:
+                await hook()
+            raise RecordDeliveryError(exc) from exc
 
     if pending_checkpoint is not None:
         await persist_checkpoint(
@@ -80,8 +81,6 @@ async def flush_batch_outcomes(
         )
     for hook in delivered_hooks:
         await hook()
-    if unrouted_error is not None and sink_failure_policy == SinkFailurePolicy.FAIL_CLOSED:
-        raise RecordDeliveryError(unrouted_error) from unrouted_error
 
 
 async def commit_outcomes(

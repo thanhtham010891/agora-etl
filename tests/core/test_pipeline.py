@@ -50,45 +50,59 @@ def make_source(n: int = 5) -> IterableSource:
 def test_pipeline_from_source_sets_id():
     source = IterableSource([])
     source.source_name = "test_source"
-    pipeline = Pipeline(source)
-    assert pipeline._pipeline_id == "test_source"
+    pipeline = Pipeline(source).build()
+    assert pipeline.pipeline_id == "test_source"
 
 
 def test_pipeline_from_source_custom_id():
-    pipeline = Pipeline(IterableSource([]), id="my_pipe")
-    assert pipeline._pipeline_id == "my_pipe"
+    pipeline = Pipeline(IterableSource([]), id="my_pipe").build()
+    assert pipeline.pipeline_id == "my_pipe"
 
 
 def test_pipeline_pipe_is_immutable():
     p1 = Pipeline(IterableSource([]))
     middleware = FilterMiddleware(lambda x: True)
     p2 = p1.pipe(middleware)
-    assert p1._middlewares == []
-    assert len(p2._middlewares) == 1
+    assert len(p1.build().explain().middleware_matrix) == 0
+    assert len(p2.build().explain().middleware_matrix) == 1
 
 
 def test_pipeline_filter_shorthand():
     p = Pipeline(IterableSource([])).filter(lambda x: x > 0)
-    assert len(p._middlewares) == 1
-    assert isinstance(p._middlewares[0], FilterMiddleware)
+    explain = p.build().explain()
+    assert len(explain.middleware_matrix) == 1
+    assert explain.middleware_matrix[0].name == "filter"
 
 
-def test_bound_pipeline_with_sink_preserves_concurrency_and_live_metrics_callback() -> None:
+async def test_bound_pipeline_with_sink_preserves_concurrency_and_live_metrics_callback() -> None:
+    callback_calls = 0
+
     async def _callback(ctx) -> None:
+        nonlocal callback_calls
         del ctx
+        callback_calls += 1
 
-    bound = Pipeline(IterableSource([1])).build(
+    class RecordingSink(BaseSink[int]):
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def write(self, record: int) -> None:
+            self.records.append(record)
+
+    bound = Pipeline(IterableSource([1, 2, 3])).build(
         StdoutSink(),
         config=DeliveryConfig(sink_concurrency=3),
     )
     bound.set_live_metrics_callback(_callback)
+    sink = RecordingSink()
 
-    replaced = bound.with_sink(StdoutSink())
+    replaced = bound.with_sink(sink)
+    await replaced.run()
 
     assert replaced is not bound
-    assert replaced._config.sink_concurrency == 3
-    assert replaced._live_metrics_callback is _callback
-    assert replaced._writer._concurrent_writes is True
+    assert replaced.config.sink_concurrency == 3
+    assert sink.records == [1, 2, 3]
+    assert callback_calls >= 1
 
 
 async def test_bound_pipeline_run_fence_blocks_stale_sink_write() -> None:
@@ -120,21 +134,32 @@ async def test_bound_pipeline_run_fence_blocks_stale_sink_write() -> None:
 
 
 async def test_bound_pipeline_run_fence_is_preserved_when_replacing_sink() -> None:
-    async def _active() -> bool:
-        return True
+    class RecordingSink(BaseSink[int]):
+        def __init__(self) -> None:
+            self.records: list[int] = []
+
+        async def write(self, record: int) -> None:
+            self.records.append(record)
+
+    async def _stale() -> bool:
+        return False
 
     bound = Pipeline(IterableSource([1]), id="fenced_replace").build(StdoutSink())
-    fence = RunFence(
-        pipeline_id="fenced_replace",
-        worker_id="worker-a",
-        fencing_token=7,
-        validate=_active,
+    bound.set_run_fence(
+        RunFence(
+            pipeline_id="fenced_replace",
+            worker_id="worker-a",
+            fencing_token=7,
+            validate=_stale,
+        )
     )
-    bound.set_run_fence(fence)
+    sink = RecordingSink()
+    replaced = bound.with_sink(sink)
 
-    replaced = bound.with_sink(StdoutSink())
+    with pytest.raises(FenceLostError):
+        await replaced.run()
 
-    assert replaced._run_fence is fence
+    assert sink.records == []
 
 
 def test_bound_pipeline_explain_reports_pre_run_shape() -> None:
@@ -181,11 +206,11 @@ def test_throughput_profile_resolves_explicit_runtime_settings() -> None:
         config=DeliveryConfig(performance_profile="throughput"),
     )
 
-    assert bound._config.batch_size == 1_000
-    assert bound._config.batch_flush_interval_ms == 100
-    assert bound._config.max_buffer_size == 1_024
-    assert bound._config.backpressure is not None
-    assert bound._config.backpressure.max_buffer_size == 4_096
+    assert bound.config.batch_size == 1_000
+    assert bound.config.batch_flush_interval_ms == 100
+    assert bound.config.max_buffer_size == 1_024
+    assert bound.config.backpressure is not None
+    assert bound.config.backpressure.max_buffer_size == 4_096
 
     explain = bound.explain()
     settings = explain.acceleration.profile_settings
@@ -206,9 +231,9 @@ def test_manual_delivery_settings_win_over_throughput_profile() -> None:
         ),
     )
 
-    assert bound._config.batch_size == 25
-    assert bound._config.batch_flush_interval_ms == 7
-    assert bound._config.max_buffer_size == 9
+    assert bound.config.batch_size == 25
+    assert bound.config.batch_flush_interval_ms == 7
+    assert bound.config.max_buffer_size == 9
 
 
 def test_explain_reports_source_prefetch_benchmark_gate(

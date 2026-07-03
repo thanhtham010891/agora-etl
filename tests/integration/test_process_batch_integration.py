@@ -29,6 +29,8 @@ from agora import (
 from agora.core.source import BaseSource
 from agora.middlewares.process import ArrowProcessBatchMiddleware, ProcessBatchMiddleware
 
+pytestmark = [pytest.mark.integration, pytest.mark.requires_process_pool]
+
 # ======================================================================
 # Module-level transform functions (must be pickleable)
 # ======================================================================

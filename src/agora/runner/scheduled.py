@@ -149,6 +149,19 @@ class Schedule:
             await asyncio.sleep(0)  # yield control then restart
         # "once" — no wait needed (caller checks should_repeat)
 
+    async def wait_after_skip(self, stop_event: asyncio.Event | None = None) -> None:
+        """Wait before retrying after a skipped run.
+
+        Interval and cron schedules should keep their configured cadence so a
+        skipped lease attempt does not introduce an unexpected fixed delay.
+        Continuous schedules use a short interruptible pause to avoid hot-spinning
+        while repeatedly polling external gates such as distributed leases.
+        """
+        if self._mode == "continuous":
+            await interruptible_sleep(0.1, stop_event)
+            return
+        await self.wait_until_next(stop_event)
+
     @property
     def should_repeat(self) -> bool:
         return self._mode != "once"
@@ -302,7 +315,7 @@ class ScheduledPipeline:
 
     @property
     def observers(self) -> list[Callable[[RunRecord], Awaitable[None]]]:
-        return self._observers
+        return list(self._observers)
 
     @property
     def live_metrics_callback(self) -> Callable[[PipelineContext], Awaitable[None]] | None:

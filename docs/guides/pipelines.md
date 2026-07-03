@@ -125,7 +125,7 @@ summary = await bound.run()
 | Field | Default | What it controls |
 |---|---|---|
 | `dlq` | `None` | Dead-letter sink for failed records |
-| `dlq_failure_policy` | `LOG_ONLY` | What happens when the DLQ write itself fails |
+| `dlq_failure_policy` | `LOG_ONLY` | What happens when the DLQ write itself fails, subject to checkpoint correctness |
 | `checkpoint` | `None` | Checkpoint store for resumable runs |
 | `checkpoint_key` | `None` (→ pipeline id) | Key the checkpoint is stored under |
 | `checkpoint_every` | `1` | Save checkpoint every N records/batches |

@@ -104,7 +104,18 @@ class MemoryBackend(StateBackend):
         self._values.pop(key, None)
 
     def count_prefix(self, prefix: str) -> int:
-        return sum(1 for key in self._values if key.startswith(prefix))
+        now = time.time()
+        count = 0
+        expired: list[str] = []
+        for key, entry in self._values.items():
+            if entry.expires_at is not None and now >= entry.expires_at:
+                expired.append(key)
+                continue
+            if key.startswith(prefix):
+                count += 1
+        for key in expired:
+            self._values.pop(key, None)
+        return count
 
     def delete_prefix(self, prefix: str) -> int:
         keys = [key for key in self._values if key.startswith(prefix)]
@@ -191,14 +202,17 @@ class SQLiteBackend(StateBackend):
         # Escape LIKE special chars so prefix matches are exact
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         with self._lock:
-            row = (
-                self._raw_conn()
-                .execute(
-                    "SELECT COUNT(*) FROM state_store WHERE key LIKE ? ESCAPE '\\'",
-                    (f"{escaped}%",),
-                )
-                .fetchone()
+            now = time.time()
+            conn = self._raw_conn()
+            conn.execute(
+                "DELETE FROM state_store WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
             )
+            row = conn.execute(
+                "SELECT COUNT(*) FROM state_store WHERE key LIKE ? ESCAPE '\\'",
+                (f"{escaped}%",),
+            ).fetchone()
+            conn.commit()
         return int(row[0]) if row is not None else 0
 
     def delete_prefix(self, prefix: str) -> int:
@@ -229,12 +243,22 @@ class SQLiteBackend(StateBackend):
                 """
                 CREATE TABLE IF NOT EXISTS state_store (
                     key        TEXT PRIMARY KEY,
-                    value      TEXT NOT NULL,
-                    expires_at REAL
+                    value      TEXT NOT NULL
                 );
+                """
+            )
+            _ensure_sqlite_columns(self._conn)
+            self._conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_state_store_expires
-                    ON state_store(expires_at);
+                    ON state_store(expires_at)
                 """
             )
             self._conn.commit()
         return self._conn
+
+
+def _ensure_sqlite_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(state_store)").fetchall()}
+    if "expires_at" not in existing:
+        conn.execute("ALTER TABLE state_store ADD COLUMN expires_at REAL")

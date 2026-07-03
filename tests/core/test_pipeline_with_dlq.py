@@ -70,7 +70,7 @@ def test_pipeline_with_dlq_sets_dlq_sink_correctly():
 
     result = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
-    assert result._config.dlq is dlq_sink
+    assert result.config.dlq is dlq_sink
 
 
 def test_pipeline_with_dlq_sets_failure_policy_default():
@@ -80,7 +80,7 @@ def test_pipeline_with_dlq_sets_failure_policy_default():
 
     result = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
-    assert result._config.dlq_failure_policy == DLQFailurePolicy.LOG_ONLY
+    assert result.config.dlq_failure_policy == DLQFailurePolicy.LOG_ONLY
 
 
 def test_pipeline_with_dlq_sets_custom_failure_policy():
@@ -92,7 +92,7 @@ def test_pipeline_with_dlq_sets_custom_failure_policy():
         config=DeliveryConfig(dlq=dlq_sink, dlq_failure_policy=DLQFailurePolicy.RAISE)  # type: ignore[arg-type]
     )
 
-    assert result._config.dlq_failure_policy == DLQFailurePolicy.RAISE
+    assert result.config.dlq_failure_policy == DLQFailurePolicy.RAISE
 
 
 # ======================================================================
@@ -105,16 +105,15 @@ def test_pipeline_builder_not_mutated_after_with_dlq():
     src = IterableSource([1, 2, 3])
     pipeline = Pipeline(src)
 
-    # Capture state before
-    middlewares_before = list(pipeline._middlewares)
-    pipeline_id_before = pipeline._pipeline_id
+    baseline = pipeline.build().explain()
 
     # Call build with dlq
     pipeline.build(config=DeliveryConfig(dlq=_CollectDLQSink()))  # type: ignore[arg-type]
 
     # Pipeline builder state must be unchanged
-    assert pipeline._middlewares == middlewares_before
-    assert pipeline._pipeline_id == pipeline_id_before
+    after = pipeline.build().explain()
+    assert after.pipeline_id == baseline.pipeline_id
+    assert after.middleware_matrix == baseline.middleware_matrix
 
 
 def test_pipeline_with_dlq_returns_new_object_not_same_as_build():
@@ -138,15 +137,15 @@ def test_pipeline_with_dlq_does_not_mutate_intermediate_build():
 
     # Build a BoundPipeline first
     intermediate = pipeline.build()
-    assert intermediate._config.dlq is None  # no DLQ yet
+    assert intermediate.config.dlq is None  # no DLQ yet
 
     # Now call build with dlq — should not affect the intermediate object
     result = pipeline.build(config=DeliveryConfig(dlq=dlq_sink))  # type: ignore[arg-type]
 
     # The intermediate BoundPipeline must remain unmodified
-    assert intermediate._config.dlq is None
+    assert intermediate.config.dlq is None
     # The result must have the DLQ set
-    assert result._config.dlq is dlq_sink
+    assert result.config.dlq is dlq_sink
 
 
 def test_multiple_with_dlq_calls_are_independent():
@@ -160,8 +159,8 @@ def test_multiple_with_dlq_calls_are_independent():
     result_b = pipeline.build(config=DeliveryConfig(dlq=dlq_sink_b))  # type: ignore[arg-type]
 
     assert result_a is not result_b
-    assert result_a._config.dlq is dlq_sink_a
-    assert result_b._config.dlq is dlq_sink_b
+    assert result_a.config.dlq is dlq_sink_a
+    assert result_b.config.dlq is dlq_sink_b
 
 
 # ======================================================================
@@ -182,8 +181,8 @@ def test_chaining_with_checkpoint_store_after_with_dlq():
     )
 
     assert isinstance(result, BoundPipeline)
-    assert result._config.dlq is dlq_sink
-    assert result._config.checkpoint is store
+    assert result.config.dlq is dlq_sink
+    assert result.config.checkpoint is store
 
 
 def test_chaining_with_sink_after_with_dlq():
@@ -201,7 +200,7 @@ def test_chaining_with_sink_after_with_dlq():
     )
 
     assert isinstance(result, BoundPipeline)
-    assert result._config.dlq is dlq_sink
+    assert result.config.dlq is dlq_sink
 
 
 def test_chaining_with_dlq_after_with_dlq_replaces_sink():
@@ -214,9 +213,9 @@ def test_chaining_with_dlq_after_with_dlq_replaces_sink():
     second = Pipeline(src).build(config=DeliveryConfig(dlq=dlq_sink_b))  # type: ignore[arg-type]
 
     # first must have sink_a
-    assert first._config.dlq is dlq_sink_a
+    assert first.config.dlq is dlq_sink_a
     # second must have sink_b
-    assert second._config.dlq is dlq_sink_b
+    assert second.config.dlq is dlq_sink_b
     # they must be different objects
     assert first is not second
 

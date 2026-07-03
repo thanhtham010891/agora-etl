@@ -70,6 +70,32 @@ async def test_401_on_missing_auth_header_ready() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_root_redirect_does_not_require_auth() -> None:
+    """GET / still returns the redirect even when auth_token is configured."""
+    response = await _send_request(
+        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        auth_token="secret",
+    )
+    assert "301" in _status_line(response), (
+        f"Expected 301 redirect for root path, got: {_status_line(response)!r}"
+    )
+    parsed_headers = _headers(response)
+    assert parsed_headers["location"] == "/health"
+
+
+@pytest.mark.asyncio
+async def test_unknown_path_with_auth_enabled_still_returns_404() -> None:
+    """Unknown paths are not protected endpoints and should stay 404."""
+    response = await _send_request(
+        b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        auth_token="secret",
+    )
+    assert "404" in _status_line(response), (
+        f"Expected 404 for unknown path, got: {_status_line(response)!r}"
+    )
+
+
 # ------------------------------------------------------------------ #
 # 401 on wrong Bearer token                                            #
 # ------------------------------------------------------------------ #

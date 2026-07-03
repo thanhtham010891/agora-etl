@@ -233,6 +233,21 @@ async def test_health_dict_redacts_and_truncates_last_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metrics_collector_get_returns_snapshot_copy() -> None:
+    collector = MetricsCollector()
+
+    await collector.record_run("orders")
+
+    stats = collector.get("orders")
+    assert stats is not None
+
+    stats.total_runs = 999
+    health = collector.to_health_dict()
+
+    assert health["pipelines"]["orders"]["total_runs"] == 1
+
+
+@pytest.mark.asyncio
 async def test_prometheus_exporter_renders_runtime_observability_metrics() -> None:
     collector = MetricsCollector()
     runtime = RuntimeMetrics(

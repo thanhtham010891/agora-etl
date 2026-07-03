@@ -48,7 +48,7 @@ type = "stdout"
 
     pool = _load_worker_from_config(str(config_path))
 
-    assert pool._health_port == 18080
+    assert pool.health_port == 18080
     pipelines = pool.registered_pipelines()
     assert [pipeline.pipeline_id for pipeline in pipelines] == ["orders-sync", "audit"]
     assert str(pipelines[0].schedule) in {"every 900s", "every 900.0s"}
@@ -83,4 +83,4 @@ type = "stdout"
     scheduled = pool.registered_pipelines()[0]
     pipeline = await scheduled.build()
 
-    assert isinstance(pipeline._config.tracer, InMemoryTracer)
+    assert isinstance(pipeline.config.tracer, InMemoryTracer)

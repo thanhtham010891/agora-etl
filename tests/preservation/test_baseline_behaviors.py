@@ -145,7 +145,7 @@ def _make_ai_middleware_instance():
 
 
 def test_sec6_render_prompt_substitutes_matching_dict_field() -> None:
-    """[SEC-6] Preservation: _render_prompt("{text}", {"text": "hello"}) → "hello".
+    """[SEC-6] Preservation: render_prompt("{text}", {"text": "hello"}) → "hello".
 
     Baseline behavior: when template variables exactly match record keys,
     the substitution works correctly. This must be preserved after the injection fix.
@@ -154,10 +154,10 @@ def test_sec6_render_prompt_substitutes_matching_dict_field() -> None:
     """
     middleware = _make_ai_middleware_instance()
 
-    result = middleware._render_prompt("{text}", {"text": "hello"})
+    result = middleware.render_prompt("{text}", {"text": "hello"})
 
     assert result == "hello", (
-        f"[SEC-6] PRESERVATION FAILED: _render_prompt('{{text}}', {{'text': 'hello'}}) "
+        f"[SEC-6] PRESERVATION FAILED: render_prompt('{{text}}', {{'text': 'hello'}}) "
         f"should return 'hello', got: {result!r}"
     )
 
@@ -169,7 +169,7 @@ def test_sec6_render_prompt_substitutes_multiple_matching_fields() -> None:
     """
     middleware = _make_ai_middleware_instance()
 
-    result = middleware._render_prompt(
+    result = middleware.render_prompt(
         "Classify: {text} in category {category}",
         {"text": "hello world", "category": "greeting"},
     )
@@ -186,7 +186,7 @@ def test_sec6_render_prompt_supports_dict_input() -> None:
     Validates: Requirements 3.6
     """
     middleware = _make_ai_middleware_instance()
-    result = middleware._render_prompt("{name}", {"name": "Alice"})
+    result = middleware.render_prompt("{name}", {"name": "Alice"})
     assert result == "Alice", f"Dict input failed: {result!r}"
 
 
@@ -203,7 +203,7 @@ def test_sec6_render_prompt_supports_pydantic_model_input() -> None:
 
     middleware = _make_ai_middleware_instance()
     record = MyRecord(name="Bob", value=42)
-    result = middleware._render_prompt("{name} has value {value}", record)
+    result = middleware.render_prompt("{name} has value {value}", record)
     assert result == "Bob has value 42", f"Pydantic model input failed: {result!r}"
 
 
@@ -221,7 +221,7 @@ def test_sec6_render_prompt_supports_dataclass_input() -> None:
 
     middleware = _make_ai_middleware_instance()
     record = MyRecord(name="Carol", score=9.5)
-    result = middleware._render_prompt("{name}: {score}", record)
+    result = middleware.render_prompt("{name}: {score}", record)
     assert result == "Carol: 9.5", f"Dataclass input failed: {result!r}"
 
 
@@ -246,7 +246,7 @@ async def test_perf2_sequential_record_run_increments_total_runs() -> None:
     for _i in range(5):
         await collector.record_run("pipe_a")
 
-    stats = collector.get("pipe_a")
+    stats = collector.pipeline_stats("pipe_a")
     assert stats is not None, "Stats should exist after record_run calls"
     assert stats.total_runs == 5, (
         f"[PERF-2] PRESERVATION FAILED: Expected total_runs=5 after 5 sequential calls, "
@@ -268,7 +268,7 @@ async def test_perf2_sequential_record_run_tracks_success_and_failure() -> None:
     await collector.record_run("pipe_b")  # success
     await collector.record_run("pipe_b", error=RuntimeError("oops"))  # failure
 
-    stats = collector.get("pipe_b")
+    stats = collector.pipeline_stats("pipe_b")
     assert stats is not None
     assert stats.total_runs == 3, f"Expected total_runs=3, got {stats.total_runs}"
     assert stats.successful_runs == 2, f"Expected successful_runs=2, got {stats.successful_runs}"
@@ -276,10 +276,10 @@ async def test_perf2_sequential_record_run_tracks_success_and_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_perf2_get_returns_pipeline_stats_with_correct_interface() -> None:
-    """[PERF-2] Preservation: get() returns PipelineStats with correct interface.
+async def test_perf2_pipeline_stats_returns_pipeline_stats_with_correct_interface() -> None:
+    """[PERF-2] Preservation: pipeline_stats() returns PipelineStats with correct interface.
 
-    Baseline behavior: get() returns PipelineStats object with all expected fields.
+    Baseline behavior: pipeline_stats() returns PipelineStats object with all expected fields.
     Must be preserved after the lock fix.
 
     Validates: Requirements 3.8
@@ -289,9 +289,9 @@ async def test_perf2_get_returns_pipeline_stats_with_correct_interface() -> None
     collector = MetricsCollector()
     await collector.record_run("pipe_c")
 
-    stats = collector.get("pipe_c")
+    stats = collector.pipeline_stats("pipe_c")
 
-    assert stats is not None, "get() should return stats after record_run"
+    assert stats is not None, "pipeline_stats() should return stats after record_run"
     assert isinstance(stats, PipelineStats), f"Expected PipelineStats, got {type(stats)}"
 
     # Verify all expected fields exist
@@ -310,8 +310,8 @@ async def test_perf2_get_returns_pipeline_stats_with_correct_interface() -> None
 
 
 @pytest.mark.asyncio
-async def test_perf2_all_returns_dict_of_pipeline_stats() -> None:
-    """[PERF-2] Preservation: all() returns dict[str, PipelineStats] with correct data.
+async def test_perf2_pipeline_stats_map_returns_dict_of_pipeline_stats() -> None:
+    """[PERF-2] Preservation: pipeline_stats_map() returns dict[str, PipelineStats] with correct data.
 
     Validates: Requirements 3.8
     """
@@ -322,15 +322,38 @@ async def test_perf2_all_returns_dict_of_pipeline_stats() -> None:
     await collector.record_run("pipe_y")
     await collector.record_run("pipe_y")
 
-    all_stats = collector.all()
+    all_stats = collector.pipeline_stats_map()
 
-    assert isinstance(all_stats, dict), f"all() should return dict, got {type(all_stats)}"
-    assert "pipe_x" in all_stats, "pipe_x should be in all() result"
-    assert "pipe_y" in all_stats, "pipe_y should be in all() result"
+    assert isinstance(all_stats, dict), (
+        f"pipeline_stats_map() should return dict, got {type(all_stats)}"
+    )
+    assert "pipe_x" in all_stats, "pipe_x should be in pipeline_stats_map() result"
+    assert "pipe_y" in all_stats, "pipe_y should be in pipeline_stats_map() result"
     assert isinstance(all_stats["pipe_x"], PipelineStats)
     assert isinstance(all_stats["pipe_y"], PipelineStats)
     assert all_stats["pipe_x"].total_runs == 1
     assert all_stats["pipe_y"].total_runs == 2
+
+
+@pytest.mark.asyncio
+async def test_perf2_get_and_all_remain_compatible_aliases() -> None:
+    """[PERF-2] Preservation: get()/all() remain compatible aliases.
+
+    Existing callers may still use the older names, so they must keep
+    returning equivalent snapshots after the public accessor rename.
+    """
+    from agora.metrics.collector import MetricsCollector
+
+    collector = MetricsCollector()
+    await collector.record_run("pipe_alias")
+
+    stats = collector.get("pipe_alias")
+    all_stats = collector.all()
+
+    assert stats is not None
+    assert stats.pipeline_id == "pipe_alias"
+    assert "pipe_alias" in all_stats
+    assert all_stats["pipe_alias"].total_runs == 1
 
 
 @pytest.mark.asyncio
@@ -512,11 +535,11 @@ def test_code2_bound_pipeline_with_dlq_returns_new_object() -> None:
         f"got {type(new_bound)}"
     )
     # Original should not have DLQ set
-    assert bound._config.dlq is None, (
+    assert bound.config.dlq is None, (
         "[CODE-2] PRESERVATION FAILED: Original BoundPipeline should not be mutated"
     )
     # New object should have DLQ set
-    assert new_bound._config.dlq is dlq_sink, (
+    assert new_bound.config.dlq is dlq_sink, (
         "[CODE-2] PRESERVATION FAILED: New BoundPipeline should have DLQ sink set"
     )
 
@@ -547,10 +570,10 @@ def test_code2_bound_pipeline_with_checkpoint_store_is_immutable() -> None:
         "[CODE-2] PRESERVATION FAILED: build(checkpoint=...) should return new object"
     )
     assert isinstance(new_bound, BoundPipeline)
-    assert bound._config.checkpoint is None, (
+    assert bound.config.checkpoint is None, (
         "[CODE-2] PRESERVATION FAILED: Original should not be mutated by build(checkpoint=...)"
     )
-    assert new_bound._config.checkpoint is store, (
+    assert new_bound.config.checkpoint is store, (
         "[CODE-2] PRESERVATION FAILED: New object should have checkpoint store set"
     )
 
@@ -561,24 +584,33 @@ def test_code2_bound_pipeline_with_sink_is_immutable() -> None:
     Validates: Requirements 3.14
     """
     from agora.core.pipeline import BoundPipeline, Pipeline
+    from agora.core.sink import BaseSink
     from agora.core.source import IterableSource
-    from agora.sinks.io.stdout import StdoutSink
+
+    class _NamedSink(BaseSink[int]):
+        sink_name = "named"
+
+        async def write(self, record: int) -> None:
+            del record
 
     src = IterableSource([1, 2, 3])
     bound = Pipeline(src).build()
-    original_writer = bound._writer
 
-    new_sink = StdoutSink()
+    before = bound.explain()
+    new_sink = _NamedSink()
     new_bound = bound.with_sink(new_sink)
+    after = bound.explain()
+    replaced = new_bound.explain()
 
     assert new_bound is not bound, (
         "[CODE-2] PRESERVATION FAILED: with_sink() should return new object"
     )
     assert isinstance(new_bound, BoundPipeline)
-    # Original writer should be unchanged
-    assert bound._writer is original_writer, (
+    assert before.sinks[0].sink_name == "stdout"
+    assert after.sinks[0].sink_name == "stdout", (
         "[CODE-2] PRESERVATION FAILED: Original BoundPipeline writer should not be mutated"
     )
+    assert replaced.sinks[0].sink_name == "named"
 
 
 def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
@@ -618,17 +650,17 @@ def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
 
     replaced = original.with_sink(StdoutSink())
 
-    assert replaced._pipeline_id == "orders"
-    assert replaced._config.dlq is dlq
-    assert replaced._config.dlq_failure_policy == DLQFailurePolicy.RAISE
-    assert replaced._config.checkpoint is store
-    assert replaced._config.checkpoint_key == "orders-checkpoint"
-    assert replaced._config.checkpoint_every == 3
-    assert replaced._config.batch_size == 2
-    assert replaced._config.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE
-    assert replaced._config.max_buffer_size == 5
-    assert replaced._config.backpressure is backpressure
-    assert replaced._config.tracer is tracer
+    assert replaced.pipeline_id == "orders"
+    assert replaced.config.dlq is dlq
+    assert replaced.config.dlq_failure_policy == DLQFailurePolicy.RAISE
+    assert replaced.config.checkpoint is store
+    assert replaced.config.checkpoint_key == "orders-checkpoint"
+    assert replaced.config.checkpoint_every == 3
+    assert replaced.config.batch_size == 2
+    assert replaced.config.sink_failure_policy == SinkFailurePolicy.LOG_AND_CONTINUE
+    assert replaced.config.max_buffer_size == 5
+    assert replaced.config.backpressure is backpressure
+    assert replaced.config.tracer is tracer
 
 
 # ======================================================================

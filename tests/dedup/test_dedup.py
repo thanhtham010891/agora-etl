@@ -4,6 +4,8 @@ Tests for DedupMiddleware + InMemoryStore + FuzzyMatchStrategy.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from agora import IterableSource, Pipeline
@@ -47,6 +49,16 @@ async def test_memory_store_mark_if_new_reports_duplicates():
     assert await store.mark_if_new("abc")
     assert not await store.mark_if_new("abc")
     assert await store.exists("abc")
+
+
+@pytest.mark.asyncio
+async def test_memory_store_lru_path_preserves_ttl_expiration():
+    store = InMemoryStore(max_size=10)
+
+    assert await store.mark_if_new("ephemeral", ttl_seconds=1) is True
+    await asyncio.sleep(1.1)
+    assert await store.mark_if_new("ephemeral", ttl_seconds=1) is True
+    assert await store.exists("ephemeral") is True
 
 
 @pytest.mark.asyncio

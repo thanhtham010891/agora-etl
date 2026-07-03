@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 
 if TYPE_CHECKING:
-    from agora.core.middleware import MiddlewareModeSpec
+    from agora.core.middleware import BufferedSubmitMiddleware, MiddlewareModeSpec
 
 
 class RuntimeLane(StrEnum):
@@ -25,7 +25,7 @@ class BufferedStageSpec:
     """Runtime-selected buffered middleware stage."""
 
     index: int
-    middleware: Any
+    middleware: BufferedSubmitMiddleware
     name: str
     concurrency: int
 

@@ -9,6 +9,7 @@ from agora.health.responses._support import (
     HTTP_200,
     HTTP_301,
     HTTP_404,
+    HTTP_405,
     HTTP_503,
     health_payload,
     json_response,
@@ -34,7 +35,7 @@ class HealthResponseBuilder:
 
     def build(self, method: str, path: str) -> ResponseSpec:
         if method != "GET":
-            return ResponseSpec(HTTP_404, "text/plain", b"Method not allowed")
+            return ResponseSpec(HTTP_405, "text/plain", b"Method not allowed")
         if path in ("/", ""):
             return ResponseSpec(HTTP_301, "text/plain", b"", location="/health")
         if path == "/health":

@@ -87,16 +87,31 @@ class WorkerPool:
         self.metrics = metrics or MetricsCollector()
         self._coordinator = coordinator
         self._metrics_observers: dict[ScheduledPipeline, object] = {}
+        self._live_metrics_callbacks: dict[ScheduledPipeline, object] = {}
         self._lease_release_observers: dict[ScheduledPipeline, object] = {}
+        self._lease_pre_run_hooks: dict[ScheduledPipeline, object] = {}
 
     def register(self, pipeline: ScheduledPipeline) -> WorkerPool:
         """Register a scheduled pipeline.  Returns self for chaining."""
+        if any(existing is pipeline for existing in self._pipelines):
+            raise ValueError(
+                f"ScheduledPipeline {pipeline.pipeline_id!r} is already registered in this worker"
+            )
+        if any(existing.pipeline_id == pipeline.pipeline_id for existing in self._pipelines):
+            raise ValueError(
+                f"pipeline_id {pipeline.pipeline_id!r} is already registered in this worker"
+            )
         self._pipelines.append(pipeline)
         return self
 
     def registered_pipelines(self) -> list[ScheduledPipeline]:
         """Return a snapshot of registered pipelines."""
         return list(self._pipelines)
+
+    @property
+    def health_port(self) -> int | None:
+        """Return the configured health server port, if any."""
+        return self._health_port
 
     def set_health_auth_token(self, token: str | None) -> None:
         """Override the health server auth token after construction."""
@@ -113,6 +128,10 @@ class WorkerPool:
             return
 
         self._shutdown_event = asyncio.Event()
+        shutdown_wait: asyncio.Task[Any] | None = None
+        coordinator_started = False
+        signal_loop: Any | None = None
+        installed_signals: list[signal.Signals] = []
 
         logger.info(
             "worker_pool_start",
@@ -121,61 +140,65 @@ class WorkerPool:
             health_port=self._health_port,
         )
 
-        # Start distributed coordinator (if configured)
-        if self._coordinator is not None:
-            worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
-            await self._coordinator.start(
-                worker_id=worker_id,
-                pipeline_ids=[p.pipeline_id for p in self._pipelines],
-            )
-            self._coordinator.set_lease_lost_callback(self._on_lease_lost)
-            for p in self._pipelines:
-                self._wire_lease_gating(p)
-
-        # Wire metrics into each pipeline via public Observer API
-        for p in self._pipelines:
-            await self.metrics.register_pipeline(
-                p.pipeline_id,
-                schedule=str(p.schedule),
-            )
-            if p.live_metrics_callback is None:
-                p.set_live_metrics_callback(self._make_live_metrics_callback(p.pipeline_id))
-            if p not in self._metrics_observers:
-                callback = self._make_metrics_callback(p.pipeline_id)
-                p.add_observer(callback)
-                self._metrics_observers[p] = callback
-
-        # Install signal handlers (SIGINT + SIGTERM → graceful shutdown)
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with suppress(NotImplementedError, RuntimeError):
-                loop.add_signal_handler(sig, self._shutdown_event.set)
-
-        # Launch pipeline tasks
-        self._tasks = [asyncio.create_task(p.start(), name=p.pipeline_id) for p in self._pipelines]
-
-        # Optional health server task
-        if self._health_port is not None:
-            from agora.health import HealthServer
-
-            self._health_server = HealthServer(
-                port=self._health_port,
-                host=self._health_host,
-                collector=self.metrics,
-                auth_token=self._health_auth_token,
-            )
-            self._tasks.append(
-                asyncio.create_task(self._health_server.serve(), name="health-server")
-            )
-
-        pipeline_tasks = list(self._tasks[: len(self._pipelines)])
-        pipeline_task_map = dict(zip(pipeline_tasks, self._pipelines, strict=True))
-        health_tasks = self._tasks[len(self._pipelines) :]
-        shutdown_wait = asyncio.create_task(
-            self._shutdown_event.wait(), name="worker-shutdown-wait"
-        )
-
         try:
+            # Start distributed coordinator (if configured)
+            if self._coordinator is not None:
+                worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
+                await self._coordinator.start(
+                    worker_id=worker_id,
+                    pipeline_ids=[p.pipeline_id for p in self._pipelines],
+                )
+                coordinator_started = True
+                self._coordinator.set_lease_lost_callback(self._on_lease_lost)
+                for p in self._pipelines:
+                    self._wire_lease_gating(p)
+
+            # Wire metrics into each pipeline via public Observer API
+            for p in self._pipelines:
+                await self.metrics.register_pipeline(
+                    p.pipeline_id,
+                    schedule=str(p.schedule),
+                )
+                self._wire_live_metrics_callback(p)
+                if p not in self._metrics_observers:
+                    callback = self._make_metrics_callback(p.pipeline_id)
+                    p.add_observer(callback)
+                    self._metrics_observers[p] = callback
+
+            # Install signal handlers (SIGINT + SIGTERM → graceful shutdown)
+            loop = asyncio.get_running_loop()
+            signal_loop = loop
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with suppress(NotImplementedError, RuntimeError):
+                    loop.add_signal_handler(sig, self._shutdown_event.set)
+                    installed_signals.append(sig)
+
+            # Launch pipeline tasks
+            self._tasks = [
+                asyncio.create_task(p.start(), name=p.pipeline_id) for p in self._pipelines
+            ]
+
+            # Optional health server task
+            if self._health_port is not None:
+                from agora.health import HealthServer
+
+                self._health_server = HealthServer(
+                    port=self._health_port,
+                    host=self._health_host,
+                    collector=self.metrics,
+                    auth_token=self._health_auth_token,
+                )
+                self._tasks.append(
+                    asyncio.create_task(self._health_server.serve(), name="health-server")
+                )
+
+            pipeline_tasks = list(self._tasks[: len(self._pipelines)])
+            pipeline_task_map = dict(zip(pipeline_tasks, self._pipelines, strict=True))
+            health_tasks = self._tasks[len(self._pipelines) :]
+            shutdown_wait = asyncio.create_task(
+                self._shutdown_event.wait(), name="worker-shutdown-wait"
+            )
+
             pending: set[asyncio.Task[Any]] = {shutdown_wait, *pipeline_tasks, *health_tasks}
             while pending:
                 done, pending = await asyncio.wait(
@@ -223,9 +246,21 @@ class WorkerPool:
             # asyncio.run() was cancelled externally (e.g. double Ctrl+C)
             logger.info("worker_pool_cancelled")
             await self._force_cancel()
+        except Exception:
+            if self._tasks:
+                await self._force_cancel()
+            elif coordinator_started and self._coordinator is not None:
+                with suppress(Exception):
+                    await self._coordinator.stop()
+            raise
         finally:
-            shutdown_wait.cancel()
-            await asyncio.gather(shutdown_wait, return_exceptions=True)
+            if shutdown_wait is not None:
+                shutdown_wait.cancel()
+                await asyncio.gather(shutdown_wait, return_exceptions=True)
+            if signal_loop is not None:
+                for sig in installed_signals:
+                    with suppress(NotImplementedError, RuntimeError):
+                        signal_loop.remove_signal_handler(sig)
             self._tasks = []
             self._health_server = None
             self._shutdown_event = None
@@ -309,6 +344,42 @@ class WorkerPool:
 
         return _callback
 
+    def _wire_live_metrics_callback(self, pipeline: ScheduledPipeline) -> None:
+        """Compose worker live metrics with any user-provided callback."""
+        current_callback = pipeline.live_metrics_callback
+        wired_callback = self._live_metrics_callbacks.get(pipeline)
+
+        if pipeline in self._live_metrics_callbacks and current_callback is wired_callback:
+            return
+
+        worker_callback = self._make_live_metrics_callback(pipeline.pipeline_id)
+        existing_callback = current_callback
+
+        if existing_callback is None:
+            pipeline.set_live_metrics_callback(worker_callback)
+            self._live_metrics_callbacks[pipeline] = worker_callback
+            return
+
+        async def _composed_callback(ctx: PipelineContext) -> None:
+            first_error: Exception | None = None
+
+            try:
+                await worker_callback(ctx)
+            except Exception as exc:
+                first_error = exc
+
+            try:
+                await existing_callback(ctx)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+
+            if first_error is not None:
+                raise first_error
+
+        pipeline.set_live_metrics_callback(_composed_callback)
+        self._live_metrics_callbacks[pipeline] = _composed_callback
+
     async def _on_lease_lost(self, pipeline_id: str) -> None:
         """Abort the in-flight run for *pipeline_id* after its lease was lost."""
         for pipeline in self._pipelines:
@@ -321,8 +392,27 @@ class WorkerPool:
         """Attach lease acquire/release hooks to a pipeline for distributed mode."""
         coordinator = self._coordinator
         assert coordinator is not None
+        current_hook = pipeline.pre_run_hook
+        wired_hook = self._lease_pre_run_hooks.get(pipeline)
+
+        def _add_release_observer() -> None:
+            async def _release_observer_impl(record: RunRecord) -> None:
+                del record
+                await coordinator.release_lease(pipeline.pipeline_id)
+
+            pipeline.add_observer(_release_observer_impl)
+            self._lease_release_observers[pipeline] = _release_observer_impl
+
+        if pipeline in self._lease_pre_run_hooks and current_hook is wired_hook:
+            if pipeline not in self._lease_release_observers:
+                _add_release_observer()
+            return
+
+        existing_hook = current_hook
 
         async def _pre_run_hook() -> bool:
+            if existing_hook is not None and not await existing_hook():
+                return False
             pipeline.state.run_fence = None
             acquired = await coordinator.try_acquire_lease(
                 pipeline.pipeline_id,
@@ -356,13 +446,10 @@ class WorkerPool:
             )
             return True
 
-        async def _release_observer(record: RunRecord) -> None:
-            await coordinator.release_lease(pipeline.pipeline_id)
-
         pipeline.set_pre_run_hook(_pre_run_hook)
+        self._lease_pre_run_hooks[pipeline] = _pre_run_hook
         if pipeline not in self._lease_release_observers:
-            pipeline.add_observer(_release_observer)
-            self._lease_release_observers[pipeline] = _release_observer
+            _add_release_observer()
 
     def _terminal_pipeline_error(
         self,

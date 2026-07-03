@@ -26,7 +26,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 from agora.core._pipeline_support import (
     build_sink_fanout_writer,
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from agora.core.explain import PipelineExplain
     from agora.core.fencing import RunFence
     from agora.core.metrics import PipelineRunSummary
+    from agora.core.middleware import PipeableMiddleware
     from agora.core.sink import BaseSink, SinkRouter
     from agora.core.source import BaseSource
     from agora.core.writer import Writer
@@ -64,12 +65,28 @@ class Pipeline(Generic[T]):
     Create with ``Pipeline(source)`` or ``Pipeline(source, id="my-pipe")``.
     """
 
+    @overload
     def __init__(
-        self,
+        self: Pipeline[T],
         source: BaseSource[T],
         id: str | None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        source: BaseSource[Any],
+        id: str | None = None,
         *,
-        _middlewares: list[Any] | None = None,
+        _middlewares: list[PipeableMiddleware[Any, Any]] | None = None,
+    ) -> None: ...
+
+    def __init__(
+        self,
+        source: BaseSource[Any],
+        id: str | None = None,
+        *,
+        _middlewares: list[PipeableMiddleware[Any, Any]] | None = None,
     ) -> None:
         self._source = source
         self._middlewares = list(_middlewares) if _middlewares else []
@@ -79,14 +96,17 @@ class Pipeline(Generic[T]):
     # Fluent builders (return new Pipeline — immutable)                   #
     # ------------------------------------------------------------------ #
 
-    def pipe(self, middleware: Any) -> Pipeline[Any]:
-        return Pipeline(
-            self._source,
-            id=self._pipeline_id,
-            _middlewares=[*self._middlewares, middleware],
+    def pipe(self, middleware: PipeableMiddleware[T, U]) -> Pipeline[U]:
+        return cast(
+            "Pipeline[U]",
+            Pipeline(
+                self._source,
+                id=self._pipeline_id,
+                _middlewares=[*self._middlewares, middleware],
+            ),
         )
 
-    def filter(self, predicate: Callable[[Any], bool], name: str = "filter") -> Pipeline[Any]:
+    def filter(self, predicate: Callable[[T], bool], name: str = "filter") -> Pipeline[T]:
         return self.pipe(FilterMiddleware(predicate=predicate, name=name))
 
     # ------------------------------------------------------------------ #
@@ -95,14 +115,17 @@ class Pipeline(Generic[T]):
 
     def _build_bound_pipeline(
         self,
-        writer: Writer[Any],
+        writer: Writer[T],
         config: DeliveryConfig,
-    ) -> BoundPipeline[Any]:
+    ) -> BoundPipeline[T]:
         return BoundPipeline(
             source=self._source,
-            chain=MiddlewareChain(
-                self._middlewares,
-                acceleration_mode=config.acceleration_mode,
+            chain=cast(
+                "MiddlewareChain[Any, T]",
+                MiddlewareChain(
+                    self._middlewares,
+                    acceleration_mode=config.acceleration_mode,
+                ),
             ),
             writer=writer,
             pipeline_id=self._pipeline_id,
@@ -111,17 +134,17 @@ class Pipeline(Generic[T]):
 
     def build(
         self,
-        sink: BaseSink[Any] | None = None,
+        sink: BaseSink[T] | None = None,
         *,
         config: DeliveryConfig | None = None,
-    ) -> BoundPipeline[Any]:
+    ) -> BoundPipeline[T]:
         config = config or DeliveryConfig()
         if sink is not None:
-            sinks: list[BaseSink[Any]] = [sink]
+            sinks: list[BaseSink[T]] = [sink]
         else:
             from agora.sinks.io.stdout import StdoutSink
 
-            sinks = [StdoutSink()]
+            sinks = [cast("BaseSink[T]", StdoutSink())]
 
         writer = build_sink_fanout_writer(
             sinks,
@@ -131,10 +154,10 @@ class Pipeline(Generic[T]):
 
     def fan_out(
         self,
-        sinks: list[BaseSink[Any]],
+        sinks: list[BaseSink[T]],
         *,
         config: DeliveryConfig | None = None,
-    ) -> BoundPipeline[Any]:
+    ) -> BoundPipeline[T]:
         config = config or DeliveryConfig()
         writer = build_sink_fanout_writer(
             sinks,
@@ -144,16 +167,16 @@ class Pipeline(Generic[T]):
 
     def route(
         self,
-        router: SinkRouter[Any],
+        router: SinkRouter[T],
         *,
         config: DeliveryConfig | None = None,
-    ) -> BoundPipeline[Any]:
+    ) -> BoundPipeline[T]:
         config = config or DeliveryConfig()
         return self._build_bound_pipeline(router, config)
 
     def explain(
         self,
-        sink: BaseSink[Any] | None = None,
+        sink: BaseSink[T] | None = None,
         *,
         config: DeliveryConfig | None = None,
         max_records: int | None = None,
@@ -173,8 +196,8 @@ class BoundPipeline(Generic[T]):
     def __init__(
         self,
         source: BaseSource[Any],
-        chain: MiddlewareChain[Any, Any],
-        writer: Writer[Any],
+        chain: MiddlewareChain[Any, T],
+        writer: Writer[T],
         pipeline_id: str,
         *,
         config: DeliveryConfig | None = None,
@@ -195,14 +218,19 @@ class BoundPipeline(Generic[T]):
     def pipeline_id(self) -> str:
         return self._pipeline_id
 
-    def with_sink(self, *sinks: BaseSink[Any]) -> BoundPipeline[Any]:
+    @property
+    def config(self) -> DeliveryConfig:
+        """Return the normalized runtime configuration for this bound pipeline."""
+        return self._config
+
+    def with_sink(self, *sinks: BaseSink[T]) -> BoundPipeline[T]:
         """Replace sinks (used for dry-run mode)."""
         writer = build_sink_fanout_writer(
             list(sinks),
             sink_concurrency=self._config.sink_concurrency,
         )
 
-        bound: BoundPipeline[Any] = BoundPipeline(
+        bound = BoundPipeline(
             source=self._source,
             chain=self._chain,
             writer=writer,

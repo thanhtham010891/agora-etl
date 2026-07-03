@@ -12,7 +12,8 @@ Public API::
 
     collector = MetricsCollector()
     await collector.record_run(pipeline_id="places_ingest", summary=summary)
-    stats = collector.get("places_ingest")
+    stats = collector.pipeline_stats("places_ingest")
+    all_stats = collector.pipeline_stats_map()
 
     # Prometheus-compatible export
     from agora.metrics.exporters import metrics_exporter_registry

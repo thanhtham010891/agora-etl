@@ -96,7 +96,8 @@ If a middleware raises:
 - `on_error()` is called on that middleware
 - the rest of the chain is skipped for that record
 - the runtime applies DLQ routing if configured
-- the pipeline continues with the next record unless a later failure policy stops the run
+- the pipeline continues with the next record only after the record reaches a
+  handled terminal outcome under the active policy
 
 ### Source order is preserved at the sink boundary
 
@@ -207,6 +208,10 @@ When the runtime writes a batch:
 - it still expects one delivery outcome per input record
 - partial failures are resolved record by record
 - checkpoint persistence and DLQ routing remain aligned to those per-record outcomes
+- if a whole-batch sink exception is being fanned out through the DLQ and one
+  record cannot be routed under `FAIL_CLOSED`, later records in that same
+  failed batch do not advance checkpoint or success hooks past the first
+  unrouted item
 
 That means a successful record in the same write batch as a failed record can
 still be committed and checkpointed under the active policy.
@@ -238,6 +243,7 @@ active failure policy.
 | Sink wrote successfully | Yes |
 | Middleware dropped record (returned `None`) | Yes |
 | Middleware raised, record routed to DLQ | Yes |
+| Middleware raised, DLQ write failed, checkpoint enabled | No — run stops before later checkpoint advance |
 | Sink raised, record routed to DLQ | Yes |
 | Sink raised, no DLQ, `FAIL_CLOSED` | No |
 | Sink raised, no DLQ, `LOG_AND_CONTINUE` | Yes |
@@ -321,11 +327,13 @@ the terminal reason for the run.
 
 | Policy | Behavior when DLQ write fails |
 |---|---|
-| `LOG_ONLY` | log the DLQ failure and continue |
+| `LOG_ONLY` | log the DLQ failure and continue only when later checkpoint state would remain correct |
 | `RAISE` | propagate the DLQ failure and stop the run |
 
 This policy applies to the DLQ write itself. It does not retroactively make the
-original record successful.
+original record successful. In particular, `LOG_ONLY` does not permit the
+runtime to advance a checkpoint past a middleware or sink failure that was
+neither written downstream nor durably captured in the DLQ.
 
 ### DLQ replay acknowledges only after replay succeeds
 

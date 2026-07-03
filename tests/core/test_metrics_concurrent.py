@@ -39,7 +39,7 @@ async def test_concurrent_record_run_no_lost_updates(n: int) -> None:
     collector = MetricsCollector()
     tasks = [asyncio.create_task(collector.record_run("pipe_a")) for _ in range(n)]
     await asyncio.gather(*tasks)
-    stats = collector.get("pipe_a")
+    stats = collector.pipeline_stats("pipe_a")
     assert stats is not None, f"Stats should exist after {n} record_run calls"
     assert stats.total_runs == n, (
         f"[PERF-2] CONCURRENT SAFETY FAILED: Expected total_runs={n} after {n} "
@@ -60,7 +60,7 @@ async def test_concurrent_record_run_success_count_correct(n: int) -> None:
     collector = MetricsCollector()
     tasks = [asyncio.create_task(collector.record_run("pipe_b")) for _ in range(n)]
     await asyncio.gather(*tasks)
-    stats = collector.get("pipe_b")
+    stats = collector.pipeline_stats("pipe_b")
     assert stats is not None
     assert stats.successful_runs == n, f"Expected successful_runs={n}, got {stats.successful_runs}"
     assert stats.failed_runs == 0, f"Expected failed_runs=0, got {stats.failed_runs}"
@@ -87,7 +87,7 @@ async def test_concurrent_record_run_mixed_success_failure(n: int) -> None:
     ]
     await asyncio.gather(*success_tasks, *failure_tasks)
 
-    stats = collector.get("pipe_c")
+    stats = collector.pipeline_stats("pipe_c")
     assert stats is not None
     assert stats.total_runs == n, f"Expected total_runs={n}, got {stats.total_runs}"
     assert stats.successful_runs + stats.failed_runs == stats.total_runs, (
@@ -111,8 +111,8 @@ async def test_concurrent_record_run_multiple_pipelines_isolated(n: int) -> None
     tasks_b = [asyncio.create_task(collector.record_run("pipe_b")) for _ in range(n)]
     await asyncio.gather(*tasks_a, *tasks_b)
 
-    stats_a = collector.get("pipe_a")
-    stats_b = collector.get("pipe_b")
+    stats_a = collector.pipeline_stats("pipe_a")
+    stats_b = collector.pipeline_stats("pipe_b")
 
     assert stats_a is not None and stats_b is not None
     assert stats_a.total_runs == n, f"pipe_a: Expected total_runs={n}, got {stats_a.total_runs}"

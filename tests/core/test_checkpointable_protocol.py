@@ -98,8 +98,7 @@ async def test_checkpointable_source_prepare_resume():
     # Resume from checkpoint
     await source.prepare_resume(checkpoint)
 
-    # Verify offset was restored
-    assert source._offset == 5
+    # Verify checkpoint state was restored
     assert source.current_checkpoint() == {"offset": 5}
 
 

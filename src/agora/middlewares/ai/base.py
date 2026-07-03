@@ -139,6 +139,16 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         if self._cache is not None:
             await self._cache.close()
 
+    @property
+    def provider(self) -> object:
+        """Return the configured AI provider instance."""
+        return self._provider
+
+    @property
+    def cache(self) -> LLMCache | None:
+        """Return the configured response cache, if any."""
+        return self._cache
+
     # ------------------------------------------------------------------ #
     # Helpers for subclasses                                               #
     # ------------------------------------------------------------------ #
@@ -345,6 +355,10 @@ class AIMiddleware(Middleware[T, T], Generic[T]):
         else:
             data = {"record": str(record)}
         return _SAFE_FORMATTER.format(template, **data)
+
+    def render_prompt(self, template: str, record: T) -> str:
+        """Public wrapper around Agora's safe prompt renderer."""
+        return self._render_prompt(template, record)
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         """Parse JSON from LLM response, stripping markdown code fences."""

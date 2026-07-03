@@ -88,14 +88,27 @@ class MetricsCollector:
             if summary is not None:
                 absorb_summary(stats, summary)
 
-    def get(self, pipeline_id: str) -> PipelineStats | None:
-        return self._pipelines.get(pipeline_id)
+    def pipeline_stats(self, pipeline_id: str) -> PipelineStats | None:
+        """Return a cloned stats snapshot for one pipeline, if present."""
+        stats = self._pipelines.get(pipeline_id)
+        if stats is None:
+            return None
+        return clone_pipeline_stats(stats)
 
-    def all(self) -> dict[str, PipelineStats]:
+    def get(self, pipeline_id: str) -> PipelineStats | None:
+        """Backward-compatible alias for ``pipeline_stats()``."""
+        return self.pipeline_stats(pipeline_id)
+
+    def pipeline_stats_map(self) -> dict[str, PipelineStats]:
+        """Return cloned stats snapshots for every tracked pipeline."""
         return {
             pipeline_id: clone_pipeline_stats(stats)
             for pipeline_id, stats in self._pipelines.items()
         }
+
+    def all(self) -> dict[str, PipelineStats]:
+        """Backward-compatible alias for ``pipeline_stats_map()``."""
+        return self.pipeline_stats_map()
 
     @property
     def overall_status(self) -> str:

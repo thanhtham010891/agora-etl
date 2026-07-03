@@ -4,6 +4,7 @@ Release notes are versioned as separate documents so the top-level changelog can
 
 ## Releases
 
+- [0.4.3](0.4.3.md) — checkpoint and DLQ correctness hardening, worker lifecycle cleanup, and public API tightening
 - [0.4.2](0.4.2.md) — production maturity classifier and full official plugin documentation refresh
 - [0.4.1](0.4.1.md) — shared supportability contracts, recovery diagnostics, distributed run fencing, and AI budget governance
 - [0.4.0](0.4.0.md) — performance comeback release with visible optional Rust acceleration and benchmark gates

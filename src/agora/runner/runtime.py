@@ -92,7 +92,7 @@ class ScheduledPipelineRunner:
                 if ran:
                     await self._pipeline.schedule.wait_until_next(state.stop_event)
                 else:
-                    await interruptible_sleep(10, state.stop_event)
+                    await self._pipeline.schedule.wait_after_skip(state.stop_event)
 
         except asyncio.CancelledError:
             logger.info("scheduler_cancelled", pipeline=self._pipeline.pipeline_id)

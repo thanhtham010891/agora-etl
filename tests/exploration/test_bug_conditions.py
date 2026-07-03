@@ -125,7 +125,7 @@ def _make_ai_middleware_instance():
 
 
 def test_sec6_render_prompt_raises_key_error_with_extra_record_key() -> None:
-    """[SEC-6] Fix Verification: _render_prompt("{text}", {"text": "hi", "extra_key": "x"})
+    """[SEC-6] Fix Verification: render_prompt("{text}", {"text": "hi", "extra_key": "x"})
 
     Expected (correct): Returns "hi" safely — extra keys are ignored, no KeyError
     Previously buggy:   Raised KeyError when template vars were missing from record
@@ -139,16 +139,16 @@ def test_sec6_render_prompt_raises_key_error_with_extra_record_key() -> None:
     middleware = _make_ai_middleware_instance()
 
     # Verify: extra record key not in template → no KeyError, extra key not in output
-    result_extra_key = middleware._render_prompt("{text}", {"text": "hi", "extra_key": "x"})
+    result_extra_key = middleware.render_prompt("{text}", {"text": "hi", "extra_key": "x"})
     assert result_extra_key == "hi", (
-        f"[SEC-6] FIX FAILED: _render_prompt('{{text}}', {{'text': 'hi', 'extra_key': 'x'}}) "
+        f"[SEC-6] FIX FAILED: render_prompt('{{text}}', {{'text': 'hi', 'extra_key': 'x'}}) "
         f"returned {result_extra_key!r}, expected 'hi'. Extra keys must be ignored."
     )
 
     # Verify: template var not in record → placeholder kept as-is, no KeyError
-    result_missing_var = middleware._render_prompt("{text} {system}", {"text": "hi"})
+    result_missing_var = middleware.render_prompt("{text} {system}", {"text": "hi"})
     assert "{system}" in result_missing_var, (
-        f"[SEC-6] FIX FAILED: _render_prompt('{{text}} {{system}}', {{'text': 'hi'}}) "
+        f"[SEC-6] FIX FAILED: render_prompt('{{text}} {{system}}', {{'text': 'hi'}}) "
         f"returned {result_missing_var!r}, expected '{{system}}' placeholder to be kept. "
         f"Missing template vars must not raise KeyError."
     )
@@ -159,7 +159,7 @@ def test_sec6_render_prompt_raises_key_error_with_extra_record_key() -> None:
 
 
 def test_sec6_render_prompt_raises_key_error_with_template_var_not_in_record() -> None:
-    """[SEC-6] Fix Verification: _render_prompt("{text} {system}", {"text": "hi"})
+    """[SEC-6] Fix Verification: render_prompt("{text} {system}", {"text": "hi"})
 
     Expected (correct): Returns "hi {system}" — no exception, placeholder kept as-is
     Previously buggy:   Raised KeyError('system') — unhandled exception crashed pipeline
@@ -176,10 +176,10 @@ def test_sec6_render_prompt_raises_key_error_with_template_var_not_in_record() -
     record = {"text": "hi"}
 
     # After the fix: no exception, placeholder kept as-is
-    result = middleware._render_prompt(template, record)
+    result = middleware.render_prompt(template, record)
 
     assert "{system}" in result, (
-        f"[SEC-6] FIX FAILED: _render_prompt('{template}', {record!r}) "
+        f"[SEC-6] FIX FAILED: render_prompt('{template}', {record!r}) "
         f"returned {result!r}, expected '{{system}}' placeholder to be kept. "
         f"Missing template vars must not raise KeyError — they should be preserved."
     )
@@ -215,7 +215,9 @@ async def test_perf2_concurrent_record_run_loses_updates() -> None:
     tasks = [asyncio.create_task(collector.record_run("pipe_a")) for _ in range(n)]
     await asyncio.gather(*tasks)
 
-    total_runs = collector._pipelines["pipe_a"].total_runs
+    stats = collector.pipeline_stats("pipe_a")
+    assert stats is not None
+    total_runs = stats.total_runs
 
     # EXPECTED: total_runs == 100 (fix confirmed)
     assert total_runs == n, (
@@ -300,15 +302,15 @@ def test_code2_pipeline_with_dlq_mutates_intermediate_object() -> None:
     )
 
     # base must not have been mutated
-    assert base._config.dlq is None, (
+    assert base.config.dlq is None, (
         f"[CODE-2] BUG CONFIRMED: build(dlq=...) mutated the intermediate BoundPipeline. "
-        f"base._config.dlq={base._config.dlq!r} (expected None)"
+        f"base.config.dlq={base.config.dlq!r} (expected None)"
     )
 
     # with_dlq must have the DLQ set
-    assert with_dlq._config.dlq is dlq, (
+    assert with_dlq.config.dlq is dlq, (
         f"[CODE-2] BUG CONFIRMED: build(dlq=...) did not set _dlq_sink correctly. "
-        f"with_dlq._config.dlq={with_dlq._config.dlq!r}"
+        f"with_dlq.config.dlq={with_dlq.config.dlq!r}"
     )
 
 
@@ -490,8 +492,8 @@ def test_perf4_bound_pipeline_has_no_max_buffer_size_attribute() -> None:
 
     bound = Pipeline(IterableSource([])).build(StdoutSink())
 
-    has_attr = hasattr(bound._config, "max_buffer_size")
-    backpressure_via_build = hasattr(bound._config, "backpressure")
+    has_attr = hasattr(bound.config, "max_buffer_size")
+    backpressure_via_build = hasattr(bound.config, "backpressure")
 
     assert has_attr and backpressure_via_build, (
         f"[PERF-4] BUG CONFIRMED: BoundPipeline missing backpressure configuration. "

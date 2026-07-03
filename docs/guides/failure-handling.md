@@ -8,7 +8,17 @@ For the full list of runtime promises this page builds on (sink fail-closed sema
 
 When a middleware's `process()` raises an exception, the chain stops for that record. No subsequent middlewares run, and the record does not reach the sink. The runtime calls the middleware's `on_error()` hook (which logs by default), then checks whether a DLQ is configured.
 
-If a DLQ sink is configured, the failed record is written there as a `DLQRecord` with `stage="middleware"` and the middleware name in `DLQRecord.middleware`. The pipeline then continues with the next record.
+If a DLQ sink is configured, the runtime attempts to write the failed record
+there as a `DLQRecord` with `stage="middleware"` and the middleware name in
+`DLQRecord.middleware`.
+
+- if that DLQ write succeeds, the pipeline continues with the next record
+- if that DLQ write fails and no checkpoint is in play for the record, the
+  failure is logged under `DLQFailurePolicy.LOG_ONLY` and the pipeline can
+  still continue
+- if that DLQ write fails and checkpointing is enabled for the record, the run
+  stops before later records can advance the checkpoint past an unhandled
+  failure
 
 If no DLQ is configured, the error is counted in `PipelineRunSummary.records_errored` and the record is silently discarded.
 
@@ -87,7 +97,10 @@ Every failed record — whether from a middleware or a sink — is written to th
 
 If the DLQ sink itself fails to write, `DLQFailurePolicy` controls what happens next.
 
-`DLQFailurePolicy.LOG_ONLY` (default) — log the DLQ write failure and continue. The original error is already counted; losing the DLQ entry is a secondary failure.
+`DLQFailurePolicy.LOG_ONLY` (default) — log the DLQ write failure and continue
+when doing so does not violate checkpoint correctness. The original error is
+already counted; losing the DLQ entry is treated as a secondary failure only
+when the runtime can still keep resume semantics honest.
 
 `DLQFailurePolicy.RAISE` — treat a DLQ write failure as fatal and stop the pipeline. Use this when you need a hard guarantee that no failed record is silently discarded.
 

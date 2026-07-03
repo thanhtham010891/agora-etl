@@ -25,6 +25,14 @@ def test_memory_backend_stores_and_expires_values() -> None:
     assert backend.get("expired") is None
 
 
+def test_memory_backend_count_prefix_ignores_expired_values() -> None:
+    backend = MemoryBackend()
+    backend.set("ns:live", {"ok": True})
+    backend.set("ns:expired", "gone", expires_at=time.time() - 1)
+
+    assert backend.count_prefix("ns:") == 1
+
+
 def test_sqlite_backend_persists_values(tmp_path: Path) -> None:
     path = tmp_path / "state.db"
 
@@ -37,6 +45,17 @@ def test_sqlite_backend_persists_values(tmp_path: Path) -> None:
         assert second.get("alpha") == StoredValue(value={"count": 1}, expires_at=None)
     finally:
         second.close()
+
+
+def test_sqlite_backend_count_prefix_ignores_expired_values(tmp_path: Path) -> None:
+    backend = SQLiteBackend(tmp_path / "state.db")
+    try:
+        backend.set("ns:live", {"ok": True})
+        backend.set("ns:expired", "gone", expires_at=time.time() - 1)
+
+        assert backend.count_prefix("ns:") == 1
+    finally:
+        backend.close()
 
 
 def test_memory_backend_set_if_absent_is_atomic_for_existing_key() -> None:

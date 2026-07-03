@@ -325,6 +325,55 @@ async def test_sink_fan_out_concurrent_batch_path_preserves_per_record_errors() 
 
 
 @pytest.mark.asyncio
+async def test_sink_fan_out_batch_fallback_respects_max_concurrency_limit() -> None:
+    sink = _ParallelCapableFallbackSink(expected_active=2)
+    fan_out = SinkFanOut([sink]).with_concurrency(2)
+
+    write_task = asyncio.create_task(fan_out.write_batch(["a", "b", "c"]))
+
+    await asyncio.wait_for(sink.wait_for_all_entered(), timeout=1.0)
+    await asyncio.sleep(0.05)
+    assert sink.max_active == 2
+
+    sink.release()
+    results = await asyncio.wait_for(write_task, timeout=1.0)
+    assert all(result.ok for result in results)
+
+
+@pytest.mark.asyncio
+async def test_sink_fan_out_success_results_do_not_share_mutable_state() -> None:
+    class _OkSink:
+        sink_name = "ok"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: str) -> None:
+            del record
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    fan_out = SinkFanOut([_OkSink()])  # type: ignore[list-item]
+
+    first = await fan_out.write("record-a")
+    first.errors.append(RuntimeError("mutated"))
+    second = await fan_out.write("record-b")
+
+    assert second.ok
+    assert second.errors == []
+
+    batch_results = await fan_out.write_batch(["x", "y"])
+    assert batch_results[0] is not batch_results[1]
+
+    batch_results[0].errors.append(RuntimeError("mutated-batch"))
+    assert batch_results[1].errors == []
+
+
+@pytest.mark.asyncio
 async def test_sink_fan_out_arrow_batch_writes_to_all_sinks() -> None:
     batch = object()
     sink_one = _ArrowBatchCollectSink()
@@ -843,9 +892,7 @@ def test_sink_capabilities_do_not_warn_for_explicit_data_planes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sink_fanout_write_single_sink_returns_write_ok_singleton() -> None:
-    from agora.core.sink._writers import _WRITE_OK
-
+async def test_sink_fanout_write_single_sink_returns_fresh_success_result() -> None:
     written: list[str] = []
 
     class _TrackSink:
@@ -866,7 +913,8 @@ async def test_sink_fanout_write_single_sink_returns_write_ok_singleton() -> Non
     fanout = SinkFanOut([_TrackSink()])  # type: ignore[list-item]
     result = await fanout.write("hello")
 
-    assert result is _WRITE_OK
+    assert result.ok
+    assert result.errors == []
     assert written == ["hello"]
 
 
@@ -882,8 +930,6 @@ async def test_sink_fanout_write_single_sink_error_returns_write_result_not_ok()
 
 @pytest.mark.asyncio
 async def test_sink_fanout_write_multi_sink_does_not_use_fast_path() -> None:
-    from agora.core.sink._writers import _WRITE_OK
-
     written: list[str] = []
 
     class _TrackSink:
@@ -904,6 +950,6 @@ async def test_sink_fanout_write_multi_sink_does_not_use_fast_path() -> None:
     fanout = SinkFanOut([_TrackSink(), _TrackSink()])  # type: ignore[list-item]
     result = await fanout.write("hello")
 
-    assert result is not _WRITE_OK
     assert result.written is True
+    assert result.errors == []
     assert written == ["hello", "hello"]

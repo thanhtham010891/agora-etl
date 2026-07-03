@@ -22,10 +22,10 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# Singleton reused for every successfully written record in the fast path.
-# Invariant: never mutate _WRITE_OK.errors — the empty list is shared across
-# every record returned via `[_WRITE_OK] * n`, so an append would corrupt all of them.
-_WRITE_OK = WriteResult(written=True, errors=[])
+
+def _write_ok() -> WriteResult:
+    """Return a fresh success result with isolated mutable state."""
+    return WriteResult(written=True, errors=[])
 
 
 def _normalize_batch_write_results(
@@ -41,7 +41,7 @@ def _normalize_batch_write_results(
     """
 
     if result is None:
-        return [_WRITE_OK] * expected
+        return [_write_ok() for _ in range(expected)]
     if isinstance(result, list) and all(isinstance(item, WriteResult) for item in result):
         if len(result) != expected:
             raise RuntimeError(
@@ -166,10 +166,17 @@ class SinkFanOut(Generic[T]):
             and capabilities.parallel_writes_safe
             and not capabilities.ordered_writes_required
         ):
+            semaphore = None
+            if self._max_concurrency is not None and self._max_concurrency > 0:
+                semaphore = asyncio.Semaphore(self._max_concurrency)
 
             async def _write_one(index: int, record: T) -> tuple[int, Exception | None]:
                 try:
-                    await sink.write(record)
+                    if semaphore is None:
+                        await sink.write(record)
+                    else:
+                        async with semaphore:
+                            await sink.write(record)
                 except Exception as exc:
                     return index, exc
                 return index, None
@@ -227,7 +234,7 @@ class SinkFanOut(Generic[T]):
         if len(self._sinks) == 1 and not self._concurrent_writes:
             try:
                 await self._sinks[0].write(record)
-                return _WRITE_OK
+                return _write_ok()
             except Exception as exc:
                 return WriteResult(written=False, errors=[exc])
 
@@ -260,12 +267,11 @@ class SinkFanOut(Generic[T]):
                 batch_result = await sink.write_batch(records)
                 return _normalize_batch_write_results(batch_result, expected=len(records))
             except Exception as exc:
-                err = WriteResult(written=False, errors=[exc])
-                return [err] * len(records)
+                return [WriteResult(written=False, errors=[exc]) for _ in range(len(records))]
 
         if len(self._sinks) == 1 and not self._concurrent_writes:
             sink = self._sinks[0]
-            fast_results: list[WriteResult] = [_WRITE_OK] * len(records)
+            fast_results = [_write_ok() for _ in range(len(records))]
             for i, record in enumerate(records):
                 try:
                     await sink.write(record)

@@ -14,15 +14,23 @@ from agora.core.acceleration import (
     normalize_acceleration_mode,
 )
 from agora.core.middleware._types import (
+    BufferedSubmitMiddleware,
     MiddlewareDataPlane,
     MiddlewareFailure,
     MiddlewareModeSpec,
     MiddlewareProcessResult,
+    PipeableMiddleware,
     PipelinedBatchStageSpec,
+    is_buffered_submit_middleware,
+    is_drainable_buffered_middleware,
+    is_drainable_pipelined_batch_middleware,
+    is_pipelined_batch_middleware,
 )
 from agora.core.tracing import NoopTracer
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from agora.core.batch import BatchProcessResult
     from agora.core.context import PipelineContext
 
@@ -39,14 +47,15 @@ class MiddlewareChain(Generic[T, U]):
 
     def __init__(
         self,
-        middlewares: list[Any],
+        middlewares: Sequence[PipeableMiddleware[Any, Any]],
         *,
         acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO,
     ) -> None:
-        self._middlewares = middlewares
-        self._middleware_count = len(middlewares)
+        self._middlewares: tuple[PipeableMiddleware[Any, Any], ...] = tuple(middlewares)
+        self._middleware_count = len(self._middlewares)
         self._middleware_names = [
-            getattr(middleware, "name", type(middleware).__name__) for middleware in middlewares
+            getattr(middleware, "name", type(middleware).__name__)
+            for middleware in self._middlewares
         ]
         self._row_trace_attributes = [
             {
@@ -56,11 +65,11 @@ class MiddlewareChain(Generic[T, U]):
             for middleware_name in self._middleware_names
         ]
         self._row_fast_processes = [
-            getattr(middleware, "_row_fast_process", None) for middleware in middlewares
+            getattr(middleware, "_row_fast_process", None) for middleware in self._middlewares
         ]
         self._row_rust_builtin_fast = [
             bool(getattr(middleware, "_rust_sync_builtin_fast", False))
-            for middleware in middlewares
+            for middleware in self._middlewares
         ]
         self._row_rust_builtin_prefix_counts = [0]
         builtin_fast_count = 0
@@ -245,15 +254,15 @@ class MiddlewareChain(Generic[T, U]):
 
         return BatchProcessResult(results=current)
 
-    def buffered_stages(self) -> list[tuple[int, Any]]:
+    def buffered_stages(self) -> list[tuple[int, BufferedSubmitMiddleware]]:
         """Return every middleware that supports buffered submission."""
-        stages: list[tuple[int, Any]] = []
+        stages: list[tuple[int, BufferedSubmitMiddleware]] = []
         for index, middleware in enumerate(self._middlewares):
-            if callable(getattr(middleware, "submit", None)):
+            if is_buffered_submit_middleware(middleware):
                 stages.append((index, middleware))
         return stages
 
-    def first_buffered_stage(self) -> tuple[int, Any] | None:
+    def first_buffered_stage(self) -> tuple[int, BufferedSubmitMiddleware] | None:
         """Return the first middleware that supports buffered submission."""
         stages = self.buffered_stages()
         if not stages:
@@ -266,9 +275,10 @@ class MiddlewareChain(Generic[T, U]):
 
         stages: list[PipelinedBatchStageSpec] = []
         for index, middleware in enumerate(self._middlewares):
-            submit_batch = getattr(middleware, "submit_batch", None)
-            max_in_flight = max(1, int(getattr(middleware, "batch_in_flight_limit", 1)))
-            if not callable(submit_batch) or max_in_flight <= 1:
+            if not is_pipelined_batch_middleware(middleware):
+                continue
+            max_in_flight = max(1, int(middleware.batch_in_flight_limit))
+            if max_in_flight <= 1:
                 continue
             stages.append(
                 PipelinedBatchStageSpec(
@@ -276,7 +286,7 @@ class MiddlewareChain(Generic[T, U]):
                     middleware=middleware,
                     name=getattr(middleware, "name", "pipelined_batch"),
                     max_in_flight=max_in_flight,
-                    ordered=bool(getattr(middleware, "ordered_batch_commits", True)),
+                    ordered=bool(middleware.ordered_batch_commits),
                     arrow_stage=isinstance(middleware, ArrowBatchMiddleware),
                 )
             )
@@ -291,19 +301,17 @@ class MiddlewareChain(Generic[T, U]):
     async def drain_buffered(self, ctx: PipelineContext) -> None:
         """Ask buffered middlewares to flush pending records before shutdown."""
         for middleware in self._middlewares:
-            drain_pending = getattr(middleware, "drain_pending", None)
-            if callable(drain_pending):
-                await drain_pending(ctx)
+            if is_drainable_buffered_middleware(middleware):
+                await middleware.drain_pending(ctx)
 
     async def drain_pipelined_batches(self, ctx: PipelineContext) -> None:
         """Ask pipelined batch middlewares to flush any batch-local buffers."""
         for middleware in self._middlewares:
-            drain_pending = getattr(middleware, "drain_pending_batches", None)
-            if callable(drain_pending):
-                await drain_pending(ctx)
+            if is_drainable_pipelined_batch_middleware(middleware):
+                await middleware.drain_pending_batches(ctx)
 
     async def start_all(self, ctx: PipelineContext) -> None:
-        started: list[Any] = []
+        started: list[PipeableMiddleware[Any, Any]] = []
         for middleware in self._middlewares:
             try:
                 await middleware.on_start(ctx)
@@ -326,8 +334,8 @@ class MiddlewareChain(Generic[T, U]):
     async def _rollback_started_middlewares(
         self,
         ctx: PipelineContext,
-        failing: Any,
-        started: list[Any],
+        failing: PipeableMiddleware[Any, Any],
+        started: list[PipeableMiddleware[Any, Any]],
     ) -> None:
         for middleware in [failing, *reversed(started)]:
             try:
@@ -491,7 +499,7 @@ class MiddlewareChain(Generic[T, U]):
         record: Any,
         ctx: PipelineContext,
         *,
-        middlewares: list[Any],
+        middlewares: Sequence[PipeableMiddleware[Any, Any]],
         middleware_names: list[str],
         row_fast_processes: list[Any],
     ) -> tuple[Any | None, MiddlewareFailure | None]:

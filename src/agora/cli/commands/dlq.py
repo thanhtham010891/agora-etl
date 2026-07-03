@@ -195,6 +195,19 @@ async def _run_dlq_command(args: argparse.Namespace) -> int:
                 )
                 continue
             try:
+                replay_pipeline = _build_replay_pipeline(
+                    replay_template,
+                    replay_payload,
+                    mode=replay_mode,
+                )
+            except Exception as exc:
+                failed += 1
+                console.warn(
+                    f"Replay failed for {record.pipeline_id}/{record.stage}: "
+                    f"could not prepare replay pipeline: {type(exc).__name__}: {exc}"
+                )
+                continue
+            try:
                 updated = await dlq_sink.replay(record)
             except Exception as exc:
                 failed += 1
@@ -203,11 +216,6 @@ async def _run_dlq_command(args: argparse.Namespace) -> int:
                     f"could not mark replay attempt: {type(exc).__name__}: {exc}"
                 )
                 continue
-            replay_pipeline = _build_replay_pipeline(
-                replay_template,
-                replay_payload,
-                mode=replay_mode,
-            )
             replay_run_id = getattr(args, "run_id", None) or _default_replay_run_id(record, updated)
             try:
                 summary = await replay_pipeline.run(max_records=1, run_id=replay_run_id)

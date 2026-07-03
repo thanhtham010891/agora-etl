@@ -1273,6 +1273,63 @@ async def test_g11_dlq_failure_policy_log_only_continues_pipeline() -> None:
     assert summary.records_errored == 1
 
 
+@pytest.mark.asyncio
+async def test_g11b_middleware_dlq_failure_with_checkpoint_aborts_before_later_checkpoint_advance() -> (
+    None
+):
+    """[GUARANTEE-11b] With checkpointing enabled, a middleware failure that
+    also fails DLQ routing must stop before later records can advance the
+    checkpoint.
+    """
+
+    class _BrokenDLQ:
+        sink_name = "broken_dlq"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: DLQRecord) -> None:
+            del record
+            raise RuntimeError("dlq boom")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    store = InMemoryCheckpointStore()
+    sink = _CollectSink()
+
+    with pytest.raises(ValueError, match="middleware boom on 2"):
+        await (
+            Pipeline(
+                _CheckpointedSequenceSource([1, 2, 3]),
+                id="middleware_dlq_failure_checkpoint_contract",
+            )
+            .pipe(_RaisingMiddleware(fail_on=2))
+            .build(
+                sink,
+                config=DeliveryConfig(
+                    checkpoint=store,
+                    dlq=_BrokenDLQ(),  # type: ignore[arg-type]
+                ),
+            )
+            .run()
+        )
+
+    checkpoint = await store.load("middleware_dlq_failure_checkpoint_contract")
+    assert sink.records == [1], (
+        "[GUARANTEE-11b] later records must not write after an unrouted "
+        "middleware failure when checkpointing is enabled"
+    )
+    assert checkpoint is not None
+    assert checkpoint.value == {"index": 0}, (
+        "[GUARANTEE-11b] checkpoint must remain at the last handled record "
+        "before the unrouted middleware failure"
+    )
+
+
 # ======================================================================
 # [GUARANTEE-12] Sink LOG_AND_CONTINUE advances checkpoint without DLQ
 # ======================================================================
@@ -2062,7 +2119,7 @@ async def test_gb04_batch_middleware_dlq_failure_does_not_advance_checkpoint() -
 @pytest.mark.asyncio
 async def test_gb04_row_middleware_dlq_failure_does_not_advance_checkpoint() -> None:
     """[GUARANTEE-B04] Row middleware failures are not checkpointed when the
-    configured DLQ sink fails under FAIL_CLOSED.
+    configured DLQ sink fails while checkpointing is enabled.
     """
 
     class _AlwaysRaises(Middleware[int, int]):
@@ -2090,22 +2147,21 @@ async def test_gb04_row_middleware_dlq_failure_does_not_advance_checkpoint() -> 
 
     store = InMemoryCheckpointStore()
 
-    summary = await (
-        Pipeline(_CheckpointedSequenceSource([1]), id="row_dlq_failure_contract")
-        .pipe(_AlwaysRaises())
-        .build(
-            _CollectSink(),
-            config=DeliveryConfig(
-                checkpoint=store,
-                checkpoint_every=1,
-                dlq=_BrokenDLQ(),  # type: ignore[arg-type]
-            ),
-        )  # type: ignore[arg-type]
-        .run()
-    )
+    with pytest.raises(ValueError, match="middleware boom"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([1]), id="row_dlq_failure_contract")
+            .pipe(_AlwaysRaises())
+            .build(
+                _CollectSink(),
+                config=DeliveryConfig(
+                    checkpoint=store,
+                    checkpoint_every=1,
+                    dlq=_BrokenDLQ(),  # type: ignore[arg-type]
+                ),
+            )  # type: ignore[arg-type]
+            .run()
+        )
 
-    assert summary.records_errored == 1
-    assert summary.runtime.dlq_failure_count == 1
     assert await store.load("row_dlq_failure_contract") is None
 
 
@@ -2185,12 +2241,100 @@ async def test_gd03_batch_write_preserves_per_record_outcomes_and_checkpointing(
     )
 
 
+@pytest.mark.asyncio
+async def test_gd03b_batch_sink_dlq_partial_failure_does_not_checkpoint_past_first_unrouted_record() -> (
+    None
+):
+    """[GUARANTEE-D03b] The whole-batch exception helper must stop
+    checkpointing and hook delivery at the first unrouted record under
+    FAIL_CLOSED.
+    """
+    from types import SimpleNamespace
+
+    from agora.core.runtime._delivery import RecordDeliveryError, RunState, make_checkpoint_state
+    from agora.core.runtime._delivery_batching import flush_batch_outcomes
+
+    class _Metrics:
+        def __init__(self) -> None:
+            self.records_errored = 0
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.metrics = _Metrics()
+
+    state = RunState(
+        ctx=_Ctx(),  # type: ignore[arg-type]
+        checkpoint_state=make_checkpoint_state(),
+        pending_writes=[],
+    )
+    persisted: list[tuple[int, int]] = []
+    hook_calls: list[str] = []
+    attempted_records: list[int] = []
+
+    async def _write_to_dlq(**kwargs: Any) -> bool:
+        record = kwargs["record"]
+        assert isinstance(record, int)
+        attempted_records.append(record)
+        return record != 20
+
+    def _prepare_checkpoint(ctx: Any, checkpoint_state: Any, checkpoint_value: Any) -> Any:
+        del ctx
+        checkpoint_state.increment()
+        return SimpleNamespace(value=checkpoint_value)
+
+    async def _persist_checkpoint(
+        ctx: Any,
+        checkpoint_state: Any,
+        checkpoint: Any,
+        *,
+        batch_size: int = 1,
+    ) -> None:
+        del ctx
+        persisted.append((checkpoint.value, batch_size))
+        checkpoint_state.mark_saved(checkpoint.value)
+
+    async def _hook(name: str) -> None:
+        hook_calls.append(name)
+
+    with pytest.raises(RecordDeliveryError, match="sink boom"):
+        await flush_batch_outcomes(
+            state=state,
+            exc=RuntimeError("sink boom"),
+            processed_list=["p10", "p20", "p30"],
+            raw_list=[10, 20, 30],
+            checkpoint_list=[0, 1, 2],
+            on_success_list=[
+                lambda: _hook("first"),
+                lambda: _hook("second"),
+                lambda: _hook("third"),
+            ],
+            sink_failure_policy=SinkFailurePolicy.FAIL_CLOSED,
+            write_to_dlq=_write_to_dlq,
+            prepare_checkpoint=_prepare_checkpoint,
+            persist_checkpoint=_persist_checkpoint,
+        )
+
+    assert attempted_records == [10, 20], (
+        "[GUARANTEE-D03b] later records must not be processed after the first "
+        "unrouted batch item under FAIL_CLOSED"
+    )
+    assert persisted == [(0, 1)], (
+        "[GUARANTEE-D03b] checkpoint must stop at the last handled record before "
+        "the first unrouted batch item"
+    )
+    assert hook_calls == ["first"], (
+        "[GUARANTEE-D03b] success hooks for later items must not run after the "
+        "first unrouted batch item"
+    )
+
+
 # ======================================================================
 # [GUARANTEE-P08] Process-isolated batch middleware keeps the same commit contract
 # ======================================================================
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_process_pool
 async def test_gp08a_process_batch_sink_failure_does_not_advance_checkpoint() -> None:
     """[GUARANTEE-P08a] Process-isolated batch work is not committed until the
     downstream sink write succeeds in the main runtime.
@@ -2237,6 +2381,7 @@ async def test_gp08a_process_batch_sink_failure_does_not_advance_checkpoint() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_process_pool
 async def test_gp08b_process_batch_timeout_invalidates_stale_batches_and_preserves_ordered_commit() -> (
     None
 ):
@@ -2302,6 +2447,7 @@ async def test_gp08b_process_batch_timeout_invalidates_stale_batches_and_preserv
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_process_pool
 async def test_gp08c_process_batch_cancellation_aborts_inflight_work_promptly() -> None:
     """[GUARANTEE-P08c] Cancelling the pipeline aborts the active process-pool
     generation instead of waiting indefinitely for worker completion.
