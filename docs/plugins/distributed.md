@@ -99,8 +99,9 @@ Important boundary: Redlock nodes must be independent Redis masters. Replicas,
 Sentinel members for one primary, or unrelated Cluster shards are not
 interchangeable quorum members.
 
-Worker registry and fencing-token generation still use `redis_url`; Redlock
-controls only per-pipeline lease acquisition, release, renewal, and validation.
+Worker registry and the authoritative fencing counter both use `redis_url`.
+The Redlock quorum nodes still decide lease ownership, but they now persist the
+same reserved fencing token instead of minting per-node counters.
 
 ## Direct sample
 

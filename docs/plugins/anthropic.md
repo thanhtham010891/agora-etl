@@ -4,8 +4,8 @@ _When to read this: the pipeline needs Claude-style completion or structured
 JSON output, and the support boundary needs to stay honest before choosing this
 provider._
 
-Anthropic support is part of the official `agora-etl-plugins` bundle through
-the `anthropic` extra.
+Anthropic support is part of the official first-party `agora-etl-plugins`
+package through the `anthropic` extra.
 
 The supported promise is intentionally focused: Claude completions and
 structured output, not embeddings.
@@ -21,7 +21,7 @@ with the application deployment.
 - Registry key: `anthropic`
 - Entry-point group: `agora.ai.providers`
 - Import path: `agora_plugins.anthropic`
-- Bundle status: official bundle extra
+- Package lane: official first-party extra
 - Supported lane: completion and structured output
 
 This page documents the official Anthropic path as it exists today: a focused
@@ -45,7 +45,7 @@ Anthropic does not provide native embedding models in this package's support
 story. `AnthropicProvider` declares `supports_embeddings=False`, so
 embedding-based workflows are rejected by Agora's embedding provider guard even
 if legacy compatibility methods are present. For embedding-based workflows,
-prefer `agora-ai-openai` or `agora-ai-gemini`.
+prefer an embedding-capable Agora provider package instead.
 
 ## Install
 
@@ -75,6 +75,12 @@ Set credentials with:
 - Use completion and structured-output middleware only; choose an
   embedding-capable provider for embedding workflows.
 
+In the current `agora-etl-plugins 0.4.x` line, the default Claude API model is
+`claude-haiku-4-5-20251001`. The provider's built-in allowlist is intended to
+track active production model ids on Anthropic-operated surfaces. If a team
+needs to trial a newer id before the bundle is refreshed, it must opt in with
+`allow_unknown_models=True`.
+
 ## End-to-end example
 
 This is the recommended supported path: use Anthropic to normalize messy
@@ -101,7 +107,7 @@ source = IterableSource(
     ]
 )
 
-provider = AnthropicProvider(model="claude-3-5-haiku-20241022")
+provider = AnthropicProvider(model="claude-haiku-4-5-20251001")
 middleware = AIExtractMiddleware(
     provider=provider,
     source_field="raw_description",
@@ -131,5 +137,5 @@ This provider is official, but its scope stays intentionally narrow:
   `supports_embeddings=False`
 - embedding-based features should use an embedding-capable provider instead
 
-That keeps the Anthropic path honest while still making it part of the official
-bundle.
+That keeps the Anthropic path honest while still making it part of the
+official first-party plugin package.

@@ -18,9 +18,9 @@ object that plugins can declare changes — for example, if a new required field
 is added or an existing field is renamed. It does not bump on every
 `agora-etl` release.
 
-`agora-etl` `0.4.2` does not change the manifest schema. Plugins compatible
-with the `0.4.x` manifest contract do not need a manifest update solely because
-the core package moved to production maturity metadata.
+The current `0.4.x` line does not change the manifest schema. Plugins
+compatible with the `0.4.x` manifest contract do not need a manifest update
+solely because docs, diagnostics, or maturity metadata were refreshed.
 
 ## What is a MANIFEST?
 

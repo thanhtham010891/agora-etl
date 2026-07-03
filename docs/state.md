@@ -27,8 +27,8 @@ of persisted state without introducing a full external database abstraction.
 | `SQLiteBackend` | Local persistence, single-process workers, simple deployments |
 
 Third-party backends can register themselves through
-`agora.state.backends`. The official plugin bundle adds Redis-backed options for
-multi-process or shared deployments.
+`agora.state.backends`. The official first-party plugin package adds
+Redis-backed options for multi-process or shared deployments.
 
 ## Using a backend directly
 

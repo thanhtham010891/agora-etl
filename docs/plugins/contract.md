@@ -5,10 +5,10 @@ _When to read this: you are building a third-party plugin package and need to kn
 This page is the single source of truth for the plugin author contract. It is
 the plugin-layer equivalent of [Runtime Guarantees](../guides/runtime-guarantees.md).
 
-For the `agora-etl` `0.4.2` production metadata release, the important promise
-is simple: the plugin contract remains on the `0.4.x` line. The release changes
-docs and public maturity metadata; it does not change the plugin manifest
-schema.
+For the current `agora-etl` `0.4.x` production line, the important promise is
+simple: the plugin contract remains on the `0.4.x` line unless the
+documentation and change log say otherwise. Minor releases may tighten docs,
+diagnostics, and maturity metadata without changing the plugin manifest schema.
 
 ## Stability labels
 

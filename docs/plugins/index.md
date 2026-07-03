@@ -9,7 +9,7 @@ integrations and their backend-specific validation matrix.
 
 This section focuses on the public plugin story:
 
-- what the official plugin bundle includes
+- what the official first-party plugin package includes
 - which plugin families are production-ready flagship surfaces
 - when to use each plugin family
 - what kind of system problem each family solves
@@ -46,7 +46,10 @@ provide:
 This keeps the core framework smaller and lets integrations evolve on their own
 release cadence.
 
-## Official first-party bundle
+These plugin contracts also form the supported backend layer that operator
+surfaces should build on. Runtime semantics still belong in the core.
+
+## Official first-party package
 
 The public first-party plugin distribution is
 [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/).
@@ -54,7 +57,7 @@ The public first-party plugin distribution is
 Current official coverage includes Redis, Kafka, PostgreSQL, Anthropic
 completion support, cron scheduling, and distributed worker coordination. The
 published plugin `0.4.x` line targets `agora-etl>=0.4.1,<1`; these docs are
-refreshed for the `agora-etl` `0.4.2` production metadata release.
+aligned with the current `agora-etl` `0.4.x` production line.
 
 Install examples:
 

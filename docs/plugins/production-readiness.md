@@ -1,13 +1,13 @@
 # Plugin Production Readiness
 
-_When to read this: you are deciding whether `agora-etl-plugins` is ready for a production deployment, or you need the supported compatibility and operational boundaries for the official bundle._
+_When to read this: you are deciding whether `agora-etl-plugins` is ready for a production deployment, or you need the supported compatibility and operational boundaries for the official first-party plugin package._
 
-`agora-etl-plugins` is the official first-party integration bundle for Agora.
-The production-ready surface is intentionally centered on a small set of
-flagship backend families rather than a large connector catalog.
+`agora-etl-plugins` is the official first-party plugin package for Agora. The
+production-ready surface is intentionally centered on a small set of flagship
+backend families rather than a large connector catalog.
 
-For the `agora-etl` `0.4.2` release, this page is the public readiness map for
-the plugin ecosystem. It keeps three things separate:
+For the current `agora-etl` `0.4.x` production line, this page is the public
+readiness map for the plugin ecosystem. It keeps three things separate:
 
 - core runtime maturity (`agora-etl`)
 - official integration maturity (`agora-etl-plugins`)
@@ -17,8 +17,8 @@ the plugin ecosystem. It keeps three things separate:
 
 | Package | Supported line | Notes |
 |---|---|---|
-| `agora-etl-plugins` | `0.4.x` | Official plugin bundle release line. |
-| `agora-etl` | `>=0.4.1,<1` | Required runtime contract for the plugin bundle. The core `0.4.2` release refreshes docs and production metadata without changing the plugin manifest schema. |
+| `agora-etl-plugins` | `0.4.x` | Official first-party plugin package release line. |
+| `agora-etl` | `>=0.4.1,<1` | Required runtime contract for the plugin package across the current `0.4.x` line. |
 | Python | `3.11`, `3.12`, `3.13` | Matches package classifiers and CI compatibility coverage. |
 | Redis client | `redis>=7.0,<8` | Used by Redis, distributed coordination, Redis DLQ, state, dedup, and cache surfaces. |
 | Kafka client | `aiokafka>=0.11,<1` | Used by Kafka source, sink, DLQ, and Kafka-backed runtime helpers. |
@@ -73,6 +73,10 @@ policy so maintainers can coordinate a fix before details are disclosed.
 Support policy is intentionally not duplicated in this core documentation. Use
 the package README, release notes, and issue tracker for ordinary support and
 the security policy only for exploitable vulnerabilities.
+
+Operator-facing products or dashboards should treat this page as the public
+support boundary for backend maturity claims rather than inferring support
+levels from source layout alone.
 
 ## Deployment Notes
 

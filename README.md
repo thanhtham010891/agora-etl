@@ -15,6 +15,14 @@ and plugin discovery. Backend integrations such as Redis, Kafka, PostgreSQL,
 cron scheduling, distributed coordination, and Anthropic live in the official
 [`agora-etl-plugins`](docs/plugins/index.md) package.
 
+Keep the package story simple:
+
+- `agora-etl` owns runtime semantics and public framework contracts
+- `agora-etl-plugins` owns official backend implementations and backend
+  runbooks
+- `agora-etl-rs` accelerates selected hot paths through the core acceleration
+  boundary
+
 ## Install
 
 ```bash

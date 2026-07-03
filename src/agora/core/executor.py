@@ -126,7 +126,7 @@ class PipelineExecutor:
         if not state.dlq_opened:
             return
         if isinstance(exc, SourceRecordError):
-            await coordinator.write_to_dlq(
+            routed = await coordinator.write_to_dlq(
                 ctx=state.ctx,
                 stage=exc.stage,
                 exc=exc.original,
@@ -135,6 +135,8 @@ class PipelineExecutor:
                 checkpoint=exc.checkpoint,
                 source=exc.source or self._spec.source.source_name,
             )
+            if routed and exc.on_handled is not None:
+                await exc.on_handled()
             return
 
         await coordinator.write_to_dlq(

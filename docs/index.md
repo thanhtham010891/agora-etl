@@ -4,6 +4,16 @@ _When to read this: you want the quickest map of what Agora does and where to go
 
 agora-etl is a Python async ETL framework built around a `Source → Middleware chain → Sink(s)` model. It handles checkpointing, dead-letter queues, retries, and long-running workers so you can focus on the transformation logic.
 
+The runtime stays intentionally smaller than the whole ecosystem:
+
+- `agora-etl` owns runtime semantics and extension contracts
+- `agora-etl-plugins` owns official backend integrations and backend-specific
+  production guidance
+- `agora-etl-rs` stays optional and accelerates selected hot paths without
+  changing runtime semantics
+- operator-facing product workflows should build on those contracts instead of
+  redefining them
+
 ## Start here
 
 - **Running your first pipeline** → [guides/quickstart.md](guides/quickstart.md)

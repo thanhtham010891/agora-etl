@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from agora.core.checkpoint import CheckpointValue
 
 
@@ -19,6 +21,7 @@ class SourceRecordError(RuntimeError):
         checkpoint: CheckpointValue = None,
         source: str | None = None,
         stage: str = "source_record",
+        on_handled: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(str(exc))
         self.original = exc
@@ -26,3 +29,4 @@ class SourceRecordError(RuntimeError):
         self.checkpoint = checkpoint
         self.source = source
         self.stage = stage
+        self.on_handled = on_handled

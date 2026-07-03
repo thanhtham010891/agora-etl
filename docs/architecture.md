@@ -18,6 +18,23 @@ Agora now has a deliberate public import hierarchy inside `agora-etl`:
 The practical rule is simple: prefer package `__init__` facades and documented
 top-level modules, not helper files.
 
+## Ecosystem package relationship
+
+The runtime sits inside a wider package story:
+
+- `agora-etl` owns execution semantics, runtime contracts, diagnostics, and
+  builder-facing APIs
+- `agora-etl-plugins` owns backend implementations and backend-specific
+  production guidance
+- `agora-etl-rs` accelerates selected hot paths without changing the runtime
+  contract
+- operator-facing product layers should consume those supported contracts
+  instead of depending on private runtime files
+
+That boundary matters because architecture clarity is part of correctness: the
+runtime should expose stable machine-readable surfaces, while ecosystem layers
+build on top of them.
+
 ## Orchestration layers
 
 The orchestration path is now intentionally split into three layers:

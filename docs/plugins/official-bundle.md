@@ -5,16 +5,16 @@ _When to read this: you want the supported first-party integration story and nee
 The official first-party plugin package is `agora-etl-plugins`.
 
 It exists to keep the core runtime focused while still giving the ecosystem a
-clear, supported set of integrations.
+clear, supported integration layer.
 
-For the `0.4.x` production line, the bundle is documented as the official
-integration layer for Redis, Kafka, PostgreSQL, Anthropic, cron scheduling, and
-distributed coordination. The core package remains intentionally smaller:
-`agora-etl` supplies runtime contracts and registries; the plugin package
-supplies backend implementations.
+For the `0.4.x` production line, this package is the official first-party
+backend and helper layer for Redis, Kafka, PostgreSQL, Anthropic, cron
+scheduling, and distributed coordination. The core package remains
+intentionally smaller: `agora-etl` supplies runtime contracts and registries;
+the plugin package supplies backend implementations.
 
-Anthropic completion support is part of the official bundle through the
-`anthropic` extra.
+Anthropic completion support is part of this official first-party package
+through the `anthropic` extra.
 
 ## Compatibility
 
@@ -125,7 +125,9 @@ See: [PostgreSQL](postgresql.md)
 
 Choose Anthropic when the AI workflow is completion-driven and Claude models
 fit the job, especially for enrichment, extraction, validation, translation, or
-structured JSON output.
+structured JSON output. In the current plugin line, the default Claude API
+model is `claude-haiku-4-5-20251001`, and teams that want a newer unlisted id
+must opt in explicitly.
 
 See: [Anthropic](anthropic.md)
 
