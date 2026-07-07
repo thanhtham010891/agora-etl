@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, TypeVar, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 SnapshotT = TypeVar("SnapshotT", contravariant=True)
 ReportT = TypeVar("ReportT", bound="AcceptanceReport", covariant=True)
@@ -65,8 +68,24 @@ class AcceptanceGate(Protocol[SnapshotT, ReportT]):
         """Return a machine-readable acceptance report for ``snapshot``."""
 
 
+@runtime_checkable
+class AcceptanceReportProvider(Protocol[ReportT]):
+    """Protocol for components that expose an acceptance report directly."""
+
+    def acceptance_report(self, thresholds: Any = None) -> ReportT | Awaitable[ReportT]:
+        """Return an acceptance report, optionally using caller-provided thresholds."""
+
+
+def has_acceptance_report(component: object) -> TypeGuard[AcceptanceReportProvider[Any]]:
+    """Return True when *component* exposes the shared acceptance-report contract."""
+
+    return isinstance(component, AcceptanceReportProvider)
+
+
 __all__ = [
     "AcceptanceFinding",
     "AcceptanceGate",
     "AcceptanceReport",
+    "AcceptanceReportProvider",
+    "has_acceptance_report",
 ]

@@ -114,8 +114,8 @@ The JSON form (`agora plugins list --json`) includes:
 - `capabilities`
 - `error` for broken entry-points or collision diagnostics that did not become active registrations
 
-This output is intended to be stable enough for local diagnostics and contract
-tests in plugin packages.
+This output is part of the public diagnostics surface for local checks and
+contract tests in plugin packages.
 
 ### `agora doctor`
 
@@ -125,8 +125,6 @@ tests in plugin packages.
 - incompatible MANIFEST versions: reported as `WARN`
 - entry-point key collisions with built-ins/public keys: reported as `WARN`
 - manifestless plugins: loaded normally, but counted separately in diagnostics
-
-## Stable base classes and protocols
 
 ## Preferred import boundaries for plugin authors
 
@@ -153,6 +151,23 @@ part of the public boundary:
 Prefer those facades over file-level modules. They are what the architecture
 and public API tests freeze intentionally.
 
+For operator-facing public diagnostics surfaces, prefer the shared protocols
+over ad hoc method probes:
+
+- `agora.core.health.HealthCheckable` for `health_snapshot()`
+- `agora.core.metrics.MetricsSnapshotProvider` for `metrics_snapshot()`
+- `agora.core.metrics.PrometheusMetricsProvider` for
+  `render_prometheus_metrics()`
+- `agora.core.recovery.SourceRecoveryContractProvider` for
+  `recovery_contract()`
+- `agora.core.acceptance.AcceptanceGate` for acceptance/report evaluation
+- `agora.core.acceptance.AcceptanceReportProvider` for
+  `acceptance_report()`
+
+For poison-record and DLQ diagnostics, use the shared vocabulary in
+`agora.core.failures`: `FailureClassification`, `PoisonRecordClassification`,
+`PoisonRecordInfo`, and `PoisonRecordPolicy`.
+
 ### Sources — `agora.sources`
 
 Implement `BaseSource[T]` from `agora.core.source`. Required:
@@ -176,7 +191,8 @@ accepts anything beyond Python rows, advertise that explicitly:
 For plugin tests, prefer the public helpers:
 
 ```python
-from agora import sink_data_plane_spec, source_data_plane_spec
+from agora.core.sink import sink_data_plane_spec
+from agora.core.source import source_data_plane_spec
 
 source_spec = source_data_plane_spec(MySource())
 sink_spec = sink_data_plane_spec(MySink())
@@ -200,6 +216,10 @@ If a sink implements native batch writing, `write_batch()` may either:
 - behave like `BaseSink.write_batch()` and return `None` on success
 - return `list[WriteResult]` with one outcome per input record when the sink
   can report partial per-record success/failure
+
+For extension-author docs and examples, prefer importing `WriteResult` from
+`agora.core.sink` or `agora.core.writer` instead of the root `agora`
+convenience facade.
 
 That second form is now part of the public batch-delivery contract and is what
 the runtime uses to preserve per-record DLQ and checkpoint behavior inside one

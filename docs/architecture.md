@@ -158,7 +158,7 @@ That vocabulary is exposed on the public contracts too:
 
 - `source.data_plane_spec()` / `source.emitted_data_plane`
 - `sink.data_plane_spec()`
-- `from agora import DataPlane, SourceDataPlaneSpec, SinkDataPlaneSpec`
+- `from agora.core import DataPlane, SourceDataPlaneSpec, SinkDataPlaneSpec`
 
 The planner resolves two important boundaries up front:
 

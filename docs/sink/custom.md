@@ -3,11 +3,13 @@
 _Use this when: no built-in or plugin sink matches the destination system._
 
 Custom sinks subclass `BaseSink[T]`.
+For extension-author docs, prefer importing sink contracts from
+`agora.core.sink` instead of the root `agora` convenience facade.
 
 ## Minimum shape
 
 ```python
-from agora import BaseSink
+from agora.core.sink import BaseSink
 
 
 class MySink(BaseSink[dict]):
@@ -27,7 +29,8 @@ Every sink always accepts Python rows. Additional native planes are optional and
 advertised through the sink's public data-plane contract:
 
 ```python
-from agora import DataPlane, sink_data_plane_spec
+from agora.core import DataPlane
+from agora.core.sink import sink_data_plane_spec
 
 spec = sink_data_plane_spec(MySink())
 assert spec.accepted_planes == (DataPlane.PYTHON_ROWS,)
@@ -40,7 +43,8 @@ If the destination can write many records at once, implement `write_batch()`
 and advertise batch-native planes explicitly:
 
 ```python
-from agora import BaseSink, DataPlane
+from agora.core import DataPlane
+from agora.core.sink import BaseSink
 
 
 class MyBatchSink(BaseSink[dict]):
@@ -68,7 +72,8 @@ implement `write_arrow_batch()` and advertise Arrow in `native_data_planes`:
 ```python
 import pyarrow as pa
 
-from agora import BaseSink, DataPlane
+from agora.core import DataPlane
+from agora.core.sink import BaseSink
 
 
 class MyArrowSink(BaseSink[dict]):

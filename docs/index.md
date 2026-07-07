@@ -11,13 +11,14 @@ The runtime stays intentionally smaller than the whole ecosystem:
   production guidance
 - `agora-etl-rs` stays optional and accelerates selected hot paths without
   changing runtime semantics
-- operator-facing product workflows should build on those contracts instead of
-  redefining them
+- deployment tooling and operator workflows should build on those contracts
+  instead of redefining them
 
 ## Start here
 
 - **Running your first pipeline** → [guides/quickstart.md](guides/quickstart.md)
 - **Backend and integration examples** → [plugins/index.md](plugins/index.md)
+- **Which doc is the source of truth?** → [source-of-truth.md](source-of-truth.md)
 - **Understanding pipeline structure** → [guides/pipelines.md](guides/pipelines.md)
 - **Preparing for production** → [guides/scheduling.md](guides/scheduling.md)
 - **Handling failures and recovery** → [guides/failure-handling.md](guides/failure-handling.md)

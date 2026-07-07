@@ -5,11 +5,11 @@ import pytest
 from agora import (
     DataPlane,
     DeliveryConfig,
-    InMemoryCheckpointStore,
     InMemoryTracer,
     Pipeline,
     SourceDataPlaneSpec,
 )
+from agora.core.checkpoint import InMemoryCheckpointStore
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 

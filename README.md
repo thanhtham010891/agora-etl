@@ -23,6 +23,16 @@ Keep the package story simple:
 - `agora-etl-rs` accelerates selected hot paths through the core acceleration
   boundary
 
+## Source of truth
+
+Use this README for install, quickstart, and package boundary orientation.
+For canonical docs beyond that:
+
+- runtime contract: [Runtime Guarantees](docs/guides/runtime-guarantees.md)
+- plugin ecosystem and backend boundaries: [Plugins](docs/plugins/index.md)
+- support-boundary map: [Source Of Truth Map](docs/source-of-truth.md)
+- CLI behavior: [CLI](docs/cli.md)
+
 ## Install
 
 ```bash
@@ -90,7 +100,7 @@ asyncio.run(main())
 - routes failed records to a local SQLite DLQ
 - returns a `PipelineRunSummary` with counts, timing, and runtime signals
 
-## Core capabilities
+## Capability snapshot
 
 | Area | What core provides |
 |---|---|

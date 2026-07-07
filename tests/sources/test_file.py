@@ -16,13 +16,9 @@ from typing import Any
 
 import pytest
 
-from agora import (
-    DeliveryConfig,
-    InMemoryCheckpointStore,
-    Pipeline,
-    SourceRecordError,
-    SourceRecordFailurePolicy,
-)
+from agora import DeliveryConfig, Pipeline, SourceRecordFailurePolicy
+from agora.core.checkpoint import InMemoryCheckpointStore
+from agora.core.source import SourceRecordError
 from agora.sources.file import CsvSource, JsonLinesSource, ParquetSource
 
 

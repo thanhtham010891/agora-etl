@@ -40,6 +40,8 @@ class _FakeEntryPoint:
         self.name = name
         self._plugin = plugin
         self.dist = SimpleNamespace(name=dist_name, version=dist_version)
+        self.module = getattr(plugin, "__module__", "")
+        self.value = f"{self.module}:{getattr(plugin, '__name__', 'Plugin')}"
 
     def load(self) -> object:
         return self._plugin
@@ -100,6 +102,8 @@ def test_registry_load_entrypoints_records_manifest_metadata(
     item = registry.describe_items()[0]
     assert item.key == "fake_sink"
     assert item.origin == "entrypoint"
+    assert item.manifest_name == "fake_plugin_ok"
+    assert item.module_path == "fake_plugin_ok.sinks"
     assert item.package == "fake_plugin_ok-dist"
     assert item.version == "1.2.3"
     assert item.compatible is True
@@ -282,6 +286,7 @@ def test_registry_load_entrypoints_without_manifest_keeps_distribution_metadata(
 
     item = registry.describe_items()[0]
     assert item.key == "manifestless_sink"
+    assert item.module_path == "manifestless_plugin.sinks"
     assert item.package == "manifestless-plugin"
     assert item.version == "0.5.0"
     assert item.compatible is None
@@ -374,6 +379,10 @@ def test_registry_rows_do_not_label_entrypoint_plugins_as_builtin() -> None:
 
     registry.register("redis_stream", RedisStreamSource)
     registry._origins["redis_stream"] = "entrypoint"
+    registry._metadata["redis_stream"] = {
+        "package": "agora-etl-plugins",
+        "module_path": "agora_plugins.redis.sources.redis",
+    }
 
     rows = _registry_rows(
         registry,

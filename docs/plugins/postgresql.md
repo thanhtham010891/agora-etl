@@ -2,13 +2,23 @@
 
 _When to read this: the pipeline needs PostgreSQL extraction, table writes,
 schema adaptation, SQL-native DLQ/replay, HA read routing, or Kafka-to-Postgres
-runtime helpers._
+composed flows._
 
 The PostgreSQL family in `agora-etl-plugins 0.4.x` is a production-ready
 flagship backend. It includes checkpoint-aware SQL sources, pooled table sinks,
 SQL/`COPY`/`COPY + MERGE` write modes, schema-aware table adaptation,
 PostgreSQL-backed DLQ, observability reports, replica staleness controls, and
-Kafka-to-Postgres runtime helpers.
+Kafka-to-Postgres composed flows.
+
+## Maturity card
+
+| Field | Value |
+|---|---|
+| Support label | Production-ready flagship |
+| In scope | Checkpoint-aware source reads, SQL/`COPY`/`COPY + MERGE` sink modes, schema adapter, PostgreSQL DLQ/replay, HA read routing, and sink observability. |
+| Out of scope | General migration tooling, warehouse-style mutation breadth outside the documented sink modes, and treating Kafka-to-Postgres runtime helpers as the default PostgreSQL onboarding lane. |
+| Required validation gate | `make test-release-gate-postgres` |
+| Operator hooks | `metrics_snapshot()`, `health_snapshot()`, `acceptance_report()`, `render_prometheus_metrics()`, plus replica-staleness controls on source reads. |
 
 ## Install
 
@@ -32,7 +42,10 @@ The extra installs `psycopg[binary]` and `psycopg_pool`.
 | `PostgresWriteSafetyPolicy` | Sink safety | Strict or align-to-target write behavior. |
 | `PostgresSinkWriteError`, `PostgresPoisonRecordInfo` | Error model | Classifying schema drift, constraint violations, type mismatch, and unknown failures. |
 | `PostgresPrometheusExporter` | Observability | Prometheus rendering for source/sink/DLQ metrics. |
-| `KafkaPostgresRuntime` and builders | Runtime helper | Kafka-to-Postgres wedge runtime, poison DLQ config, metrics, and acceptance reports. |
+| `KafkaPostgresRuntime` and builders | Composed flow helper | Advanced Kafka-to-Postgres wedge runtime, poison DLQ config, metrics, and acceptance reports. Start with the PostgreSQL primitives above unless the pipeline is explicitly a Kafka-to-Postgres composed flow. |
+
+`KafkaPostgres*` surfaces are exported for advanced composed pipelines, but
+they are not the default PostgreSQL onboarding story.
 
 Entry-points installed by the package:
 

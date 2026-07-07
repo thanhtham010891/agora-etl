@@ -24,12 +24,12 @@ import pytest
 from agora import (
     BatchMiddleware,
     DeliveryConfig,
-    InMemoryCheckpointStore,
     IterableSource,
     Pipeline,
     is_batch_capable_source,
 )
 from agora.core.batch import is_arrow_native_sink
+from agora.core.checkpoint import InMemoryCheckpointStore
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.errors import PipelineError
 from agora.core.source import BaseSource

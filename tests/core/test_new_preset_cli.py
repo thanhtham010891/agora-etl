@@ -124,7 +124,7 @@ def test_kafka_consumer_test_is_valid_python(tmp_path: Any) -> None:
 def test_kafka_consumer_pyproject_includes_kafka_extra(tmp_path: Any) -> None:
     _scaffold(tmp_path / "kp", "kp", "kafka-consumer")
     content = (tmp_path / "kp" / "pyproject.toml").read_text()
-    assert "kafka" in content
+    assert '"agora-etl-plugins[kafka]"' in content
 
 
 def test_kafka_consumer_env_example_has_vars(tmp_path: Any) -> None:
@@ -164,7 +164,7 @@ def test_postgres_incremental_test_is_valid_python(tmp_path: Any) -> None:
 def test_postgres_incremental_pyproject_includes_postgres_extra(tmp_path: Any) -> None:
     _scaffold(tmp_path / "pp", "pp", "postgres-incremental")
     content = (tmp_path / "pp" / "pyproject.toml").read_text()
-    assert "postgres" in content
+    assert '"agora-etl-plugins[postgres]"' in content
 
 
 def test_postgres_incremental_env_example_has_database_url(tmp_path: Any) -> None:

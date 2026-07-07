@@ -9,6 +9,16 @@ topic publishing, poison-record handling, Kafka-backed DLQ/replay,
 schema-registry serializers, optional OpenTelemetry propagation, runtime
 metrics, and transactional delivery hooks.
 
+## Maturity card
+
+| Field | Value |
+|---|---|
+| Support label | Production-ready flagship |
+| In scope | Kafka source/sink, Kafka DLQ/replay, schema-registry serializers, secure client wiring, tracing hooks, and bounded transactional delivery helpers. |
+| Out of scope | Broker administration, arbitrary schema-governance workflows outside the documented serializer paths, and treating runtime helper exports as the default Kafka onboarding lane. |
+| Required validation gate | `make test-release-gate-kafka-secure` and `make test-release-gate-kafka-cluster` |
+| Operator hooks | Source health/partition snapshots, `runtime_metrics()`, `operational_metrics()`, Prometheus exporters, and opt-in `KafkaOpenTelemetryTracing`. |
+
 ## Install
 
 ```bash

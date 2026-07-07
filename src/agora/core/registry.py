@@ -73,6 +73,17 @@ AGORA_CORE_API_COMPATIBILITY = ">=0.4,<0.5"
 """Core API range first-party plugins are expected to declare for this release."""
 
 
+def _entrypoint_module_path(ep: Any) -> str | None:
+    module = getattr(ep, "module", None)
+    if isinstance(module, str) and module:
+        return module
+    value = getattr(ep, "value", None)
+    if isinstance(value, str) and value:
+        module_path, _, _ = value.partition(":")
+        return module_path or None
+    return None
+
+
 def _version_tuple(value: str) -> tuple[int, ...] | None:
     parts: list[int] = []
     for part in value.split("."):
@@ -145,6 +156,8 @@ class RegistryItemInfo:
     key: str
     type: str
     origin: str
+    manifest_name: str | None = None
+    module_path: str | None = None
     package: str | None = None
     version: str | None = None
     agora_api_version: str | None = None
@@ -185,6 +198,7 @@ def _coerce_manifest(
         if distribution_name is None and distribution_version is None:
             return None
         return {
+            "module_path": module_name,
             "package": distribution_name or package_name,
             "version": distribution_version,
             "agora_api_version": None,
@@ -203,6 +217,8 @@ def _coerce_manifest(
     )
     compatible = manifest_compatible if core_api_compatible is not False else False
     return {
+        "manifest_name": getattr(manifest, "name", None),
+        "module_path": module_name,
         "package": getattr(manifest, "package", None) or distribution_name or package_name,
         "version": getattr(manifest, "version", None) or distribution_version,
         "agora_api_version": agora_api_version,
@@ -467,6 +483,8 @@ class Registry(Generic[P]):
                         else "unavailable",
                     ),
                     origin=self._origins.get(key, "manual"),
+                    manifest_name=metadata.get("manifest_name"),
+                    module_path=metadata.get("module_path"),
                     package=metadata.get("package"),
                     version=metadata.get("version"),
                     agora_api_version=metadata.get("agora_api_version"),
@@ -702,6 +720,7 @@ class Registry(Generic[P]):
         """
         name = ep.name
         self._metadata[name] = {
+            "module_path": _entrypoint_module_path(ep),
             "package": distribution_name,
             "version": distribution_version,
             "entrypoint_group": group,
@@ -763,6 +782,7 @@ class Registry(Generic[P]):
             )
         except Exception as exc:
             self._metadata[ep.name] = {
+                "module_path": _entrypoint_module_path(ep),
                 "package": distribution_name,
                 "version": distribution_version,
                 "entrypoint_group": group,

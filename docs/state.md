@@ -7,6 +7,8 @@ stores, HTTP response caches, and other lightweight runtime data.
 
 You can also use it directly in your own pipelines when you need a small amount
 of persisted state without introducing a full external database abstraction.
+For state-specific code, prefer importing from `agora.state` directly instead
+of relying on the root `agora` convenience facade.
 
 ## The main pieces
 
@@ -44,7 +46,7 @@ Backends store JSON-like values:
 The low-level API is synchronous:
 
 ```python
-from agora import SQLiteBackend
+from agora.state import SQLiteBackend
 
 backend = SQLiteBackend(".agora_state.db")
 
@@ -66,7 +68,7 @@ backend.close()
 scratch store on top of a backend.
 
 ```python
-from agora import SQLiteBackend, TTLKeyValueStore
+from agora.state import SQLiteBackend, TTLKeyValueStore
 
 store = TTLKeyValueStore(
     backend=SQLiteBackend(".agora_state.db"),
@@ -94,7 +96,7 @@ Use it when you need:
 you only care whether a key has been seen before.
 
 ```python
-from agora import MembershipKeyStore, SQLiteBackend
+from agora.state import MembershipKeyStore, SQLiteBackend
 
 seen = MembershipKeyStore(
     backend=SQLiteBackend(".agora_state.db"),
@@ -125,7 +127,7 @@ race to mark the same key.
 Both helper stores support TTL:
 
 ```python
-from agora import MemoryBackend, TTLKeyValueStore
+from agora.state import MemoryBackend, TTLKeyValueStore
 
 store = TTLKeyValueStore(
     backend=MemoryBackend(),
@@ -149,7 +151,7 @@ operational approximations, not strict live cardinality guarantees.
 `state_backend_registry` lets config-driven code create a backend by name.
 
 ```python
-from agora import state_backend_registry
+from agora.state import state_backend_registry
 
 backend = state_backend_registry.create("sqlite", path=".agora_state.db")
 ```

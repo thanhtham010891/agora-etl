@@ -10,10 +10,14 @@ integrations and their backend-specific validation matrix.
 This section focuses on the public plugin story:
 
 - what the official first-party plugin package includes
-- which plugin families are production-ready flagship surfaces
+- which plugin families are production-ready dataset surfaces
 - when to use each plugin family
 - what kind of system problem each family solves
 - how to build your own plugin package
+
+Advanced runtime/wedge helpers may still be exported from a family root, but
+those surfaces should be treated as advanced composed flows rather than as
+first-stop backend primitives.
 
 ## Start here
 
@@ -22,12 +26,15 @@ This section focuses on the public plugin story:
 - Need Redis-backed state, streams, or replay: [Redis](redis.md)
 - Need topic-based pipelines: [Kafka](kafka.md)
 - Need relational extract/load workflows: [PostgreSQL](postgresql.md)
+- Need analytical warehouse tables: [BigQuery](bigquery.md)
+- Need object-store datasets: [S3](s3.md)
 - Need calendar scheduling: [Scheduling](scheduling.md)
 - Need multi-worker lease ownership: [Distributed Coordination](distributed.md)
 - Need Anthropic completion or structured output support: [Anthropic](anthropic.md)
 - Want to build your own package: [Developing Plugins](developing.md)
 - Need to know which extension points are stable: [Plugin Contract](contract.md)
 - Need to understand manifest versioning: [Manifest Contract](manifest.md)
+- Need the doc authority map: [Source Of Truth Map](../source-of-truth.md)
 
 ## What counts as a plugin?
 
@@ -54,10 +61,10 @@ surfaces should build on. Runtime semantics still belong in the core.
 The public first-party plugin distribution is
 [`agora-etl-plugins`](https://pypi.org/project/agora-etl-plugins/).
 
-Current official coverage includes Redis, Kafka, PostgreSQL, Anthropic
-completion support, cron scheduling, and distributed worker coordination. The
-published plugin `0.4.x` line targets `agora-etl>=0.4.1,<1`; these docs are
-aligned with the current `agora-etl` `0.4.x` production line.
+Current official coverage includes Redis, Kafka, PostgreSQL, BigQuery, S3,
+Anthropic completion support, cron scheduling, and distributed worker
+coordination. The published plugin `0.4.x` line targets `agora-etl>=0.4.1,<1`;
+these docs are aligned with the current `agora-etl` `0.4.x` production line.
 
 Install examples:
 
@@ -65,6 +72,8 @@ Install examples:
 pip install "agora-etl-plugins[redis]"
 pip install "agora-etl-plugins[kafka]"
 pip install "agora-etl-plugins[postgres]"
+pip install "agora-etl-plugins[bigquery]"
+pip install "agora-etl-plugins[s3]"
 pip install "agora-etl-plugins[anthropic]"
 pip install "agora-etl-plugins[all]"
 ```
@@ -74,22 +83,33 @@ pip install "agora-etl-plugins[all]"
 | Pipeline shape | Plugin family | Start with |
 |---|---|---|
 | Redis Streams in, relational table out | Redis + PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+| Warehouse query in, object dataset out | BigQuery + S3 | [BigQuery](bigquery.md), [S3](s3.md) |
 | Kafka topic in, Kafka topic out | Kafka | [Kafka](kafka.md) |
 | Periodic sync every hour or every weekday | Scheduling | [Scheduling](scheduling.md) |
 | Same schedules deployed on multiple workers | Distributed coordination | [Distributed Coordination](distributed.md) |
 | Shared replay or dead-letter inspection | Redis, Kafka, or PostgreSQL | [Redis](redis.md), [Kafka](kafka.md), [PostgreSQL](postgresql.md) |
-| Kafka source into Redis or PostgreSQL sink with wedge/runtime metrics | Kafka + Redis/PostgreSQL | [Redis](redis.md), [PostgreSQL](postgresql.md) |
+| Kafka source into Redis or PostgreSQL sink with wedge/runtime metrics | Kafka + Redis/PostgreSQL composed flow | [Redis](redis.md), [PostgreSQL](postgresql.md) |
 
 ## Production maturity at a glance
 
 | Family | Production role | Boundary |
 |---|---|---|
-| Redis | Flagship backend | Streams, sink, state, DLQ, exact dedup, AI cache, observability, and Kafka-to-Redis runtime helpers. |
+| Redis | Flagship backend | Streams, sink, state, DLQ, exact dedup, AI cache, observability, and optional Kafka-to-Redis composed flows. |
 | Kafka | Flagship backend | Topic source/sink, Kafka DLQ, Avro/JSON Schema/Protobuf registry helpers, security, tracing, and transactional hooks. |
-| PostgreSQL | Flagship backend | Source, sink, schema adapter, DLQ, HA read routing, `COPY`, `COPY + MERGE`, and Kafka-to-Postgres runtime helpers. |
+| PostgreSQL | Flagship backend | Source, sink, schema adapter, DLQ, HA read routing, `COPY`, `COPY + MERGE`, and optional Kafka-to-Postgres composed flows. |
+| BigQuery | Production-ready dataset backend | Table/query source, batch-oriented load-job table sink, and bounded append-only Storage Write sink for analytical ETL workloads, with a required local live verification gate before public support claims. |
+| S3 | Production-ready dataset backend | Lexically ordered prefix source plus partitioned JSONL/CSV/Parquet dataset sink, validated locally against MinIO before public support claims. |
 | Distributed coordination | Production coordination | Redis-backed leases, fencing tokens, fail-safe behavior, and optional Redlock quorum. |
 | Scheduling | Official helper | Cron parsing and next-run calculation for worker schedules. |
 | Anthropic | Official AI provider | Completion and structured output. Embeddings are deliberately out of scope. |
+
+Each flagship family page begins with a maturity card that names:
+
+- current support label
+- in-scope contract
+- explicit out-of-scope boundary
+- required validation gate
+- operator-facing hooks
 
 ## Quick examples
 
@@ -156,6 +176,37 @@ summary = await (
 )
 ```
 
+### BigQuery table to S3 dataset
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora_plugins.bigquery import BigQuerySource
+from agora_plugins.s3 import S3Sink
+
+
+summary = await (
+    Pipeline(
+        BigQuerySource(
+            table="analytics.orders",
+            checkpoint_column="order_id",
+            order_by=["order_id"],
+            row_mapper=lambda row: row,
+        )
+    )
+    .build(
+        S3Sink(
+            bucket="warehouse-exports",
+            prefix="orders_projection",
+            format="parquet",
+            row_mapper=lambda record: record,
+            partition_path_fn=lambda record: f"dt={record['order_date']}",
+        ),
+        config=DeliveryConfig(batch_size=500),
+    )
+    .run(max_records=10_000)
+)
+```
+
 ### Cron-scheduled worker with shared lease ownership
 
 ```python
@@ -176,6 +227,20 @@ def get_worker() -> WorkerPool:
     )
     return pool
 ```
+
+### BigQuery
+
+Choose BigQuery when extraction or delivery belongs on analytical tables and
+query jobs rather than on event streams or OLTP writes.
+
+See: [BigQuery](bigquery.md)
+
+### S3
+
+Choose S3 when the pipeline boundary is a dataset prefix, partitioned files,
+or object-store based interchange with JSONL, CSV, or Parquet.
+
+See: [S3](s3.md)
 
 ## How to think about plugins
 

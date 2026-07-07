@@ -15,9 +15,11 @@ Validates: Requirements 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4
 from __future__ import annotations
 
 import json
+import warnings
 
 import pytest
 
+from agora.health.server import HealthServer
 from tests.health._harness import body as _body
 from tests.health._harness import headers as _headers
 from tests.health._harness import send_request as _send_request
@@ -206,6 +208,19 @@ async def test_200_when_auth_disabled_no_header() -> None:
     )
     body = json.loads(_body(response))
     assert "status" in body, f"Health payload missing 'status': {body}"
+
+
+def test_health_server_warns_on_non_loopback_host_without_auth() -> None:
+    with pytest.warns(UserWarning, match="non-loopback host without auth_token"):
+        HealthServer(port=8080, host="0.0.0.0", auth_token=None)
+
+
+def test_health_server_does_not_warn_on_loopback_host_without_auth() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        HealthServer(port=8080, host="127.0.0.1", auth_token=None)
+
+    assert not caught
 
 
 @pytest.mark.asyncio

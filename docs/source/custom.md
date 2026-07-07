@@ -3,13 +3,15 @@
 _Use this when: no built-in or plugin source matches the upstream system._
 
 Custom sources subclass `BaseSource[T]` and implement `stream()`.
+For extension-author docs, prefer importing source contracts from
+`agora.core.source` instead of the root `agora` convenience facade.
 
 ## Minimum shape
 
 ```python
 from collections.abc import AsyncGenerator
 
-from agora import BaseSource, SourceRecordError
+from agora.core.source import BaseSource, SourceRecordError
 
 
 class MySource(BaseSource[dict]):
@@ -68,13 +70,40 @@ source.
 If a custom source can enforce a limit more efficiently at the upstream system
 boundary, it may override `limit()` and return a source-specific wrapper.
 
+## Runtime metrics for custom sources
+
+If the source tracks dropped rows, parse failures, or similar counters, return
+`SourceRuntimeMetrics` from `agora.core.source`:
+
+```python
+from agora.core.source import BaseSource, SourceRuntimeMetrics
+
+
+class MeteredSource(BaseSource[dict]):
+    source_name = "metered"
+
+    def __init__(self) -> None:
+        self._record_errors = 0
+        self._record_drops = 0
+
+    def runtime_metrics(self) -> SourceRuntimeMetrics:
+        return SourceRuntimeMetrics(
+            record_error_count=self._record_errors,
+            record_drop_count=self._record_drops,
+        )
+```
+
+For extension-author docs, prefer the `agora.core.source` import path instead
+of the root `agora` convenience facade for runtime metric contracts.
+
 ## Add batch or Arrow emission
 
 If the upstream system is batch-native, the source can advertise batch
 capabilities explicitly by overriding `data_plane_spec()`:
 
 ```python
-from agora import BaseSource, DataPlane, SourceDataPlaneSpec
+from agora.core import DataPlane, SourceDataPlaneSpec
+from agora.core.source import BaseSource
 
 
 class MyBatchSource(BaseSource[dict]):
@@ -101,7 +130,7 @@ Use the runtime-facing helper in tests when the exact same validation path as
 the planner matters:
 
 ```python
-from agora import source_data_plane_spec
+from agora.core.source import source_data_plane_spec
 
 spec = source_data_plane_spec(MyBatchSource())
 assert spec.emitted_plane is DataPlane.PYTHON_BATCHES
@@ -112,10 +141,12 @@ You can also introspect the advertised contract directly with:
 - `source.data_plane_spec().emitted_plane`
 - `source.emitted_data_plane`
 
-The public data-plane vocabulary is importable directly from `agora`:
+The public data-plane vocabulary for extension-author docs should come from
+`agora.core` / `agora.core.source`:
 
 ```python
-from agora import DataPlane, SourceDataPlaneSpec, source_data_plane_spec
+from agora.core import DataPlane, SourceDataPlaneSpec
+from agora.core.source import source_data_plane_spec
 ```
 
 In `0.4.0`, Agora no longer infers non-row source planes from legacy bool

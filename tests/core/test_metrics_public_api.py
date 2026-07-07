@@ -5,10 +5,12 @@ import importlib
 from agora.core.metrics import (
     AIMetrics,
     AIMiddlewareMetrics,
+    MetricsSnapshotProvider,
     MiddlewareMetrics,
     PipelineMetrics,
     PipelineRunSummary,
     RuntimeMetrics,
+    has_metrics_snapshot,
 )
 
 
@@ -17,7 +19,9 @@ def test_metrics_module_reexports_public_api() -> None:
 
     assert module.AIMetrics is AIMetrics
     assert module.AIMiddlewareMetrics is AIMiddlewareMetrics
+    assert module.MetricsSnapshotProvider is MetricsSnapshotProvider
     assert module.MiddlewareMetrics is MiddlewareMetrics
     assert module.PipelineMetrics is PipelineMetrics
     assert module.PipelineRunSummary is PipelineRunSummary
     assert module.RuntimeMetrics is RuntimeMetrics
+    assert module.has_metrics_snapshot is has_metrics_snapshot

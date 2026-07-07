@@ -170,7 +170,7 @@ def test_multiple_with_dlq_calls_are_independent():
 
 def test_chaining_with_checkpoint_store_after_with_dlq():
     """Building with both dlq and checkpoint must return a correct BoundPipeline."""
-    from agora import InMemoryCheckpointStore
+    from agora.core.checkpoint import InMemoryCheckpointStore
 
     src = IterableSource([])
     dlq_sink = _CollectDLQSink()

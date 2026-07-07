@@ -11,16 +11,15 @@ import pytest
 
 from agora import (
     DeliveryConfig,
-    InMemoryCheckpointStore,
     IterableSource,
     Pipeline,
-    SourceRecordError,
 )
+from agora.core.checkpoint import InMemoryCheckpointStore
 from agora.core.dlq import DLQRecord, SQLiteDLQSink, SQLiteDLQSource
 from agora.core.middleware import Middleware
 from agora.core.runtime._delivery import DeliveryEngine, RunState, make_checkpoint_state
 from agora.core.runtime._writer_transport import WriterTransport
-from agora.core.source import BaseSource
+from agora.core.source import BaseSource, SourceRecordError
 from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy, SinkFailurePolicy
 from agora.core.writer import WriteResult
 

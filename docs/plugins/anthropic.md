@@ -1,28 +1,25 @@
 # Anthropic
 
 _When to read this: the pipeline needs Claude-style completion or structured
-JSON output, and the support boundary needs to stay honest before choosing this
-provider._
+JSON output._
 
 Anthropic support is part of the official first-party `agora-etl-plugins`
 package through the `anthropic` extra.
 
-The supported promise is intentionally focused: Claude completions and
+The supported boundary is intentionally focused: Claude completions and
 structured output, not embeddings.
 
 In the official `agora-etl-plugins 0.4.x` line, Anthropic is an official AI
-provider surface for completion-driven middleware. Production responsibility
-for API keys, model choice, data retention policy, and cost controls remains
-with the application deployment.
+provider surface for completion-driven middleware. API keys, model choice,
+data retention policy, and cost controls remain deployment responsibilities.
 
-## Package position
+## Contract summary
 
 - Package: `agora-etl-plugins[anthropic]`
 - Registry key: `anthropic`
 - Entry-point group: `agora.ai.providers`
 - Import path: `agora_plugins.anthropic`
-- Package lane: official first-party extra
-- Supported lane: completion and structured output
+- Supported scope: completion and structured output
 
 This page documents the official Anthropic path as it exists today: a focused
 provider for completion-driven AI workflows that keeps its contract explicit.

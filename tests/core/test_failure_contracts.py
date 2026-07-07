@@ -4,6 +4,7 @@ from agora.core.failures import (
     FailureClassification,
     PoisonRecordClassification,
     PoisonRecordInfo,
+    PoisonRecordPolicy,
 )
 
 
@@ -27,3 +28,10 @@ def test_poison_record_info_to_dict_uses_common_shape() -> None:
         "reason": "json_schema",
         "details": {"field": "amount"},
     }
+
+
+def test_poison_record_policy_exposes_common_handling_modes() -> None:
+    assert PoisonRecordPolicy.FAIL_CLOSED.value == "fail_closed"
+    assert PoisonRecordPolicy.LOG_AND_CONTINUE.value == "log_and_continue"
+    assert PoisonRecordPolicy.DLQ_AND_CONTINUE.value == "dlq_and_continue"
+    assert PoisonRecordPolicy.DLQ_AND_FAIL_CLOSED.value == "dlq_and_fail_closed"

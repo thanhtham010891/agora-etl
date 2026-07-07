@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from agora import DeliveryConfig, InMemoryCheckpointStore, IterableSource, MapMiddleware, Pipeline
+from agora import DeliveryConfig, IterableSource, MapMiddleware, Pipeline
+from agora.core.checkpoint import InMemoryCheckpointStore
 from agora.core.source import BaseSource
 
 pytest.importorskip("agora_rs")

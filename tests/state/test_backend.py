@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from agora import (
+from agora.state import (
     MembershipKeyStore,
     MemoryBackend,
     SQLiteBackend,

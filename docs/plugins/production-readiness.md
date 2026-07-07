@@ -23,6 +23,8 @@ readiness map for the plugin ecosystem. It keeps three things separate:
 | Redis client | `redis>=7.0,<8` | Used by Redis, distributed coordination, Redis DLQ, state, dedup, and cache surfaces. |
 | Kafka client | `aiokafka>=0.11,<1` | Used by Kafka source, sink, DLQ, and Kafka-backed runtime helpers. |
 | PostgreSQL client | `psycopg[binary]>=3.1,<4`, `psycopg_pool>=3.2,<4` | Used by PostgreSQL source, sink, schema adapter, DLQ surfaces, and pooled sink writes. |
+| BigQuery client | `google-cloud-bigquery>=3.38,<4` | Used by BigQuery table/query source and batch table sink surfaces. |
+| S3 client | `boto3>=1.39,<2` | Used by S3 prefix source and dataset sink surfaces. |
 
 ## Maturity Labels
 
@@ -32,11 +34,13 @@ readiness map for the plugin ecosystem. It keeps three things separate:
 | Kafka source, sink, schema registry helpers, and DLQ | Production-ready flagship | Includes consumer-group semantics, idempotent producer defaults, Avro/JSON Schema/Protobuf registry paths, secure client config, transactional delivery hooks, replay, and DLQ policy controls. |
 | Redis core: stream source, sink, DLQ, and state backend | Production-ready flagship | Includes stream resume/reclaim, reclaim fairness, poison-loop risk metrics, TLS/ACL, Sentinel, Cluster, Redis Stack matrix coverage, shared DLQ, `set_if_absent`, and `compare_and_set` state atomicity checks. |
 | Distributed coordination | Production-ready coordination | Redis-backed lease/fencing semantics are covered for the default single-Redis lease model and opt-in Redlock-style quorum across independent Redis masters. |
+| BigQuery source, load-job sink, and Storage Write sink | Production-ready dataset backend | Narrow warehouse ETL surface with bounded query batching, machine-readable health and acceptance snapshots, a required local live GCP verification gate for checkpoint-aware table reads, denied-dataset isolation, batch-oriented table loads, and append-only Storage Write semantics within its explicit support boundary. |
+| S3 source and sink | Production-ready dataset backend | JSONL/CSV/Parquet dataset flows with lexical object ordering, deterministic file naming, object-boundary replay semantics, and MinIO-backed local integration coverage. |
 | Cron scheduling helpers | Official | Unit/contract covered. No external service is required. |
 | Anthropic provider | Official | Completion and structured-output provider surface. Live API behavior should be validated in application environments that own API cost and model policy. |
 | Redis embedding dedup and Redis AI cache | Official helper surfaces | Useful production helpers, but they should not inherit the same maturity claim as Redis Streams, Redis DLQ, Redis state, or Redis sink. |
 
-## Release Gates
+## Local Validation Checklist
 
 A release candidate should pass these gates before publishing:
 
@@ -47,6 +51,10 @@ make test-release-gate-postgres
 make test-release-gate-kafka-secure
 make test-release-gate-kafka-cluster
 make test-release-gate-redis
+make integration-up-s3
+make test-integration-s3
+make integration-down-s3
+make test-release-gate-bigquery-ga
 make test-release-gate-wheel
 ```
 
@@ -58,8 +66,12 @@ These gates cover:
 - Kafka secure schema-registry paths, auth failure, mTLS failure, Avro, JSON Schema, and Protobuf
 - Kafka multi-broker failover, rolling restart, coordinator failover, replay windows, and live tail
 - Redis TLS/ACL, Sentinel, Cluster, Redis Stack, and Redlock coordinator topology behavior
+- MinIO-backed S3 dataset read/write semantics for JSONL, CSV, Parquet, partition paths, and object-boundary resume
+- BigQuery local live verification for checkpoint-aware table resume, denied-dataset isolation, explicit query full-rerun behavior, multi-page query batching, truncate/append batch table loads, record-error/drop accounting, and Storage Write typed append behavior
+- local mocked/contract validation for BigQuery source/sink query building, load-job behavior, recovery semantics, and public entry-points
+- local mocked validation for the BigQuery Storage Write sink covering default-stream append success, request-size chunking, partial-failure buffering, unsupported-schema rejection, and preflight-access failure accounting
 - wheel build, installed package metadata, public extras, public imports, and entry-points
-- Python compatibility across `3.11`, `3.12`, and `3.13` in CI/release workflows
+- Python compatibility across `3.11`, `3.12`, and `3.13` in package CI workflows
 
 ## Security And Support
 
@@ -113,6 +125,22 @@ levels from source layout alone.
 - Treat Redis embedding dedup as a small-to-medium working-set helper, not a vector database replacement.
 - Use `DLQPayloadPolicy.redacted(...)` or `DLQPayloadPolicy.encrypted(...)` for sensitive Redis DLQ payloads.
 
+### BigQuery
+
+- Use table mode when resumable incremental extraction matters; pair it with a monotonic `checkpoint_column`.
+- Treat explicit `query=` mode as full-rerun unless the application owns rerun safety outside the plugin.
+- Use `health_snapshot()` and `acceptance_report()` on BigQuery source/sink surfaces when releases or operators need machine-readable readiness checks instead of log-only inspection.
+- For local validation, require `make test-release-gate-bigquery-ga` with a real project/dataset pair instead of treating BigQuery verification as an optional smoke run. That gate includes the append-only Storage Write surface too.
+- Treat the BigQuery support claim as scoped to dataset ETL only: table/query reads, batch table loads, and the bounded append-only Storage Write path. It does not imply merge-heavy mutation workflows, schema auto-evolution, or warehouse-admin breadth.
+- Prefer batch-oriented analytical loads unless low-latency append behavior is required. `BigQueryStorageWriteSink` stays bounded to the `_default` stream append contract rather than merge/upsert or table-admin workflows.
+- `BigQueryStorageWriteSink` is part of the production-ready BigQuery family only within its bounded append-only contract: `_default` stream only, existing table required, request-size-guarded chunking, and the documented typed protobuf-mappable schema subset.
+
+### S3
+
+- Use S3 when the contract is a dataset prefix, not a per-event object archive.
+- Expect replay/resume at object boundaries only; mid-file resume is intentionally out of scope in v1.
+- Prefer deterministic partition paths and bounded `max_records_per_file` so replay, inspection, and downstream compaction stay predictable.
+
 ### Distributed Coordination
 
 - Use distributed coordination when the same scheduled pipelines run on more than one worker replica.
@@ -143,3 +171,5 @@ levels from source layout alone.
 - PostgreSQL sink latency histograms cover connect, pool acquire, and flush; statement-level execute, COPY, and upsert sub-operation histograms are deeper operational follow-up.
 - `RedisBackend.compare_and_set(...)` is Redis-specific until the core `StateBackend` contract grows a backend-neutral CAS method.
 - Redlock quorum requires independent Redis masters. Redis replicas, Sentinel members for a single primary, or Cluster shards for unrelated hash slots are not interchangeable quorum nodes.
+- BigQuery query mode does not support checkpoint resume; reruns repeat the full query.
+- S3 resume checkpoints advance only after a full object completes; partial file progress is intentionally not persisted in v1.

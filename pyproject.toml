@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agora-etl"
-version = "0.4.4"
+version = "0.4.5"
 description = "Agora — async-first ETL framework for Python."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -95,6 +95,9 @@ agora = "agora.cli.main:main"
 
 [project.entry-points."agora.metrics.exporters"]
 # Intentionally empty — metrics exporter plugins register here
+
+[project.entry-points."agora.doctor.readiness"]
+# Intentionally empty — backend/plugin readiness providers register here
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agora"]

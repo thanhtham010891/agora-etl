@@ -21,14 +21,13 @@ import pytest
 from agora import (
     DataPlane,
     DeliveryConfig,
-    InMemoryCheckpointStore,
     IterableSource,
     MapMiddleware,
     Pipeline,
     ProcessBatchMiddleware,
     SinkFailurePolicy,
 )
-from agora.core.checkpoint import Checkpoint, is_checkpoint_capable
+from agora.core.checkpoint import Checkpoint, InMemoryCheckpointStore, is_checkpoint_capable
 from agora.core.data_plane import SourceDataPlaneSpec
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource, SourceRecordError

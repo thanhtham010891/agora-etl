@@ -43,7 +43,8 @@ Real pipelines transform records before writing them. Subclass `Middleware` to d
 import asyncio
 from dataclasses import dataclass
 
-from agora import BaseSink, IterableSource, Middleware, Pipeline
+from agora import IterableSource, Middleware, Pipeline
+from agora.core.sink import BaseSink
 
 # --- domain types ---
 

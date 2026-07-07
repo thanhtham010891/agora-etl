@@ -23,7 +23,7 @@ Schedule types
     Schedule.every(seconds=N)       — fixed interval after completion
     Schedule.every(minutes=N)
     Schedule.every(hours=N)
-    Schedule.cron("0 */6 * * *")   — cron expression (requires agora-etl-plugins[cron])
+    Schedule.cron("0 */6 * * *")   — cron expression (requires the cron plugin extra)
     Schedule.continuous()           — no delay; restart immediately
     Schedule.once()                 — run exactly once then stop
 
@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 import logstruct
 
+from agora.core.packaging import first_party_plugin_install_command, first_party_plugin_requirement
 from agora.runner.policies import BackoffPolicy, ExponentialBackoffPolicy
 from agora.runner.runtime import (
     RunRecord,
@@ -56,6 +57,8 @@ if TYPE_CHECKING:
     from agora.core.pipeline import BoundPipeline
 
 logger = logstruct.getLogger(__name__)
+_CRON_PLUGIN_REQUIREMENT = first_party_plugin_requirement("cron")
+_CRON_PLUGIN_INSTALL_COMMAND = first_party_plugin_install_command("cron")
 
 # Factory type: async callable that returns a BoundPipeline
 PipelineFactory = Callable[[], Awaitable["BoundPipeline[Any]"]]
@@ -102,7 +105,8 @@ class Schedule:
             from agora_plugins.cron import validate_cron_expression
         except ImportError:
             raise ImportError(
-                "Cron schedules require 'agora-etl-plugins[cron]'. Install it: pip install 'agora-etl-plugins[cron]'"
+                f"Cron schedules require '{_CRON_PLUGIN_REQUIREMENT}'. "
+                f"Install it: {_CRON_PLUGIN_INSTALL_COMMAND}"
             ) from None
         validate_cron_expression(expression)
         return cls(_mode="cron", _interval_s=0.0, _cron_expr=expression)
@@ -139,7 +143,8 @@ class Schedule:
                 from agora_plugins.cron import seconds_until_next_run
             except ImportError:
                 raise ImportError(
-                    "Cron schedules require 'agora-etl-plugins'. Install it: pip install 'agora-etl-plugins[cron]'"
+                    f"Cron schedules require '{_CRON_PLUGIN_REQUIREMENT}'. "
+                    f"Install it: {_CRON_PLUGIN_INSTALL_COMMAND}"
                 ) from None
             next_run = now + seconds_until_next_run(self._cron_expr, now)
             wait = max(next_run - now, 0)

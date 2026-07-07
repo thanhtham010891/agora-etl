@@ -4,17 +4,13 @@ _When to read this: you want the supported first-party integration story and nee
 
 The official first-party plugin package is `agora-etl-plugins`.
 
-It exists to keep the core runtime focused while still giving the ecosystem a
-clear, supported integration layer.
+It keeps the core runtime focused while still giving the ecosystem a clear,
+supported integration layer.
 
-For the `0.4.x` production line, this package is the official first-party
-backend and helper layer for Redis, Kafka, PostgreSQL, Anthropic, cron
-scheduling, and distributed coordination. The core package remains
-intentionally smaller: `agora-etl` supplies runtime contracts and registries;
-the plugin package supplies backend implementations.
-
-Anthropic completion support is part of this official first-party package
-through the `anthropic` extra.
+For the `0.4.x` line, this package covers Redis, Kafka, PostgreSQL, BigQuery,
+S3, Anthropic, cron scheduling, and distributed coordination. `agora-etl`
+supplies runtime contracts and registries; `agora-etl-plugins` supplies the
+backend implementations and official helpers.
 
 ## Compatibility
 
@@ -34,6 +30,8 @@ pip install "agora-etl-plugins[cron]"
 pip install "agora-etl-plugins[distributed]"
 pip install "agora-etl-plugins[kafka]"
 pip install "agora-etl-plugins[postgres]"
+pip install "agora-etl-plugins[bigquery]"
+pip install "agora-etl-plugins[s3]"
 pip install "agora-etl-plugins[anthropic]"
 ```
 
@@ -50,9 +48,23 @@ pip install "agora-etl-plugins[all]"
 | Redis Streams, shared state, Redis-backed DLQ, exact dedup, AI cache | `agora-etl-plugins[redis]` | `RedisStreamSource`, `RedisSink`, `RedisBackend` |
 | Topic-based ingestion/delivery, schema registry, Kafka DLQ | `agora-etl-plugins[kafka]` | `KafkaSource`, `KafkaSink`, `KafkaDLQSink` |
 | SQL extraction, upsert, `COPY`, relational DLQ, schema adapter | `agora-etl-plugins[postgres]` | `PostgresSource`, `PostgresSink`, `PostgresSchemaAdapter` |
+| Warehouse table/query extraction and batch table loads | `agora-etl-plugins[bigquery]` | `BigQuerySource`, `BigQuerySink` |
+| Dataset prefixes and partitioned object files | `agora-etl-plugins[s3]` | `S3Source`, `S3Sink` |
 | Claude completions and structured JSON output | `agora-etl-plugins[anthropic]` | `AnthropicProvider` |
 | Cron expressions in `Schedule.cron(...)` | `agora-etl-plugins[cron]` | `Schedule.cron(...)` |
 | Multi-worker lease ownership | `agora-etl-plugins[distributed]` | `RedisWorkerCoordinator` |
+
+Use the family pages for the detailed support boundary, operator hooks, and
+local validation guidance:
+
+- [Redis](redis.md)
+- [Kafka](kafka.md)
+- [PostgreSQL](postgresql.md)
+- [BigQuery](bigquery.md)
+- [S3](s3.md)
+- [Anthropic](anthropic.md)
+- [Scheduling](scheduling.md)
+- [Distributed Coordination](distributed.md)
 
 ## Production install rule
 
@@ -97,50 +109,3 @@ pip install "agora-etl-plugins[postgres,cron,distributed]"
 
 Use this when the same scheduled pipelines may run on more than one worker
 replica and exactly one worker should own each run.
-
-## Pick the right family
-
-### Redis
-
-Choose Redis when one fast shared backend needs to cover stream ingestion,
-shared state, DLQ replay, dedup, or AI caching.
-
-See: [Redis](redis.md)
-
-### Kafka
-
-Choose Kafka when your pipeline belongs on topics, partitions, and
-consumer-group semantics.
-
-See: [Kafka](kafka.md)
-
-### PostgreSQL
-
-Choose PostgreSQL when extract/load behavior is relational, SQL is an operator
-tooling strength, or DLQ records should live in a database table.
-
-See: [PostgreSQL](postgresql.md)
-
-### Anthropic
-
-Choose Anthropic when the AI workflow is completion-driven and Claude models
-fit the job, especially for enrichment, extraction, validation, translation, or
-structured JSON output. In the current plugin line, the default Claude API
-model is `claude-haiku-4-5-20251001`, and teams that want a newer unlisted id
-must opt in explicitly.
-
-See: [Anthropic](anthropic.md)
-
-### Scheduling
-
-Choose the scheduling plugin when jobs should follow calendar rules rather than
-just fixed intervals.
-
-See: [Scheduling](scheduling.md)
-
-### Distributed coordination
-
-Choose distributed coordination when more than one worker instance may contend
-for the same scheduled pipeline run.
-
-See: [Distributed Coordination](distributed.md)

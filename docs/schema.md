@@ -202,7 +202,7 @@ SchemaMiddleware(
 `BackendSchemaStore` works with any `StateBackend`, including plugin backends.
 
 ```python
-from agora import SQLiteBackend
+from agora.state import SQLiteBackend
 from agora.schema import BackendSchemaStore, SchemaMiddleware
 
 SchemaMiddleware(

@@ -4,7 +4,7 @@ import argparse
 import json
 from unittest.mock import MagicMock, patch
 
-from agora.cli.commands.plugins import _ALL_KINDS, _EXTRA_HINTS, PluginsCommand
+from agora.cli.commands.plugins import _ALL_KINDS, _EXTRA_HINTS, PluginsCommand, _extra_hint
 from agora.core.discovery import public_entrypoint_group_contracts
 
 
@@ -132,6 +132,59 @@ def test_plugins_command_table_output_uses_all_requested_groups() -> None:
     assert fake_console.tables == [collected]
 
 
-def test_plugins_extra_hints_include_kafka_dlq_components() -> None:
-    assert _EXTRA_HINTS["source"]["kafka_dlq_source"] == "agora-etl-plugins[kafka]"
-    assert _EXTRA_HINTS["sink"]["kafka_dlq"] == "agora-etl-plugins[kafka]"
+def test_plugins_extra_hint_infers_first_party_family_from_manifest_name() -> None:
+    assert (
+        _extra_hint(
+            "kafka_dlq_source",
+            "factory",
+            "source",
+            "entrypoint",
+            package="agora-etl-plugins",
+            manifest_name="kafka",
+        )
+        == "agora-etl-plugins[kafka]"
+    )
+    assert (
+        _extra_hint(
+            "kafka_dlq",
+            "factory",
+            "sink",
+            "entrypoint",
+            package="agora-etl-plugins",
+            manifest_name="kafka",
+        )
+        == "agora-etl-plugins[kafka]"
+    )
+
+
+def test_plugins_extra_hint_infers_new_first_party_family_without_core_map_changes() -> None:
+    assert (
+        _extra_hint(
+            "snowflake",
+            "factory",
+            "sink",
+            "entrypoint",
+            package="agora-etl-plugins",
+            manifest_name="snowflake",
+        )
+        == "agora-etl-plugins[snowflake]"
+    )
+
+
+def test_plugins_extra_hint_infers_first_party_family_from_module_namespace() -> None:
+    assert (
+        _extra_hint(
+            "redis_stream",
+            "lazy",
+            "source",
+            "entrypoint_lazy",
+            package="agora-etl-plugins",
+            module_path="agora_plugins.redis.sources.redis",
+        )
+        == "agora-etl-plugins[redis]"
+    )
+
+
+def test_plugins_extra_hints_keep_builtin_core_mappings() -> None:
+    assert _EXTRA_HINTS["sink"]["stdout"] == "stdlib"
+    assert _EXTRA_HINTS["source"]["http"] == "agora-etl"

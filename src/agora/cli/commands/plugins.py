@@ -20,6 +20,10 @@ from typing import TYPE_CHECKING, Any
 from agora.cli.commands.base import BaseCommand
 from agora.cli.console import console
 from agora.core.discovery import EntryPointGroupContract, public_entrypoint_group_contracts
+from agora.core.packaging import (
+    FIRST_PARTY_PLUGIN_DISTRIBUTION,
+    first_party_plugin_family_from_module,
+)
 
 if TYPE_CHECKING:
     import argparse
@@ -138,7 +142,15 @@ def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> li
                     "compatibility": compatibility,
                     "capabilities": list(item.capabilities),
                     "error": item.error or "",
-                    "extra": _extra_hint(item.key, item.type, category, item.origin),
+                    "extra": _extra_hint(
+                        item.key,
+                        item.type,
+                        category,
+                        item.origin,
+                        package=item.package,
+                        manifest_name=item.manifest_name,
+                        module_path=item.module_path,
+                    ),
                 }
             )
         return sorted(rows, key=lambda row: row["key"])
@@ -166,41 +178,24 @@ def _registry_rows(registry: Any, contract: EntryPointGroupContract | str) -> li
     return sorted(rows, key=lambda row: row["key"])
 
 
-# Nested by category so identical keys (e.g. "kafka", "postgres") in
-# source vs sink can map to different install hints independently.
 _EXTRA_HINTS: dict[str, dict[str, str]] = {
     "source": {
-        "kafka": "agora-etl-plugins[kafka]",
         "http": "agora-etl",
         "jsonl": "agora-etl",
         "parquet": "agora-etl",
         "csv": "stdlib",
         "file": "stdlib",
         "iterable": "stdlib",
-        "postgres": "agora-etl-plugins[postgres]",
-        "postgres_dlq_source": "agora-etl-plugins[postgres]",
-        "kafka_dlq_source": "agora-etl-plugins[kafka]",
-        "redis_dlq_source": "agora-etl-plugins[redis]",
-        "redis_stream": "agora-etl-plugins[redis]",
         "websocket": "third-party plugin",
     },
     "sink": {
-        "postgres": "agora-etl-plugins[postgres]",
-        "postgres_dlq": "agora-etl-plugins[postgres]",
-        "postgres_schema_adapter": "agora-etl-plugins[postgres]",
         "stdout": "stdlib",
-        "kafka": "agora-etl-plugins[kafka]",
-        "kafka_dlq": "agora-etl-plugins[kafka]",
         "jsonl": "agora-etl",
         "csv": "stdlib",
         "parquet": "agora-etl",
         "log": "stdlib",
         "webhook": "agora-etl",
-        "redis": "agora-etl-plugins[redis]",
-        "redis_dlq": "agora-etl-plugins[redis]",
         "elasticsearch": "third-party plugin",
-        "bigquery": "third-party plugin",
-        "s3": "third-party plugin",
         "gcs": "third-party plugin",
     },
     "middleware": {
@@ -245,7 +240,20 @@ _EXTRA_HINTS: dict[str, dict[str, str]] = {
 }
 
 
-def _extra_hint(key: str, reg_type: str, category: str, origin: str) -> str:
+def _extra_hint(
+    key: str,
+    reg_type: str,
+    category: str,
+    origin: str,
+    *,
+    package: str | None = None,
+    manifest_name: str | None = None,
+    module_path: str | None = None,
+) -> str:
     if origin == "manual" and reg_type == "instance":
         return "built-in"
+    if package == FIRST_PARTY_PLUGIN_DISTRIBUTION:
+        family = manifest_name or first_party_plugin_family_from_module(module_path)
+        if family:
+            return f"{FIRST_PARTY_PLUGIN_DISTRIBUTION}[{family}]"
     return _EXTRA_HINTS.get(category, {}).get(key, "agora-etl[all]")

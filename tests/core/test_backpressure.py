@@ -25,7 +25,8 @@ from typing import Any
 
 import pytest
 
-from agora import DeliveryConfig, InMemoryCheckpointStore, IterableSource, Pipeline
+from agora import DeliveryConfig, IterableSource, Pipeline
+from agora.core.checkpoint import InMemoryCheckpointStore
 from agora.core.middleware import Middleware
 from agora.core.sink import WriteResult
 from agora.core.source import BaseSource

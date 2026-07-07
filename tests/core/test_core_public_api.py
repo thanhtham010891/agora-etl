@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 
 
 def test_core_facade_reexports_public_api() -> None:
@@ -11,6 +12,8 @@ def test_core_facade_reexports_public_api() -> None:
         "BaseSink",
         "BaseSource",
         "DataPlane",
+        "DLQPayloadPolicy",
+        "MetricsSnapshotProvider",
         "Pipeline",
         "PipelineContext",
         "RetryPolicy",
@@ -34,6 +37,8 @@ def test_core_facade_all_matches_public_manifest() -> None:
         "BaseSink",
         "BaseSource",
         "DataPlane",
+        "DLQPayloadPolicy",
+        "MetricsSnapshotProvider",
         "Pipeline",
         "PipelineContext",
         "RetryPolicy",
@@ -95,5 +100,7 @@ def test_core_facade_shared_root_exports_remain_aligned() -> None:
         "source_data_plane_spec",
     }
 
-    for name in shared_names:
-        assert getattr(root_module, name) is getattr(core_module, name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        for name in shared_names:
+            assert getattr(root_module, name) is getattr(core_module, name)

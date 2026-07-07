@@ -136,6 +136,6 @@ agora plugins list
 
 This shows every discovered plugin across all groups, including incompatible ones, with their package, version, and compatibility status.
 
-Use `agora plugins list --json` in plugin release gates when the package wants
-machine-checkable evidence that the installed wheel exposes the expected
+Use `agora plugins list --json` in plugin validation checks when the package
+wants machine-checkable evidence that the installed wheel exposes the expected
 entry-points and compatibility metadata.

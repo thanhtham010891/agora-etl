@@ -8,6 +8,12 @@ Observability is now intentionally split across a few public layers:
 
 - `PipelineRunSummary` and `PipelineMetrics` live in `agora` /
   `agora.core.metrics`
+- plugin/operator observability adapters that expose `metrics_snapshot()`
+  should satisfy `agora.core.metrics.MetricsSnapshotProvider`
+- plugin/operator Prometheus surfaces that expose `render_prometheus_metrics()`
+  should satisfy `agora.core.metrics.PrometheusMetricsProvider`
+- plugin/operator acceptance surfaces that expose `acceptance_report()` should
+  satisfy `agora.core.acceptance.AcceptanceReportProvider`
 - run-scoped context and log/trace helpers live in `agora.core.context`
 - tracers live in `agora` / `agora.core.tracing`
 - cumulative process-level metrics live in `agora.metrics.collector`

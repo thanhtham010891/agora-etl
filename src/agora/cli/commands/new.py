@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from agora.cli.commands.base import BaseCommand, CommandError
 from agora.cli.console import console
+from agora.core.packaging import first_party_plugin_requirement
 
 if TYPE_CHECKING:
     import argparse
@@ -144,7 +145,7 @@ def _scaffold(root: Path, name: str, preset: str) -> None:
 
 
 def _write_common_files(write: WriteFn, root: Path, name: str, meta: PresetMeta) -> None:
-    extras_line = f'\n    "agora-etl-plugins[{",".join(meta.extras)}]",' if meta.extras else ""
+    extras_line = f'\n    "{first_party_plugin_requirement(*meta.extras)}",' if meta.extras else ""
 
     write(
         root / "agora.toml",
@@ -373,7 +374,7 @@ def parse_message(record: dict) -> dict:
 
 
 def build_pipeline() -> BoundPipeline:
-    from agora_plugins.kafka import KafkaSource  # requires agora-etl-plugins[kafka]
+    from agora_plugins.kafka import KafkaSource  # requires {kafka_requirement}
 
     source = KafkaSource(
         topics=[os.environ["KAFKA_TOPIC"]],
@@ -493,7 +494,7 @@ def normalise_row(record: dict) -> dict:
 
 
 def build_pipeline() -> BoundPipeline:
-    from agora_plugins.postgres import PostgresSource  # requires agora-etl-plugins[postgres]
+    from agora_plugins.postgres import PostgresSource  # requires {postgres_requirement}
 
     source = PostgresSource(
         dsn=os.environ["DATABASE_URL"],

@@ -7,7 +7,17 @@ helpers._
 The Redis family in `agora-etl-plugins 0.4.x` is a production-ready flagship
 backend. It includes stream ingestion, sink writes, shared state, exact and
 embedding dedup stores, Redis-backed DLQ, distributed LLM cache, observability
-reports, Redis Sentinel/Cluster wiring, and Kafka-to-Redis runtime helpers.
+reports, Redis Sentinel/Cluster wiring, and Kafka-to-Redis composed flows.
+
+## Maturity card
+
+| Field | Value |
+|---|---|
+| Support label | Production-ready flagship |
+| In scope | Redis Streams source, Redis sink, Redis DLQ/replay, Redis state backend, exact dedup, AI cache, Sentinel/Cluster coverage, and observability hooks. |
+| Out of scope | General Redis administration, vector-database breadth, and treating Kafka-to-Redis runtime helpers as default onboarding primitives. |
+| Required validation gate | `make test-release-gate-redis` |
+| Operator hooks | `metrics_snapshot()`, `health_snapshot()`, `acceptance_report()`, `render_prometheus_metrics()` on supported source/sink/DLQ surfaces. |
 
 ## Install
 
@@ -29,7 +39,10 @@ pip install "agora-etl-plugins[redis]"
 | `RedisLLMCache` | AI cache | Distributed LLM response cache backed by Redis state. |
 | `RedisPrometheusExporter` | Observability | Prometheus rendering for Redis source/sink/DLQ metrics. |
 | `RedisEnterpriseAcceptanceGate` | Observability | Acceptance reports over source/sink/DLQ snapshots. |
-| `KafkaRedisRuntime` and builders | Runtime helper | Kafka-to-Redis wedge runtime, metrics, and acceptance reports. |
+| `KafkaRedisRuntime` and builders | Composed flow helper | Advanced Kafka-to-Redis wedge runtime, metrics, and acceptance reports. Start with the Redis primitives above unless the pipeline is explicitly a Kafka-to-Redis composed flow. |
+
+`KafkaRedis*` surfaces are exported for advanced composed pipelines, but they
+are not the default Redis onboarding story.
 
 Entry-points installed by the package:
 

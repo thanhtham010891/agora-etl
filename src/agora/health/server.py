@@ -41,6 +41,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import ipaddress
+import warnings
 from typing import TYPE_CHECKING
 
 import logstruct
@@ -66,6 +68,7 @@ _UNAUTHORIZED_RESPONSE_HEADERS = (
     *_DEFAULT_RESPONSE_HEADERS,
     ("WWW-Authenticate", 'Bearer realm="agora-health"'),
 )
+_LOOPBACK_HOSTS = frozenset({"localhost"})
 
 
 class HealthServer:
@@ -101,6 +104,7 @@ class HealthServer:
         self._host = host
         self._namespace = namespace
         self._auth_token = auth_token
+        self._warn_if_public_without_auth()
         self._server: asyncio.Server | None = None
         self._stop_event: asyncio.Event | None = None
 
@@ -121,6 +125,17 @@ class HealthServer:
         self._responses = HealthResponseBuilder(
             collector=self._collector,
             metrics_exporter=self._prometheus,  # type: ignore[arg-type]
+        )
+
+    def _warn_if_public_without_auth(self) -> None:
+        if self._auth_token is not None or _is_loopback_host(self._host):
+            return
+        warnings.warn(
+            "HealthServer is binding a non-loopback host without auth_token. "
+            "Restrict unauthenticated health endpoints to loopback/private access or "
+            "configure auth_token before exposing them beyond the local machine.",
+            UserWarning,
+            stacklevel=3,
         )
 
     def __repr__(self) -> str:
@@ -273,6 +288,16 @@ def _parse_request_line(raw: bytes) -> tuple[str, str]:
         return method, path
     except Exception:
         return "GET", "/"
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _write_response(

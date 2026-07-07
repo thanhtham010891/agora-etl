@@ -25,14 +25,14 @@ import pytest
 
 from agora import (
     DeliveryConfig,
-    InMemoryCheckpointStore,
     IterableSource,
     Pipeline,
-    SQLiteCheckpointStore,
 )
 from agora.core.checkpoint import (
     BackendCheckpointStore,
     Checkpoint,
+    InMemoryCheckpointStore,
+    SQLiteCheckpointStore,
     is_checkpoint_capable,
 )
 from agora.core.source import BaseSource

@@ -4,6 +4,7 @@ Release notes are versioned as separate documents so the top-level changelog can
 
 ## Releases
 
+- [0.4.5](0.4.5.md) — doctor readiness contract hardening, public API manifest cleanup, and CI/release readiness fixes
 - [0.4.4](0.4.4.md) — source handled-callback support for plugin DLQ cleanup and replay-safe source error follow-up hooks
 - [0.4.3](0.4.3.md) — checkpoint and DLQ correctness hardening, worker lifecycle cleanup, and public API tightening
 - [0.4.2](0.4.2.md) — production maturity classifier and full official plugin documentation refresh

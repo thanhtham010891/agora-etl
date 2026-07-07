@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,21 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DOCS_ROOT = PACKAGE_ROOT / "docs"
 SOURCE_ROOT = PACKAGE_ROOT / "src" / "agora"
 PLUGIN_SOURCE_ROOTS = tuple(sorted((PACKAGE_ROOT / "plugins").glob("*/src")))
+PLUGIN_FAMILY_DOCS = (
+    DOCS_ROOT / "plugins" / "redis.md",
+    DOCS_ROOT / "plugins" / "kafka.md",
+    DOCS_ROOT / "plugins" / "postgresql.md",
+    DOCS_ROOT / "plugins" / "bigquery.md",
+)
+PUBLIC_DOCS_WORDING_GUARD_PATHS = (
+    PACKAGE_ROOT / "README.md",
+    PACKAGE_ROOT.parent / "agora-plugins" / "README.md",
+    DOCS_ROOT / "source-of-truth.md",
+    DOCS_ROOT / "plugins" / "index.md",
+    DOCS_ROOT / "plugins" / "official-bundle.md",
+    DOCS_ROOT / "plugins" / "production-readiness.md",
+    *PLUGIN_FAMILY_DOCS,
+)
 
 PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
     "agora": (
@@ -123,6 +139,7 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "CheckpointValue",
         "CheckpointableSource",
         "DLQFailurePolicy",
+        "DLQPayloadPolicy",
         "DLQRecord",
         "DLQSink",
         "DedupStoreFailurePolicy",
@@ -131,6 +148,7 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "FailureClassification",
         "PoisonRecordClassification",
         "PoisonRecordInfo",
+        "PoisonRecordPolicy",
         "SQLiteCheckpointStore",
         "SourceRecoveryContractProvider",
         "SourceRecoveryContractSnapshot",
@@ -141,9 +159,12 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "AcceptanceFinding",
         "AcceptanceGate",
         "AcceptanceReport",
+        "AcceptanceReportProvider",
         "ComponentHealthSnapshot",
         "Configurable",
         "HealthCheckable",
+        "MetricsSnapshotProvider",
+        "PrometheusMetricsProvider",
         "Lifecycle",
         "Plugin",
         "Registry",
@@ -153,6 +174,9 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "PipelineMetrics",
         "PipelineRunSummary",
         "SinkWriteExplain",
+        "has_acceptance_report",
+        "has_metrics_snapshot",
+        "has_prometheus_metrics",
         "AgoraError",
         "ConfigError",
         "PipelineError",
@@ -165,7 +189,10 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "AcceptanceFinding",
         "AcceptanceGate",
         "AcceptanceReport",
+        "AcceptanceReportProvider",
+        "has_acceptance_report",
     ),
+    "agora.core.dlq_policy": ("DLQPayloadPolicy",),
     "agora.core.health": (
         "ComponentHealthSnapshot",
         "HealthCheckable",
@@ -174,6 +201,7 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "FailureClassification",
         "PoisonRecordClassification",
         "PoisonRecordInfo",
+        "PoisonRecordPolicy",
     ),
     "agora.core.recovery": (
         "SourceRecoveryContractProvider",
@@ -261,13 +289,26 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
         "is_pipelined_batch_middleware",
     ),
     "agora.core.context": ("PipelineContext",),
+    "agora.core.doctor": (
+        "DOCTOR_READINESS_ENTRYPOINT_GROUP",
+        "CheckResult",
+        "DoctorReadinessProvider",
+        "DoctorReadinessProviderEntry",
+        "DoctorReport",
+        "Status",
+        "discover_doctor_readiness_providers",
+    ),
     "agora.core.metrics": (
         "AIMetrics",
         "AIMiddlewareMetrics",
+        "MetricsSnapshotProvider",
         "MiddlewareMetrics",
         "PipelineMetrics",
         "PipelineRunSummary",
+        "PrometheusMetricsProvider",
         "RuntimeMetrics",
+        "has_metrics_snapshot",
+        "has_prometheus_metrics",
     ),
     "agora.core.tracing": (
         "InMemoryTracer",
@@ -314,7 +355,23 @@ PUBLIC_API_MANIFEST: dict[str, tuple[str, ...]] = {
 
 COMPAT_EXPORTS: dict[str, frozenset[str]] = {}
 
-DEPRECATED_EXPORTS: dict[str, frozenset[str]] = {}
+DEPRECATED_EXPORTS: dict[str, frozenset[str]] = {
+    "agora": frozenset(
+        {
+            "BaseSink",
+            "BaseSource",
+            "CheckpointStore",
+            "InMemoryCheckpointStore",
+            "Registry",
+            "SourceRecordError",
+            "SourceRuntimeMetrics",
+            "SQLiteCheckpointStore",
+            "WriteResult",
+            "Writer",
+            "state_backend_registry",
+        }
+    )
+}
 
 DISALLOWED_INTERNAL_IMPORT_PATTERNS = (
     re.compile(r"^\s*from\s+agora\.core(?:\.[A-Za-z0-9]+)*\._[A-Za-z0-9_.]+\s+import\b"),
@@ -338,7 +395,76 @@ class CompatExportPolicy:
     note: str
 
 
-DEPRECATED_EXPORT_POLICIES: dict[str, dict[str, DeprecatedExportPolicy]] = {}
+DEPRECATED_EXPORT_POLICIES: dict[str, dict[str, DeprecatedExportPolicy]] = {
+    "agora": {
+        "BaseSink": DeprecatedExportPolicy(
+            replacement="agora.core.sink.BaseSink",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Sink base-class contract belongs to the sink domain facade for extension-author usage.",
+        ),
+        "BaseSource": DeprecatedExportPolicy(
+            replacement="agora.core.source.BaseSource",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Source base-class contract belongs to the source domain facade for extension-author usage.",
+        ),
+        "CheckpointStore": DeprecatedExportPolicy(
+            replacement="agora.core.checkpoint.CheckpointStore",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Checkpoint store contract belongs to the framework checkpoint facade.",
+        ),
+        "InMemoryCheckpointStore": DeprecatedExportPolicy(
+            replacement="agora.core.checkpoint.InMemoryCheckpointStore",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="In-memory checkpoint implementation is no longer part of the preferred root onboarding story.",
+        ),
+        "Registry": DeprecatedExportPolicy(
+            replacement="agora.core.registry.Registry",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Registry contract belongs to the dedicated core registry facade, not the builder-first root facade.",
+        ),
+        "SourceRecordError": DeprecatedExportPolicy(
+            replacement="agora.core.source.SourceRecordError",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Source per-record error contract belongs to the source domain facade.",
+        ),
+        "SourceRuntimeMetrics": DeprecatedExportPolicy(
+            replacement="agora.core.source.SourceRuntimeMetrics",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Source runtime counters belong to the source domain facade for extension-author diagnostics.",
+        ),
+        "SQLiteCheckpointStore": DeprecatedExportPolicy(
+            replacement="agora.core.checkpoint.SQLiteCheckpointStore",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="SQLite checkpoint implementation should be imported from the checkpoint domain facade.",
+        ),
+        "WriteResult": DeprecatedExportPolicy(
+            replacement="agora.core.writer.WriteResult",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Writer per-record outcome objects belong to the writer contract facade, not the builder-first root facade.",
+        ),
+        "Writer": DeprecatedExportPolicy(
+            replacement="agora.core.writer.Writer",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="Writer protocol belongs to the dedicated writer contract facade for sink/runtime integration.",
+        ),
+        "state_backend_registry": DeprecatedExportPolicy(
+            replacement="agora.state.state_backend_registry",
+            retained_through="0.4.x",
+            removal_target="0.5.0",
+            note="State registry belongs to the dedicated state facade, not the builder-first root facade.",
+        ),
+    }
+}
 
 COMPAT_EXPORT_POLICIES: dict[str, dict[str, CompatExportPolicy]] = {}
 
@@ -381,9 +507,11 @@ def test_public_api_manifest_exports_exist_on_modules() -> None:
         module = importlib.import_module(module_name)
 
         for export_name in expected_exports:
-            assert hasattr(module, export_name), (
-                f"{module_name} is missing public export {export_name!r} declared in __all__."
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                assert hasattr(module, export_name), (
+                    f"{module_name} is missing public export {export_name!r} declared in __all__."
+                )
 
 
 def test_public_api_compatibility_exports_are_explicitly_classified() -> None:
@@ -446,6 +574,63 @@ def test_docs_code_examples_do_not_import_internal_core_modules() -> None:
     assert offenders == []
 
 
+def test_docs_code_examples_do_not_import_soft_deprecated_root_exports() -> None:
+    offenders: list[str] = []
+    deprecated_names = DEPRECATED_EXPORTS.get("agora", frozenset())
+    pending_multiline_import: tuple[Path, int] | None = None
+
+    for path in sorted(DOCS_ROOT.rglob("*.md")):
+        for lineno, line in _markdown_code_blocks(path):
+            stripped = line.strip()
+
+            if pending_multiline_import is not None:
+                relpath = path.relative_to(DOCS_ROOT.parent)
+                imported_name = stripped.rstrip(",)").strip()
+                if imported_name in deprecated_names:
+                    offenders.append(f"{relpath}:{lineno}: from agora import {imported_name}")
+                if ")" in stripped:
+                    pending_multiline_import = None
+                continue
+
+            if not stripped.startswith("from agora import"):
+                continue
+
+            relpath = path.relative_to(DOCS_ROOT.parent)
+            if stripped == "from agora import (":
+                pending_multiline_import = (path, lineno)
+                continue
+
+            imported_names = stripped.removeprefix("from agora import").split(",")
+            for imported_name in imported_names:
+                candidate = imported_name.strip()
+                if candidate in deprecated_names:
+                    offenders.append(f"{relpath}:{lineno}: {stripped}")
+
+    assert offenders == []
+
+
+def test_plugin_family_docs_include_maturity_cards() -> None:
+    for path in PLUGIN_FAMILY_DOCS:
+        text = path.read_text(encoding="utf-8")
+
+        assert "## Maturity card" in text, (
+            f"{path.relative_to(PACKAGE_ROOT)} is missing a maturity card"
+        )
+        assert "Required validation gate" in text, (
+            f"{path.relative_to(PACKAGE_ROOT)} is missing the required gate row in its maturity card"
+        )
+
+
+def test_source_of_truth_map_exists_and_links_canonical_boundaries() -> None:
+    path = DOCS_ROOT / "source-of-truth.md"
+    text = path.read_text(encoding="utf-8")
+
+    assert "Runtime Guarantees" in text
+    assert "Plugin Production Readiness" in text
+    assert "Plugin Contract" in text
+    assert "README policy" in text
+
+
 def test_plugin_sources_do_not_depend_on_internal_core_modules() -> None:
     offenders: list[str] = []
 
@@ -486,6 +671,14 @@ def test_executor_layer_depends_on_runtime_facade_not_runtime_support_modules() 
     assert not any(name.startswith("agora.core.runtime._") for name in executor_imports)
     assert "agora.core.runtime" in executor_support_imports
     assert not any(name.startswith("agora.core.runtime._") for name in executor_support_imports)
+
+
+def test_doctor_command_orchestrates_plugin_readiness_without_direct_plugin_imports() -> None:
+    doctor_imports = _imported_modules(SOURCE_ROOT / "cli" / "commands" / "doctor.py")
+
+    assert not any(
+        name == "agora_plugins" or name.startswith("agora_plugins.") for name in doctor_imports
+    )
 
 
 def test_runtime_facade_does_not_reach_back_into_builder_or_executor_layers() -> None:

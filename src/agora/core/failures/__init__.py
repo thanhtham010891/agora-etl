@@ -26,6 +26,15 @@ class FailureClassification(StrEnum):
 PoisonRecordClassification = FailureClassification
 
 
+class PoisonRecordPolicy(StrEnum):
+    """Shared source-side poison-record handling policy."""
+
+    FAIL_CLOSED = "fail_closed"
+    LOG_AND_CONTINUE = "log_and_continue"
+    DLQ_AND_CONTINUE = "dlq_and_continue"
+    DLQ_AND_FAIL_CLOSED = "dlq_and_fail_closed"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PoisonRecordInfo:
     """Structured poison-record metadata for DLQ payloads and incident tooling."""
@@ -46,4 +55,5 @@ __all__ = [
     "FailureClassification",
     "PoisonRecordClassification",
     "PoisonRecordInfo",
+    "PoisonRecordPolicy",
 ]

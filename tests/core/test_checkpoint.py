@@ -9,11 +9,10 @@ import pytest
 
 from agora import (
     DeliveryConfig,
-    InMemoryCheckpointStore,
     IterableSource,
     Pipeline,
-    SQLiteCheckpointStore,
 )
+from agora.core.checkpoint import InMemoryCheckpointStore, SQLiteCheckpointStore
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 from agora.core.types import CheckpointFailurePolicy

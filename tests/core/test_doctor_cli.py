@@ -23,9 +23,10 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
+import agora.cli.commands.doctor as doctor_module
 from agora.cli._path import ensure_project_on_path
 from agora.cli.commands.doctor import (
     CheckResult,
@@ -48,6 +49,15 @@ from agora.cli.commands.doctor import (
     check_redis_enterprise_readiness,
 )
 from agora.core.acceleration import AccelerationCapability, AccelerationMode
+from agora.core.doctor import (
+    DOCTOR_READINESS_ENTRYPOINT_GROUP,
+    DoctorReadinessProvider,
+    DoctorReadinessProviderEntry,
+    discover_doctor_readiness_providers,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 # ======================================================================
 # DoctorReport
@@ -189,6 +199,7 @@ def test_plugins_not_installed_returns_warn() -> None:
     with patch("importlib.import_module", side_effect=ImportError("not installed")):
         result = check_plugins_importable()
     assert result.status == Status.WARN
+    assert result.detail == "Install with: pip install 'agora-etl-plugins'"
 
 
 def test_acceleration_auto_available_passes() -> None:
@@ -396,6 +407,24 @@ def test_entrypoint_plugins_warn_when_plugin_conflicts_with_builtin_key() -> Non
     assert result.status == Status.WARN
     assert "conflicting plugin" in result.message
     assert "stdout [agora.sinks]" in result.detail
+
+
+def test_entrypoint_plugins_fail_when_doctor_provider_has_invalid_contract() -> None:
+    from importlib.metadata import EntryPoint
+
+    bad_ep = MagicMock(spec=EntryPoint)
+    bad_ep.name = "postgres"
+    bad_ep.load.return_value = object()
+
+    def _entry_points(*, group: str):
+        return [bad_ep] if group == DOCTOR_READINESS_ENTRYPOINT_GROUP else []
+
+    with patch("importlib.metadata.entry_points", side_effect=_entry_points):
+        result = check_entrypoint_plugins()
+
+    assert result.status == Status.FAIL
+    assert DOCTOR_READINESS_ENTRYPOINT_GROUP in result.detail
+    assert "DoctorReadinessProvider" in result.detail
 
 
 # ======================================================================
@@ -700,12 +729,229 @@ class _FakeThresholds:
         self.kwargs = kwargs
 
 
+@dataclass(frozen=True, slots=True)
+class _FakeDoctorProvider:
+    backend: str
+    component_types: frozenset[str]
+    results: tuple[CheckResult, ...] = ()
+    runner: Callable[[dict[str, Any]], Awaitable[list[CheckResult]]] | None = None
+
+    async def run_readiness_checks(self, pipeline_config: dict[str, Any]) -> list[CheckResult]:
+        if self.runner is not None:
+            return await self.runner(pipeline_config)
+        del pipeline_config
+        return list(self.results)
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeEntryPoint:
+    name: str
+    value: str
+    loaded: object
+
+    def load(self) -> object:
+        return self.loaded
+
+
 def _install_fake_postgres_plugin_module() -> ModuleType:
+    async def _provider_runner(pipeline_config: dict[str, Any]) -> list[CheckResult]:
+        from agora.core.container import AgoraContainer
+        from agora.core.metrics import has_metrics_snapshot
+
+        def _component_type(config: object) -> str | None:
+            if isinstance(config, dict):
+                value = config.get("type")
+                return value if isinstance(value, str) else None
+            return None
+
+        def _hooks(subject: str, report: _FakeReport) -> list[str]:
+            hooks: list[str] = []
+            metrics = {finding.metric for finding in report.findings}
+            if "recovery_contract.supports_checkpoint" in metrics:
+                hooks.append(
+                    f"Configure checkpoint cursor fields for {subject} before relying on enterprise failover resume semantics."
+                )
+            if "connection_ready" in metrics:
+                hooks.append(
+                    f"Verify DSN, credentials, TLS settings, and network reachability for {subject}."
+                )
+            if "table_ready" in metrics:
+                hooks.append(
+                    f"Ensure the target table for {subject} exists and the service account can read/write it."
+                )
+            return hooks
+
+        def _result(
+            *,
+            name: str,
+            subject: str,
+            component: str,
+            report: _FakeReport,
+            detail_lines: list[str],
+        ) -> CheckResult:
+            status = Status.PASS if report.passed else Status.FAIL
+            detail = list(detail_lines)
+            findings_payload: list[dict[str, Any]] = []
+            for finding in report.findings:
+                detail.append(
+                    f"{finding.metric}: {finding.message} (value={finding.value!r}, threshold={finding.threshold!r})"
+                )
+                findings_payload.append(
+                    {
+                        "metric": finding.metric,
+                        "message": finding.message,
+                        "value": finding.value,
+                        "threshold": finding.threshold,
+                    }
+                )
+            operator_hooks = _hooks(subject, report)
+            detail.extend(f"operator_hook={hook}" for hook in operator_hooks)
+            message = (
+                f"{subject} passed enterprise readiness checks"
+                if report.passed
+                else f"{subject} failed enterprise readiness checks"
+            )
+            metrics: dict[str, Any] = {}
+            for line in detail_lines:
+                if "=" not in line:
+                    continue
+                key, raw_value = line.split("=", 1)
+                metrics[key] = raw_value
+            return CheckResult(
+                name=name,
+                status=status,
+                message=message,
+                detail="\n".join(detail),
+                data={
+                    "category": "enterprise_readiness",
+                    "backend": "postgres",
+                    "component": component,
+                    "name": name,
+                    "status": status.value,
+                    "message": message,
+                    "metrics": metrics,
+                    "findings": findings_payload,
+                    "operator_hooks": operator_hooks,
+                },
+            )
+
+        container = AgoraContainer.from_config(pipeline_config)
+        gate = _FakeGate()
+        results: list[CheckResult] = []
+
+        async with container:
+            pipeline = container.build_pipeline()
+            source_cfg = pipeline_config.get("source", {})
+            source = getattr(pipeline, "_source", None)
+            if _component_type(source_cfg) == "postgres":
+                if source is None or not has_metrics_snapshot(source):
+                    results.append(
+                        CheckResult(
+                            name="Postgres source readiness",
+                            status=Status.FAIL,
+                            message="Configured Postgres source could not expose readiness metrics",
+                            detail="Expected a live Postgres source instance with metrics_snapshot().",
+                            data={"backend": "postgres", "component": "source"},
+                        )
+                    )
+                else:
+                    snapshot = source.metrics_snapshot()
+                    report = gate.evaluate_source(
+                        snapshot,
+                        thresholds=_FakeThresholds(require_checkpoint_support=True),
+                    )
+                    results.append(
+                        _result(
+                            name="Postgres source readiness",
+                            subject="Postgres source",
+                            component="source",
+                            report=report,
+                            detail_lines=[
+                                f"mode={snapshot.recovery_contract.mode.value}",
+                                f"supports_checkpoint={snapshot.recovery_contract.supports_checkpoint}",
+                                f"requires_pipeline_rerun={snapshot.recovery_contract.requires_pipeline_rerun}",
+                                f"transparent_failover={snapshot.recovery_contract.transparent_failover}",
+                            ],
+                        )
+                    )
+
+            writer = getattr(pipeline, "_writer", None)
+            sink_instances = list(getattr(writer, "_sinks", ())) if writer is not None else []
+            sink_cfgs = pipeline_config.get("sinks", [])
+            if isinstance(sink_cfgs, list):
+                for index, sink_cfg in enumerate(sink_cfgs):
+                    if _component_type(sink_cfg) != "postgres":
+                        continue
+                    sink = sink_instances[index] if index < len(sink_instances) else None
+                    if sink is None or not has_metrics_snapshot(sink):
+                        results.append(
+                            CheckResult(
+                                name=f"Postgres sink readiness #{index + 1}",
+                                status=Status.FAIL,
+                                message="Configured Postgres sink could not expose readiness metrics",
+                                detail="Expected a live Postgres sink instance with metrics_snapshot().",
+                                data={"backend": "postgres", "component": "sink"},
+                            )
+                        )
+                        continue
+                    snapshot = sink.metrics_snapshot()
+                    report = gate.evaluate_sink(snapshot, thresholds=_FakeThresholds())
+                    results.append(
+                        _result(
+                            name=f"Postgres sink readiness #{index + 1}",
+                            subject=f"Postgres sink {snapshot.table!r}",
+                            component="sink",
+                            report=report,
+                            detail_lines=[
+                                f"table={snapshot.table}",
+                                f"connection_ready={snapshot.connection_ready}",
+                                f"write_safety_policy={snapshot.write_safety_policy}",
+                            ],
+                        )
+                    )
+
+            dlq_cfg = pipeline_config.get("dlq")
+            if (
+                isinstance(dlq_cfg, dict)
+                and dlq_cfg.get("enabled", True)
+                and _component_type(dlq_cfg.get("sink")) == "postgres_dlq"
+            ):
+                dlq_sink = container.resolve("_dlq_sink") if container.has("_dlq_sink") else None
+                if dlq_sink is None or not has_metrics_snapshot(dlq_sink):
+                    results.append(
+                        CheckResult(
+                            name="Postgres DLQ readiness",
+                            status=Status.FAIL,
+                            message="Configured Postgres DLQ could not expose readiness metrics",
+                            detail="Expected a live Postgres DLQ sink instance with metrics_snapshot().",
+                            data={"backend": "postgres", "component": "dlq"},
+                        )
+                    )
+                else:
+                    snapshot = dlq_sink.metrics_snapshot()
+                    report = gate.evaluate_dlq_sink(snapshot, thresholds=_FakeThresholds())
+                    results.append(
+                        _result(
+                            name="Postgres DLQ readiness",
+                            subject=f"Postgres DLQ {snapshot.table!r}",
+                            component="dlq",
+                            report=report,
+                            detail_lines=[
+                                f"table={snapshot.table}",
+                                f"connection_ready={snapshot.connection_ready}",
+                                f"table_ready={snapshot.table_ready}",
+                            ],
+                        )
+                    )
+
+        return results
+
     module = ModuleType("agora_plugins.postgres")
-    module.PostgresEnterpriseAcceptanceGate = _FakeGate
-    module.PostgresSourceEnterpriseAcceptanceThresholds = _FakeThresholds
-    module.PostgresSinkEnterpriseAcceptanceThresholds = _FakeThresholds
-    module.PostgresDLQSinkEnterpriseAcceptanceThresholds = _FakeThresholds
+    module._doctor_readiness_provider = _FakeDoctorProvider(
+        backend="postgres",
+        component_types=frozenset({"postgres", "postgres_dlq"}),
+        runner=_provider_runner,
+    )
     return module
 
 
@@ -770,6 +1016,482 @@ class _FakeKafkaSource:
 
     def operational_metrics(self) -> Any:
         return self._operational
+
+
+def _install_fake_kafka_plugin_module() -> ModuleType:
+    async def _provider_runner(pipeline_config: dict[str, Any]) -> list[CheckResult]:
+        from agora.core.container import AgoraContainer
+        from agora.core.metrics import has_metrics_snapshot
+
+        def _component_type(config: object) -> str | None:
+            if isinstance(config, dict):
+                value = config.get("type")
+                return value if isinstance(value, str) else None
+            return None
+
+        container = AgoraContainer.from_config(pipeline_config)
+        results: list[CheckResult] = []
+        async with container:
+            pipeline = container.build_pipeline()
+            source_cfg = pipeline_config.get("source", {})
+            source = getattr(pipeline, "_source", None)
+            if _component_type(source_cfg) == "kafka":
+                health = await source.health_snapshot(force_refresh=True)
+                runtime_metrics = source.runtime_metrics()
+                operational_metrics = source.operational_metrics()
+                detail_lines = [
+                    f"consumer_group={health.consumer_group}",
+                    f"subscription_mode={health.subscription_mode}",
+                    f"assignment_count={health.assignment_count}",
+                    f"pending_commit_count={health.pending_commit_count}",
+                    f"rebalance_count={health.rebalance_count}",
+                    f"total_lag={health.total_lag}",
+                ]
+                status = Status.PASS
+                message = "Kafka source passed enterprise readiness checks"
+                hooks: list[str] = []
+                if health.stalled:
+                    status = Status.FAIL
+                    message = "Kafka source is stalled"
+                    hooks.append(
+                        "Inspect broker connectivity, rebalance churn, or pause/resume orchestration before cutover."
+                    )
+                elif not health.ready:
+                    status = Status.WARN
+                    message = "Kafka source opened but has no active partition assignment yet"
+                    hooks.append(
+                        "Verify topic existence, ACLs, and consumer-group coordinator state until partition assignment becomes stable."
+                    )
+                if runtime_metrics.record_error_count > 0:
+                    status = Status.FAIL
+                    message = "Kafka source has source-level record errors"
+                    hooks.append(
+                        "Inspect poison-record classification counters and DLQ flow before promoting this consumer."
+                    )
+                if health.pending_commit_count > 0 and status == Status.PASS:
+                    status = Status.WARN
+                    message = "Kafka source has pending commits at readiness time"
+                    hooks.append(
+                        "Let commit-safe handoff drain pending acknowledgements before rolling forward."
+                    )
+                if operational_metrics.poison_record_fail_closed_count > 0:
+                    hooks.append(
+                        "A fail-closed poison policy has already fired; verify schema or payload fixes before restart."
+                    )
+                detail_lines.extend(f"operator_hook={hook}" for hook in hooks)
+                results.append(
+                    CheckResult(
+                        name="Kafka source readiness",
+                        status=status,
+                        message=message,
+                        detail="\n".join(detail_lines),
+                        data={
+                            "category": "enterprise_readiness",
+                            "backend": "kafka",
+                            "component": "source",
+                            "name": "Kafka source readiness",
+                            "status": status.value,
+                            "message": message,
+                            "metrics": {
+                                "assignment_count": health.assignment_count,
+                                "consumer_group": health.consumer_group,
+                            },
+                            "findings": [],
+                            "operator_hooks": hooks,
+                        },
+                    )
+                )
+
+            writer = getattr(pipeline, "_writer", None)
+            sink_instances = list(getattr(writer, "_sinks", ())) if writer is not None else []
+            sink_cfgs = pipeline_config.get("sinks", [])
+            if isinstance(sink_cfgs, list):
+                for index, sink_cfg in enumerate(sink_cfgs):
+                    if _component_type(sink_cfg) != "kafka":
+                        continue
+                    sink = sink_instances[index] if index < len(sink_instances) else None
+                    ready = sink is not None and getattr(sink, "_producer", None) is not None
+                    topic = getattr(sink, "_topic", "unknown")
+                    bootstrap = getattr(sink, "_bootstrap", "unknown")
+                    status = Status.PASS if ready else Status.FAIL
+                    results.append(
+                        CheckResult(
+                            name=f"Kafka sink readiness #{index + 1}",
+                            status=status,
+                            message=(
+                                f"Kafka sink {topic!r} passed enterprise readiness checks"
+                                if ready
+                                else f"Kafka sink {topic!r} failed enterprise readiness checks"
+                            ),
+                            detail="\n".join(
+                                [
+                                    f"topic={topic}",
+                                    f"bootstrap_servers={bootstrap}",
+                                    f"producer_ready={ready}",
+                                ]
+                            ),
+                            data={"backend": "kafka", "component": "sink"},
+                        )
+                    )
+
+            dlq_cfg = pipeline_config.get("dlq")
+            if (
+                isinstance(dlq_cfg, dict)
+                and dlq_cfg.get("enabled", True)
+                and _component_type(dlq_cfg.get("sink")) == "kafka_dlq"
+            ):
+                dlq_sink = container.resolve("_dlq_sink") if container.has("_dlq_sink") else None
+                if dlq_sink is None or not has_metrics_snapshot(dlq_sink):
+                    results.append(
+                        CheckResult(
+                            name="Kafka DLQ readiness",
+                            status=Status.FAIL,
+                            message="Configured Kafka DLQ could not expose readiness metrics",
+                            data={"backend": "kafka", "component": "dlq"},
+                        )
+                    )
+                else:
+                    snapshot = dlq_sink.metrics_snapshot()
+                    results.append(
+                        CheckResult(
+                            name="Kafka DLQ readiness",
+                            status=Status.PASS,
+                            message=f"Kafka DLQ {snapshot.topic!r} passed enterprise readiness checks",
+                            detail=f"topic={snapshot.topic}\nbootstrap_servers={snapshot.bootstrap_servers}",
+                            data={"backend": "kafka", "component": "dlq"},
+                        )
+                    )
+
+        return results
+
+    module = ModuleType("agora_plugins.kafka")
+    module._doctor_readiness_provider = _FakeDoctorProvider(
+        backend="kafka",
+        component_types=frozenset({"kafka", "kafka_dlq"}),
+        runner=_provider_runner,
+    )
+    return module
+
+
+def _install_fake_redis_plugin_module() -> ModuleType:
+    async def _provider_runner(pipeline_config: dict[str, Any]) -> list[CheckResult]:
+        from agora.core.container import AgoraContainer
+        from agora.core.metrics import has_metrics_snapshot
+
+        def _component_type(config: object) -> str | None:
+            if isinstance(config, dict):
+                value = config.get("type")
+                return value if isinstance(value, str) else None
+            return None
+
+        container = AgoraContainer.from_config(pipeline_config)
+        results: list[CheckResult] = []
+        async with container:
+            pipeline = container.build_pipeline()
+            source_cfg = pipeline_config.get("source", {})
+            source = getattr(pipeline, "_source", None)
+            if _component_type(source_cfg) == "redis_stream":
+                ready = getattr(source, "_client", None) is not None
+                hooks = []
+                if not ready:
+                    hooks.append(
+                        "Verify Redis URL, ACLs, and stream/group existence before cutover."
+                    )
+                results.append(
+                    CheckResult(
+                        name="Redis stream source readiness",
+                        status=Status.PASS if ready else Status.FAIL,
+                        message=(
+                            "Redis stream source passed enterprise readiness checks"
+                            if ready
+                            else "Redis stream source failed enterprise readiness checks"
+                        ),
+                        detail="\n".join(
+                            [
+                                f"stream={source._stream}",
+                                f"group={source._group}",
+                                f"consumer={source._consumer}",
+                                f"supports_checkpoint={source.supports_checkpoint}",
+                                f"connection_ready={ready}",
+                                *[f"operator_hook={hook}" for hook in hooks],
+                            ]
+                        ),
+                        data={"backend": "redis", "component": "source"},
+                    )
+                )
+
+            writer = getattr(pipeline, "_writer", None)
+            sink_instances = list(getattr(writer, "_sinks", ())) if writer is not None else []
+            sink_cfgs = pipeline_config.get("sinks", [])
+            if isinstance(sink_cfgs, list):
+                for index, sink_cfg in enumerate(sink_cfgs):
+                    if _component_type(sink_cfg) != "redis":
+                        continue
+                    sink = sink_instances[index] if index < len(sink_instances) else None
+                    if sink is None or not has_metrics_snapshot(sink):
+                        results.append(
+                            CheckResult(
+                                name=f"Redis sink readiness #{index + 1}",
+                                status=Status.FAIL,
+                                message="Configured Redis sink could not expose readiness metrics",
+                                data={"backend": "redis", "component": "sink"},
+                            )
+                        )
+                        continue
+                    snapshot = sink.metrics_snapshot()
+                    ready = snapshot.connection_ready
+                    hook = (
+                        "Verify Redis memory policy, TTL, and write mode semantics before production cutover."
+                        if ready
+                        else "Verify Redis URL, ACLs, and target database reachability before cutover."
+                    )
+                    results.append(
+                        CheckResult(
+                            name=f"Redis sink readiness #{index + 1}",
+                            status=Status.PASS if ready else Status.FAIL,
+                            message=(
+                                f"Redis sink {snapshot.target!r} passed enterprise readiness checks"
+                                if ready
+                                else f"Redis sink {snapshot.target!r} failed enterprise readiness checks"
+                            ),
+                            detail="\n".join(
+                                [
+                                    f"target={snapshot.target}",
+                                    f"mode={snapshot.mode}",
+                                    f"connection_ready={snapshot.connection_ready}",
+                                    f"operator_hook={hook}",
+                                ]
+                            ),
+                            data={
+                                "backend": "redis",
+                                "component": "sink",
+                                "metrics": {"connection_ready": snapshot.connection_ready},
+                            },
+                        )
+                    )
+
+            dlq_cfg = pipeline_config.get("dlq")
+            if (
+                isinstance(dlq_cfg, dict)
+                and dlq_cfg.get("enabled", True)
+                and _component_type(dlq_cfg.get("sink")) == "redis_dlq"
+            ):
+                dlq_sink = container.resolve("_dlq_sink") if container.has("_dlq_sink") else None
+                ready = dlq_sink is not None and getattr(dlq_sink, "_client", None) is not None
+                hook = (
+                    "Validate DLQ key retention and replay cleanup rules before relying on Redis poison isolation."
+                    if ready
+                    else "Verify Redis DLQ connectivity and ACLs before enabling replay workflows."
+                )
+                results.append(
+                    CheckResult(
+                        name="Redis DLQ readiness",
+                        status=Status.PASS if ready else Status.FAIL,
+                        message=(
+                            f"Redis DLQ {dlq_sink._key_prefix!r} passed enterprise readiness checks"
+                            if ready
+                            else f"Redis DLQ {dlq_sink._key_prefix!r} failed enterprise readiness checks"
+                        ),
+                        detail="\n".join(
+                            [
+                                f"key_prefix={dlq_sink._key_prefix}",
+                                f"connection_ready={ready}",
+                                f"operator_hook={hook}",
+                            ]
+                        ),
+                        data={"backend": "redis", "component": "dlq"},
+                    )
+                )
+
+        return results
+
+    module = ModuleType("agora_plugins.redis")
+    module._doctor_readiness_provider = _FakeDoctorProvider(
+        backend="redis",
+        component_types=frozenset({"redis", "redis_dlq", "redis_stream"}),
+        runner=_provider_runner,
+    )
+    return module
+
+
+def test_load_plugin_readiness_provider_uses_internal_provider_bridge() -> None:
+    @dataclass(frozen=True, slots=True)
+    class _FakeProvider:
+        backend: str = "postgres"
+        component_types: frozenset[str] = frozenset({"postgres", "postgres_dlq"})
+
+        async def run_readiness_checks(self, pipeline_config: dict[str, Any]) -> list[CheckResult]:
+            del pipeline_config
+            return [CheckResult("provider", Status.PASS, "ok")]
+
+    module = ModuleType("agora_plugins.postgres")
+    provider = _FakeProvider()
+    module._doctor_readiness_provider = provider
+
+    with patch.dict(sys.modules, {"agora_plugins.postgres": module}):
+        loaded = doctor_module._load_plugin_readiness_provider(
+            doctor_module._PLUGIN_READINESS_SPECS[0]
+        )
+
+    assert loaded is provider
+    assert isinstance(loaded, DoctorReadinessProvider)
+
+
+def test_discover_doctor_readiness_providers_loads_entry_points_in_name_order() -> None:
+    kafka_provider = _FakeDoctorProvider(
+        backend="kafka",
+        component_types=frozenset({"kafka", "kafka_dlq"}),
+    )
+    postgres_provider = _FakeDoctorProvider(
+        backend="postgres",
+        component_types=frozenset({"postgres", "postgres_dlq"}),
+    )
+
+    with patch(
+        "agora.core.doctor.entry_points",
+        return_value=[
+            _FakeEntryPoint(
+                name="postgres",
+                value="agora_plugins.postgres.doctor:DOCTOR_READINESS_PROVIDER",
+                loaded=postgres_provider,
+            ),
+            _FakeEntryPoint(
+                name="kafka",
+                value="agora_plugins.kafka.doctor:DOCTOR_READINESS_PROVIDER",
+                loaded=kafka_provider,
+            ),
+        ],
+    ) as mocked_entry_points:
+        discovered = discover_doctor_readiness_providers()
+
+    mocked_entry_points.assert_called_once_with(group=DOCTOR_READINESS_ENTRYPOINT_GROUP)
+    assert discovered == (
+        DoctorReadinessProviderEntry(name="kafka", provider=kafka_provider),
+        DoctorReadinessProviderEntry(name="postgres", provider=postgres_provider),
+    )
+
+
+def test_check_all_plugin_readiness_uses_discovered_provider_entries() -> None:
+    provider = _FakeDoctorProvider(
+        backend="postgres",
+        component_types=frozenset({"postgres", "postgres_dlq"}),
+        results=(CheckResult("postgres readiness", Status.PASS, "ok"),),
+    )
+    ctx = SimpleNamespace(
+        resolved=SimpleNamespace(
+            pipeline_config={
+                "source": {"type": "postgres"},
+                "sinks": [],
+            }
+        )
+    )
+
+    with (
+        patch(
+            "agora.cli.commands.doctor._load_doctor_config_context",
+            return_value=ctx,
+        ),
+        patch(
+            "agora.cli.commands.doctor.discover_doctor_readiness_providers",
+            return_value=(DoctorReadinessProviderEntry(name="postgres", provider=provider),),
+        ),
+    ):
+        results = doctor_module._check_all_plugin_readiness("ignored.toml")
+
+    assert [result.message for result in results] == ["ok"]
+
+
+def test_command_execute_uses_generic_plugin_readiness_orchestration(tmp_path: Any) -> None:
+    import argparse
+
+    config = tmp_path / "pipelines.toml"
+    config.write_text(
+        textwrap.dedent("""\
+        format = "agora/v1"
+
+        [defaults]
+        pipeline = "orders"
+
+        [pipelines.orders.source]
+        type = "iterable"
+        records = []
+
+        [[pipelines.orders.sinks]]
+        type = "stdout"
+        """),
+        encoding="utf-8",
+    )
+
+    cmd = DoctorCommand()
+    args = argparse.Namespace(
+        config=str(config),
+        pipeline=None,
+        profile=None,
+        environment=None,
+        json=False,
+    )
+    ctx = MagicMock()
+
+    with (
+        patch(
+            "agora.cli.commands.doctor.check_python_version",
+            return_value=CheckResult("python", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_agora_importable",
+            return_value=CheckResult("agora", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_plugins_importable",
+            return_value=CheckResult("plugins", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_acceleration",
+            return_value=CheckResult("acceleration", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_entrypoint_plugins",
+            return_value=CheckResult("entrypoints", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_config_pipeline_resolution",
+            return_value=CheckResult("resolution", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_config_import_refs",
+            return_value=CheckResult("imports", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_config_pipeline_build",
+            return_value=CheckResult("build", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor._check_all_plugin_readiness",
+            return_value=[CheckResult("postgres readiness", Status.PASS, "provider ok")],
+        ) as plugin_readiness,
+        patch(
+            "agora.cli.commands.doctor.check_recovery_posture",
+            return_value=CheckResult("recovery", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_dlq_replay_support",
+            return_value=CheckResult("dlq", Status.PASS, "ok"),
+        ),
+        patch(
+            "agora.cli.commands.doctor.check_env_vars",
+            return_value=CheckResult("env", Status.PASS, "ok"),
+        ),
+        patch("agora.cli.commands.doctor._render_report"),
+    ):
+        exit_code = cmd.execute(args, ctx)
+
+    assert exit_code == 0
+    plugin_readiness.assert_called_once_with(
+        str(config),
+        pipeline_name=None,
+        profile_name=None,
+        environment_name=None,
+    )
 
 
 def test_postgres_enterprise_readiness_passes_for_ready_components() -> None:
@@ -908,6 +1630,7 @@ def test_kafka_enterprise_readiness_passes_for_ready_components() -> None:
             )
         ),
     )
+    fake_plugin_module = _install_fake_kafka_plugin_module()
 
     with (
         patch(
@@ -915,6 +1638,7 @@ def test_kafka_enterprise_readiness_passes_for_ready_components() -> None:
             return_value=SimpleNamespace(resolved=ctx),
         ),
         patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.kafka": fake_plugin_module}),
     ):
         results = check_kafka_enterprise_readiness("ignored.toml")
 
@@ -936,6 +1660,7 @@ def test_kafka_enterprise_readiness_warns_without_assignment() -> None:
         _writer=SimpleNamespace(_sinks=[]),
     )
     container = _FakeAsyncContainer(pipeline)
+    fake_plugin_module = _install_fake_kafka_plugin_module()
 
     with (
         patch(
@@ -943,6 +1668,7 @@ def test_kafka_enterprise_readiness_warns_without_assignment() -> None:
             return_value=SimpleNamespace(resolved=ctx),
         ),
         patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.kafka": fake_plugin_module}),
     ):
         results = check_kafka_enterprise_readiness("ignored.toml")
 
@@ -985,6 +1711,7 @@ def test_redis_enterprise_readiness_passes_for_ready_components() -> None:
             _key_prefix="agora:dlq",
         ),
     )
+    fake_plugin_module = _install_fake_redis_plugin_module()
 
     with (
         patch(
@@ -992,6 +1719,7 @@ def test_redis_enterprise_readiness_passes_for_ready_components() -> None:
             return_value=SimpleNamespace(resolved=ctx),
         ),
         patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.redis": fake_plugin_module}),
     ):
         results = check_redis_enterprise_readiness("ignored.toml")
 
@@ -1035,6 +1763,7 @@ def test_redis_enterprise_readiness_fails_when_connection_missing() -> None:
             _key_prefix="agora:dlq",
         ),
     )
+    fake_plugin_module = _install_fake_redis_plugin_module()
 
     with (
         patch(
@@ -1042,6 +1771,7 @@ def test_redis_enterprise_readiness_fails_when_connection_missing() -> None:
             return_value=SimpleNamespace(resolved=ctx),
         ),
         patch("agora.core.container.AgoraContainer.from_config", return_value=container),
+        patch.dict(sys.modules, {"agora_plugins.redis": fake_plugin_module}),
     ):
         results = check_redis_enterprise_readiness("ignored.toml")
 

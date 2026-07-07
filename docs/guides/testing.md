@@ -45,7 +45,7 @@ Use this instead of pointing tests at real files or APIs. It keeps tests fast an
 Write a small sink that collects records into a list. This is the standard pattern for asserting what a pipeline produced:
 
 ```python
-from agora import BaseSink
+from agora.core.sink import BaseSink
 
 class CollectSink(BaseSink[dict]):
     sink_name = "collect"
@@ -144,7 +144,9 @@ The DLQ sink receives the original record as it was before the failure, not a wr
 To test that a pipeline resumes correctly, run it twice against the same `InMemoryCheckpointStore` and verify the second run starts from the right position.
 
 ```python
-from agora import BaseSource, DeliveryConfig, InMemoryCheckpointStore
+from agora import DeliveryConfig
+from agora.core.checkpoint import InMemoryCheckpointStore
+from agora.core.source import BaseSource
 
 
 class CountingSource(BaseSource[dict]):

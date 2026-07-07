@@ -4,7 +4,13 @@ Advanced domain-specific contracts live under ``agora.core.<area>``.
 Underscore-prefixed support modules remain internal implementation detail.
 """
 
-from agora.core.acceptance import AcceptanceFinding, AcceptanceGate, AcceptanceReport
+from agora.core.acceptance import (
+    AcceptanceFinding,
+    AcceptanceGate,
+    AcceptanceReport,
+    AcceptanceReportProvider,
+    has_acceptance_report,
+)
 from agora.core.checkpoint import (
     Checkpoint,
     CheckpointableSource,
@@ -18,6 +24,7 @@ from agora.core.context import PipelineContext
 from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
 from agora.core.discovery import discover_plugins
 from agora.core.dlq import DLQRecord, DLQSink
+from agora.core.dlq_policy import DLQPayloadPolicy
 from agora.core.errors import (
     AgoraError,
     ConfigError,
@@ -32,9 +39,17 @@ from agora.core.failures import (
     FailureClassification,
     PoisonRecordClassification,
     PoisonRecordInfo,
+    PoisonRecordPolicy,
 )
 from agora.core.health import ComponentHealthSnapshot, HealthCheckable
-from agora.core.metrics import PipelineMetrics, PipelineRunSummary
+from agora.core.metrics import (
+    MetricsSnapshotProvider,
+    PipelineMetrics,
+    PipelineRunSummary,
+    PrometheusMetricsProvider,
+    has_metrics_snapshot,
+    has_prometheus_metrics,
+)
 from agora.core.middleware import (
     FilterMiddleware,
     MapMiddleware,
@@ -99,6 +114,7 @@ _RECOVERY_EXPORTS = (
     "CheckpointValue",
     "CheckpointableSource",
     "DLQFailurePolicy",
+    "DLQPayloadPolicy",
     "DLQRecord",
     "DLQSink",
     "DedupStoreFailurePolicy",
@@ -107,6 +123,7 @@ _RECOVERY_EXPORTS = (
     "FailureClassification",
     "PoisonRecordClassification",
     "PoisonRecordInfo",
+    "PoisonRecordPolicy",
     "SQLiteCheckpointStore",
     "SourceRecoveryContractProvider",
     "SourceRecoveryContractSnapshot",
@@ -127,14 +144,20 @@ _OBSERVABILITY_EXPORTS = (
     "AcceptanceFinding",
     "AcceptanceGate",
     "AcceptanceReport",
+    "AcceptanceReportProvider",
     "ComponentHealthSnapshot",
     "HealthCheckable",
+    "MetricsSnapshotProvider",
+    "PrometheusMetricsProvider",
     "MiddlewareStageExplain",
     "PipelineContext",
     "PipelineExplain",
     "PipelineMetrics",
     "PipelineRunSummary",
     "SinkWriteExplain",
+    "has_acceptance_report",
+    "has_metrics_snapshot",
+    "has_prometheus_metrics",
 )
 
 _ERROR_EXPORTS = (
@@ -177,6 +200,7 @@ __all__ = [  # noqa: RUF022
     "CheckpointValue",
     "CheckpointableSource",
     "DLQFailurePolicy",
+    "DLQPayloadPolicy",
     "DLQRecord",
     "DLQSink",
     "DedupStoreFailurePolicy",
@@ -185,6 +209,7 @@ __all__ = [  # noqa: RUF022
     "FailureClassification",
     "PoisonRecordClassification",
     "PoisonRecordInfo",
+    "PoisonRecordPolicy",
     "SQLiteCheckpointStore",
     "SourceRecoveryContractProvider",
     "SourceRecoveryContractSnapshot",
@@ -195,9 +220,12 @@ __all__ = [  # noqa: RUF022
     "AcceptanceFinding",
     "AcceptanceGate",
     "AcceptanceReport",
+    "AcceptanceReportProvider",
     "ComponentHealthSnapshot",
     "Configurable",
     "HealthCheckable",
+    "MetricsSnapshotProvider",
+    "PrometheusMetricsProvider",
     "Lifecycle",
     "Plugin",
     "Registry",
@@ -207,6 +235,9 @@ __all__ = [  # noqa: RUF022
     "PipelineMetrics",
     "PipelineRunSummary",
     "SinkWriteExplain",
+    "has_acceptance_report",
+    "has_metrics_snapshot",
+    "has_prometheus_metrics",
     "AgoraError",
     "ConfigError",
     "PipelineError",

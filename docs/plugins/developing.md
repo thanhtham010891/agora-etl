@@ -98,7 +98,7 @@ Prefer registry and contract imports from public facades such as:
 - `agora.state`
 
 For group-specific provisional plugins, these advanced module-level contracts
-are also part of the supported boundary:
+are also part of the documented public plugin boundary:
 
 - `agora.ai.cache` for AI cache implementations
 - `agora.ai.providers.base` for AI provider capability protocols and response types
@@ -196,5 +196,5 @@ assembly paths load plugin entry points for you.
   `agora-etl` version.
 - Run plugin discovery from the installed package.
 - Run at least one smoke pipeline for each advertised extra.
-- Keep public docs limited to the shipped support boundary; internal roadmap or
-  commercial planning belongs outside package docs.
+- Keep public docs limited to the shipped public surface and documented support
+  boundary; internal roadmap or commercial planning belongs outside package docs.

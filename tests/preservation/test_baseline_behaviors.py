@@ -619,7 +619,8 @@ def test_code2_bound_pipeline_with_sink_preserves_runtime_settings() -> None:
     Replacing sinks must not silently drop checkpoint, DLQ, backpressure, or
     tracing configuration from the prepared pipeline.
     """
-    from agora import DeliveryConfig, InMemoryCheckpointStore
+    from agora import DeliveryConfig
+    from agora.core.checkpoint import InMemoryCheckpointStore
     from agora.core.dlq import SQLiteDLQSink
     from agora.core.pipeline import Pipeline
     from agora.core.source import IterableSource
