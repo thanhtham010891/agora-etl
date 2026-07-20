@@ -18,7 +18,7 @@ readiness map for the plugin ecosystem. It keeps three things separate:
 | Package | Supported line | Notes |
 |---|---|---|
 | `agora-etl-plugins` | `0.4.x` | Official first-party plugin package release line. |
-| `agora-etl` | `>=0.4.1,<1` | Required runtime contract for the plugin package across the current `0.4.x` line. |
+| `agora-etl` | `>=0.4.5,<1` | Required runtime contract for the plugin package across the current `0.4.x` line. |
 | Python | `3.11`, `3.12`, `3.13` | Matches package classifiers and CI compatibility coverage. |
 | Redis client | `redis>=7.0,<8` | Used by Redis, distributed coordination, Redis DLQ, state, dedup, and cache surfaces. |
 | Kafka client | `aiokafka>=0.11,<1` | Used by Kafka source, sink, DLQ, and Kafka-backed runtime helpers. |
@@ -34,8 +34,8 @@ readiness map for the plugin ecosystem. It keeps three things separate:
 | Kafka source, sink, schema registry helpers, and DLQ | Production-ready flagship | Includes consumer-group semantics, idempotent producer defaults, Avro/JSON Schema/Protobuf registry paths, secure client config, transactional delivery hooks, replay, and DLQ policy controls. |
 | Redis core: stream source, sink, DLQ, and state backend | Production-ready flagship | Includes stream resume/reclaim, reclaim fairness, poison-loop risk metrics, TLS/ACL, Sentinel, Cluster, Redis Stack matrix coverage, shared DLQ, `set_if_absent`, and `compare_and_set` state atomicity checks. |
 | Distributed coordination | Production-ready coordination | Redis-backed lease/fencing semantics are covered for the default single-Redis lease model and opt-in Redlock-style quorum across independent Redis masters. |
-| BigQuery source, load-job sink, and Storage Write sink | Production-ready dataset backend | Narrow warehouse ETL surface with bounded query batching, machine-readable health and acceptance snapshots, a required local live GCP verification gate for checkpoint-aware table reads, denied-dataset isolation, batch-oriented table loads, and append-only Storage Write semantics within its explicit support boundary. |
-| S3 source and sink | Production-ready dataset backend | JSONL/CSV/Parquet dataset flows with lexical object ordering, deterministic file naming, object-boundary replay semantics, and MinIO-backed local integration coverage. |
+| BigQuery source, load-job sink, and Storage Write sink | Production-ready dataset backend | Narrow warehouse ETL surface with bounded query batching, machine-readable health and acceptance snapshots, a required local live GCP verification gate for safe checkpoint-aware table reads, denied-dataset isolation, batch-oriented table loads, and append-only Storage Write semantics. The default stream is duplicate-tolerant, not exactly-once. |
+| S3 source and sink | Production-ready dataset backend | JSONL/CSV/Parquet dataset flows with paged/chunked reads, run-scoped conditional object creation, object-boundary replay semantics, and MinIO-backed local integration coverage. |
 | Cron scheduling helpers | Official | Unit/contract covered. No external service is required. |
 | Anthropic provider | Official | Completion and structured-output provider surface. Live API behavior should be validated in application environments that own API cost and model policy. |
 | Redis embedding dedup and Redis AI cache | Official helper surfaces | Useful production helpers, but they should not inherit the same maturity claim as Redis Streams, Redis DLQ, Redis state, or Redis sink. |

@@ -50,15 +50,19 @@ Entry-points installed by the package:
 
 ## Recovery boundary
 
-- `BigQuerySource(table=...)` can expose checkpoint reruns only when
-  `checkpoint_column` is configured and ordering is deterministic.
+- `BigQuerySource(table=...)` can expose checkpoint reruns only with an explicit
+  safe cursor strategy: set `checkpoint_column_is_unique=True` for a genuinely
+  unique cursor, or provide `checkpoint_tiebreaker_column` and order by both
+  fields. A merely monotonic timestamp is not sufficient.
 - `BigQuerySource(query=...)` is always full-rerun.
 - `BigQuerySink` writes through batch load jobs; v1 does not promise merge,
   upsert, or schema auto-evolution.
 - `BigQueryStorageWriteSink` is part of the production-ready BigQuery family,
   but with a narrower contract: append-only, default-stream only, no
   auto-create/truncate, and only the current protobuf-mappable schema subset is
-  supported out of the box.
+  supported out of the box. It does not provide exactly-once delivery: an
+  ambiguous append timeout followed by replay can duplicate rows. Use a stable
+  business key and downstream deduplication when duplicates matter.
 
 ## Quickstart
 
@@ -70,6 +74,7 @@ from agora_plugins.bigquery import BigQuerySink, BigQuerySource
 source = BigQuerySource(
     table="analytics.events",
     checkpoint_column="event_id",
+    checkpoint_column_is_unique=True,
     order_by=["event_id"],
     row_mapper=lambda row: {
         "event_id": row["event_id"],
@@ -106,7 +111,7 @@ claims for BigQuery still expect a required local live GCP run with a real
 dataset plus service-account credentials. That live suite verifies:
 
 - `write_disposition="truncate"` followed by append-style batch loads
-- checkpoint-aware table resume via a monotonic `checkpoint_column`
+- checkpoint-aware table resume via an explicitly unique cursor or a composite cursor
 - explicit `query=` mode rerunning the full query after resume preparation
 - multi-page query reads under small source batch sizes
 - denied-dataset isolation for both sink writes and query-mode reads

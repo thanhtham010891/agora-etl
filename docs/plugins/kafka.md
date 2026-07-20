@@ -108,8 +108,8 @@ Important constructor options:
 | `serializer` | Sync/async callable returning bytes. Serializer objects may expose `open()` and `close()`. |
 | `message_fn` | Full per-record `KafkaSinkMessage` override. |
 | `topic_fn`, `key_fn`, `partition_fn`, `headers_fn`, `timestamp_ms_fn` | Narrow per-record routing hooks. |
-| `transactional_id` | Enables Kafka transactions. |
-| `transaction_per_batch=True` | Wraps each batch in a transaction; requires `transactional_id`. |
+| `transactional_id` | Configures a transaction-capable producer; use `transaction()` for explicit transactions. |
+| `transaction_per_batch=True` | Wraps each `write_batch()` call in a transaction; requires `transactional_id`. Single writes are never implicitly transaction-wrapped. |
 | `security` | First-class Kafka security config. |
 | `tracing` | Injects trace headers and emits producer/client spans when enabled. |
 

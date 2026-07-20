@@ -44,7 +44,7 @@ Important constructor options:
 | `heartbeat_interval=30` | Worker heartbeat interval. Must be less than lease TTL. |
 | `key_prefix="agora:distributed:"` | Namespace for worker, lease, and fence keys. |
 | `fallback_to_local=False` | Fail-safe default. If `True`, Redis unavailability behaves as locally acquired leases and can duplicate runs. |
-| `fencing_key_ttl_seconds` | TTL for fencing-token counters. |
+| `fencing_key_ttl_seconds=None` | Optional TTL for fencing-token counters. The default persists counters so tokens remain monotonic across idle periods. |
 | `lease_renewal_deadline_seconds` | Optional renewal deadline before a lease is considered lost. |
 | `redlock_redis_urls` | Optional list of at least three independent Redis master URLs for majority-quorum leases. |
 | `redlock_clock_drift_factor=0.01` | Redlock lease validity safety margin. |
@@ -74,7 +74,10 @@ The default mode uses one Redis primary:
 6. lost leases are removed locally and can call a lease-lost callback
 
 Fencing tokens matter because they let downstream systems reject stale writers
-even if two workers overlap during failure recovery.
+even if two workers overlap during failure recovery. The default counter has no
+TTL; configuring a TTL weakens that monotonicity after an idle expiry. Redis
+persistence and downstream enforcement of the highest observed token remain
+required for this to be a stale-writer barrier across Redis restart/failover.
 
 ## Redlock mode
 
