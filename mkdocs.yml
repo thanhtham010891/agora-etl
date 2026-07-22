@@ -12,6 +12,7 @@ nav:
   - Home: index.md
   - Guides:
       - Quickstart: guides/quickstart.md
+      - Flagship Example: guides/order-command-center.md
       - Pipelines: guides/pipelines.md
       - Lifecycle: guides/lifecycle.md
       - Running with uvloop: guides/uvloop.md

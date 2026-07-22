@@ -1,0 +1,47 @@
+groups:
+  - name: order-command-center
+    rules:
+      - alert: OrderProjectionWorkerUnavailable
+        expr: up{job=~"order-(postgres|redis)-projection"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Order projection worker is unavailable"
+          description: "Prometheus cannot scrape {{ $labels.job }} for one minute."
+
+      - alert: OrderProjectionRecordsErrored
+        expr: increase(agora_pipeline_records_total{outcome="errored"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order projection has errored records"
+          description: "{{ $labels.pipeline_id }} recorded errors in the last five minutes."
+
+      - alert: OrderProjectionNotCompleting
+        expr: increase(agora_pipeline_runs_total{status="success"}[2m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order projection is not completing poll runs"
+          description: "{{ $labels.pipeline_id }} has not completed a successful Kafka poll run for two minutes."
+
+      - alert: OrderProjectionCheckpointFailure
+        expr: increase(agora_pipeline_runtime_events_total{event="checkpoint_failure"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Order projection checkpoint failed"
+          description: "{{ $labels.pipeline_id }} recorded a checkpoint failure; inspect the worker run log and replay state."
+
+      - alert: OrderProjectionConsumerLagNotDraining
+        expr: sum by (consumergroup, topic) (kafka_consumergroup_lag{consumergroup=~"order-(postgres|redis)-v1"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order projection consumer lag is not draining"
+          description: "{{ $labels.consumergroup }} has lag on {{ $labels.topic }} for five minutes; inspect worker health, DLQ, and replay state."

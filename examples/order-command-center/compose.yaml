@@ -1,0 +1,198 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["16379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agora_demo
+      POSTGRES_USER: agora
+      POSTGRES_PASSWORD: agora
+    ports: ["15432:5432"]
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agora -d agora_demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:19092,INTERNAL://kafka:29092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    ports: ["19092:9092"]
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+
+  migrate:
+    build: .
+    command: ["python", "-m", "order_command_center.migrate"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_DSN: postgresql://agora:agora@postgres:5432/agora_demo
+      REDIS_URL: redis://redis:6379/0
+      ORDER_COMMAND_CENTER_SQL_DIR: /app/sql
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres-worker:
+    build: .
+    command: ["python", "-m", "order_command_center.pipelines.postgres", "--forever", "--quiet"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_DSN: postgresql://agora:agora@postgres:5432/agora_demo
+      REDIS_URL: redis://redis:6379/0
+      PROJECTION_BATCH_SIZE: 500
+      PROJECTION_FLUSH_INTERVAL_MS: 250
+      PROJECTION_POLL_TIMEOUT_MS: 250
+      PROJECTION_IDLE_POLLS: 3
+      PROJECTION_IDLE_LOG_INTERVAL_SECONDS: 60
+      PROJECTION_ERROR_BACKOFF_SECONDS: 5
+      PROJECTION_MAX_CONSECUTIVE_ERRORS: 5
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: 8080
+      METRICS_AUTH_TOKEN: local-demo-metrics-token
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8080/health', headers={'Authorization': 'Bearer local-demo-metrics-token'}); assert urllib.request.urlopen(r, timeout=3).status == 200",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  redis-worker:
+    build: .
+    command: ["python", "-m", "order_command_center.pipelines.redis", "--forever", "--quiet"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_DSN: postgresql://agora:agora@postgres:5432/agora_demo
+      REDIS_URL: redis://redis:6379/0
+      PROJECTION_BATCH_SIZE: 500
+      PROJECTION_FLUSH_INTERVAL_MS: 250
+      PROJECTION_POLL_TIMEOUT_MS: 250
+      PROJECTION_IDLE_POLLS: 3
+      PROJECTION_IDLE_LOG_INTERVAL_SECONDS: 60
+      PROJECTION_ERROR_BACKOFF_SECONDS: 5
+      PROJECTION_MAX_CONSECUTIVE_ERRORS: 5
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: 8080
+      METRICS_AUTH_TOKEN: local-demo-metrics-token
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8080/health', headers={'Authorization': 'Bearer local-demo-metrics-token'}); assert urllib.request.urlopen(r, timeout=3).status == 200",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    command: ["--kafka.server=kafka:29092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://agora:agora@postgres:5432/agora_demo?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/rules:/etc/prometheus/rules:ro
+      - ./observability/secrets/metrics-token:/etc/prometheus/secrets/metrics-token:ro
+    depends_on:
+      postgres-worker:
+        condition: service_started
+      redis-worker:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports: ["13000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped

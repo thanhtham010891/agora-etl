@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Order Command Center
+    orgId: 1
+    folder: Order Command Center
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

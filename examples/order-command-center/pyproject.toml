@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agora-order-command-center"
+version = "0.1.0"
+description = "A runnable Kafka, PostgreSQL, and Redis projection demo for Agora."
+requires-python = ">=3.11"
+dependencies = [
+    "agora-etl>=0.4.5,<1",
+    "agora-etl-plugins[kafka,postgres,redis]>=0.4.2,<1",
+]
+
+[project.scripts]
+order-demo-produce = "order_command_center.producer:main"
+order-demo-postgres = "order_command_center.pipelines.postgres:main"
+order-demo-redis = "order_command_center.pipelines.redis:main"
+order-demo-verify = "order_command_center.verify:main"
+order-demo-dlq = "order_command_center.dlq:main"
+order-demo-reconcile = "order_command_center.reconcile:main"
+order-demo-convergence = "order_command_center.operations.convergence:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/order_command_center"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires the Compose Kafka, PostgreSQL, and Redis stack",
+]
