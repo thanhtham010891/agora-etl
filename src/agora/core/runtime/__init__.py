@@ -29,10 +29,15 @@ from agora.core.runtime._delivery import (
     Written,
     make_checkpoint_state,
 )
+from agora.core.runtime._delivery_support import _CheckpointSaveError as _checkpoint_save_error
 from agora.core.runtime._hot_metrics import HotPathMetrics
 from agora.core.runtime._plan import BufferedStageSpec, RuntimeLane, RuntimePlan, build_runtime_plan
 from agora.core.runtime._source_adapter import SOURCE_QUEUE_DONE, SourceRuntimeAdapter
 from agora.core.runtime._writer_transport import WriterTransport
+
+# Keep executor orchestration dependent on the runtime facade while preserving
+# this internal marker outside the supported ``__all__`` contract.
+_CheckpointSaveError = _checkpoint_save_error
 
 __all__ = [
     "SOURCE_QUEUE_DONE",

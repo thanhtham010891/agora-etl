@@ -151,6 +151,8 @@ def explain_pipeline(
         plan=plan,
         source_limit=max_records,
         config=config,
+        source=limited_source,
+        writer=writer,
     )
 
 

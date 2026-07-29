@@ -193,6 +193,53 @@ Under `FAIL_CLOSED`:
 The runtime never silently skips an unhandled sink failure under
 `FAIL_CLOSED`.
 
+### Delivery capability report is conservative
+
+`Pipeline.explain().to_dict()["delivery"]` reports the resolved delivery
+shape before a run. It always reports the core model as `at_least_once`, source
+checkpoint/identity support, ordered commit, duplicate possibility, and the
+absence of transactional coupling between the checkpoint store and sinks.
+
+Each sink is `idempotency="unknown"` and `replay_safe=false` unless it
+explicitly implements the public `delivery_capability()` contract. A pipeline
+is reported replay-safe only when checkpointing is enabled, the source
+advertises a stable identity for resume validation, and every resolved sink
+declares replay safety. This report is diagnostic metadata; it does not
+upgrade the core at-least-once guarantee to exactly-once.
+
+### Delivery policy can reject an unsafe composition before execution
+
+`DeliveryPolicy` turns explicit production requirements into a pre-run gate.
+It is opt-in, so existing pipelines keep their current behavior. When a policy
+does not match, `Pipeline.explain()` lists machine-readable
+`delivery.policy_mismatches`, `agora doctor --config` reports them, and
+`pipeline.run()` raises before opening the source or sink.
+
+```python
+from agora import DeliveryConfig, Pipeline
+from agora.core.delivery import DeliveryPolicy
+
+pipeline = Pipeline(source).build(
+    sink,
+    config=DeliveryConfig(
+        checkpoint=checkpoint_store,
+        delivery_policy=DeliveryPolicy(
+            require_replay_safe=True,
+            require_idempotent_sinks=True,
+        ),
+    ),
+)
+```
+
+`require_replay_safe=True` requires checkpointing, source identity validation,
+and a replay-safe declaration from every resolved sink. A generic sink whose
+record key comes from application code must receive an explicit stable-key
+contract before it can make that declaration; the runtime never infers key
+determinism from an arbitrary callback. Producer retry idempotency or a
+transaction that does not include the Agora checkpoint does not satisfy it.
+`require_idempotent_sinks=True` also rejects sinks that declare `unknown` or
+`none` idempotency.
+
 ### Sink failure policy controls whether a failed record is terminal
 
 | Situation | `FAIL_CLOSED` | `LOG_AND_CONTINUE` |
@@ -287,6 +334,13 @@ During a run, checkpoint save failures follow the same policy:
 Under `LOG_AND_CONTINUE`, the runtime marks the failed save slot as handled so
 it does not retry-storm the same checkpoint write on every following record.
 
+A failed save never rolls back a completed sink write. On restart, records
+after the last durable checkpoint are replayed: this can be one linear record
+or an entire flushed batch. A fail-closed checkpoint error cancels pending
+buffered delivery before later writes/checkpoints can commit. Sinks that cannot
+tolerate this duplicate window must provide idempotency/deduplication and
+declare an appropriate delivery capability.
+
 ### Non-checkpointable sources degrade explicitly
 
 If you pass a checkpoint store to a source that does not explicitly opt into
@@ -320,6 +374,32 @@ can identify the failure boundary precisely:
 
 In both cases, DLQ routing does not replace the original source exception as
 the terminal reason for the run.
+
+### Failure decisions keep retry, DLQ, and alerting aligned
+
+Every failed external operation can carry a machine-readable `FailureDecision`:
+classification, retryability, record-DLQ eligibility, alert severity, reason,
+and provider details. `RetryPolicy` uses a configured classifier before
+retrying; an exhausted backend retry preserves that decision for runtime DLQ
+routing and structured logs.
+
+- transient connectivity and timeout failures are retryable and are **not**
+  record-DLQ eligible; under `FAIL_CLOSED` they remain terminal if retries are
+  exhausted;
+- data, serialization, schema, constraint, and type failures are non-retryable
+  and record-DLQ eligible;
+- authorization failures are non-retryable, excluded from record DLQ, and
+  emitted with `critical` alert severity.
+
+When a record is written to a DLQ, `DLQRecord.details["failure"]` contains the
+decision. Backend plugins may add namespaced provider details alongside it.
+This makes a DLQ entry evidence of a record-level failure, not a way to hide an
+unavailable or unauthorized backend.
+
+`PipelineRunSummary.runtime` also retains classification and alert-severity
+counts plus the latest decision in machine-readable form. `agora diagnose`
+shows the same failure envelope for recent DLQ entries, including legacy-safe
+fallback when an older entry has no decision metadata.
 
 ### DLQ failure policy is independent and explicit
 

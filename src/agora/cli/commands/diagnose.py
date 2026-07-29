@@ -269,6 +269,11 @@ def _render_diagnosis(
         console.item("Last failure stage", latest.stage)
         console.item("Error type", latest.error_type)
         console.item("Error message", latest.error_message)
+        failure_decision = _failure_decision_payload(latest)
+        if failure_decision is not None:
+            console.item("Classification", str(failure_decision.get("classification", "unknown")))
+            console.item("Retryable", str(failure_decision.get("retryable", False)).lower())
+            console.item("Alert severity", str(failure_decision.get("alert_severity", "error")))
         if latest.middleware:
             console.item("Middleware", latest.middleware)
         if latest.checkpoint is not None:
@@ -364,11 +369,21 @@ def _dlq_payload(
             "middleware": latest_record.middleware,
             "checkpoint": latest_record.checkpoint,
             "recorded_at": latest_record.created_at.isoformat(),
+            "failure": _failure_decision_payload(latest_record),
         },
         "replay_command": (
             f"agora dlq replay {pipeline_id} --config <config.toml>" if replayable else None
         ),
     }
+
+
+def _failure_decision_payload(record: Any) -> dict[str, Any] | None:
+    """Extract the stable failure envelope while accepting legacy DLQ records."""
+    details = getattr(record, "details", None)
+    if not isinstance(details, dict):
+        return None
+    failure = details.get("failure")
+    return dict(failure) if isinstance(failure, dict) else None
 
 
 __all__ = ["DiagnoseCommand"]

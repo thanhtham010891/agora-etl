@@ -5,6 +5,7 @@ Full change log index:
 
 ## Releases
 
+- [0.4.6](docs/change-log/0.4.6.md) — source-identity recovery safety, delivery-policy preflight, and release compatibility correction
 - [0.4.5](docs/change-log/0.4.5.md) — doctor readiness contract hardening, public API manifest cleanup, and CI/release readiness fixes
 - [0.4.4](docs/change-log/0.4.4.md) — source handled-callback support for plugin DLQ cleanup and replay-safe source error follow-up hooks
 - [0.4.3](docs/change-log/0.4.3.md) — checkpoint and DLQ correctness hardening, worker lifecycle cleanup, and public API tightening

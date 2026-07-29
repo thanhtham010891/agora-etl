@@ -38,6 +38,7 @@ from agora.cli.commands.doctor import (
     check_config_import_refs,
     check_config_pipeline_build,
     check_config_pipeline_resolution,
+    check_delivery_policy,
     check_dlq_replay_support,
     check_entrypoint_plugins,
     check_env_vars,
@@ -527,6 +528,35 @@ def test_config_pipeline_build_passes_for_valid_agora_v1(tmp_path: Any) -> None:
     result = check_config_pipeline_build(str(config))
     assert result.status == Status.PASS
     assert "trusted project/plugin components" in result.detail
+
+
+def test_delivery_policy_reports_configured_mismatch(tmp_path: Any) -> None:
+    config = tmp_path / "pipelines.toml"
+    config.write_text(
+        textwrap.dedent("""\
+        format = "agora/v1"
+
+        [defaults]
+        pipeline = "orders"
+
+        [pipelines.orders.delivery_policy]
+        require_replay_safe = true
+
+        [pipelines.orders.source]
+        type = "iterable"
+        records = []
+
+        [[pipelines.orders.sinks]]
+        type = "stdout"
+        """),
+        encoding="utf-8",
+    )
+
+    result = check_delivery_policy(str(config))
+
+    assert result.status == Status.FAIL
+    assert "checkpoint_not_enabled" in result.detail
+    assert result.data["policy"]["require_replay_safe"] is True
 
 
 def test_config_pipeline_build_fails_when_selected_pipeline_cannot_build(tmp_path: Any) -> None:

@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agora.cli.commands.diagnose import DiagnoseCommand, _run_diagnose
+from agora.cli.commands.diagnose import DiagnoseCommand, _dlq_payload, _run_diagnose
 from agora.core.checkpoint import Checkpoint, InMemoryCheckpointStore
 from agora.core.dlq import DLQRecord
 
@@ -156,6 +156,31 @@ async def test_diagnose_shows_latest_failure_details() -> None:
         exit_code = await _run_diagnose(args)
 
     assert exit_code == 1
+
+
+def test_diagnose_json_payload_exposes_failure_decision() -> None:
+    record = DLQRecord(
+        pipeline_id="p1",
+        run_id="run-abc",
+        stage="sink_write",
+        error_type="PostgresError",
+        error_message="duplicate key",
+        record={"id": 1},
+        details={
+            "failure": {
+                "classification": "constraint_violation",
+                "retryable": False,
+                "dlq_eligible": True,
+                "alert_severity": "error",
+                "reason": "UniqueViolation",
+                "details": {},
+            }
+        },
+    )
+
+    payload = _dlq_payload("p1", [record], [record], record, None)
+
+    assert payload["latest_failure"]["failure"] == record.details["failure"]
 
 
 # ======================================================================

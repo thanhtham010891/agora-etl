@@ -18,7 +18,7 @@ readiness map for the plugin ecosystem. It keeps three things separate:
 | Package | Supported line | Notes |
 |---|---|---|
 | `agora-etl-plugins` | `0.4.x` | Official first-party plugin package release line. |
-| `agora-etl` | `>=0.4.5,<1` | Required runtime contract for the plugin package across the current `0.4.x` line. |
+| `agora-etl` | `>=0.4.6,<1` | Required runtime contract for the plugin package across the current `0.4.x` line. |
 | Python | `3.11`, `3.12`, `3.13` | Matches package classifiers and CI compatibility coverage. |
 | Redis client | `redis>=7.0,<8` | Used by Redis, distributed coordination, Redis DLQ, state, dedup, and cache surfaces. |
 | Kafka client | `aiokafka>=0.11,<1` | Used by Kafka source, sink, DLQ, and Kafka-backed runtime helpers. |

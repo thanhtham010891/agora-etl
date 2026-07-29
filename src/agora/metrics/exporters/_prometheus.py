@@ -204,6 +204,40 @@ class PrometheusTextExporter:
 
         append_metric_header(
             lines,
+            help_text="Cumulative failure classifications selected by runtime policy",
+            metric_type="counter",
+            name=f"{ns}_pipeline_failure_classifications_total",
+        )
+        for pid, stats in stats_by_pipeline.items():
+            epid = escape_label_value(pid)
+            for classification, value in sorted(
+                stats.runtime.total_failure_classification_counts.items()
+            ):
+                eclassification = escape_label_value(classification)
+                lines.append(
+                    f'{ns}_pipeline_failure_classifications_total{{pipeline_id="{epid}",'
+                    f'classification="{eclassification}"}} {value}'
+                )
+
+        append_metric_header(
+            lines,
+            help_text="Cumulative alert severities selected by runtime failure policy",
+            metric_type="counter",
+            name=f"{ns}_pipeline_failure_alert_severities_total",
+        )
+        for pid, stats in stats_by_pipeline.items():
+            epid = escape_label_value(pid)
+            for severity, value in sorted(
+                stats.runtime.total_failure_alert_severity_counts.items()
+            ):
+                eseverity = escape_label_value(severity)
+                lines.append(
+                    f'{ns}_pipeline_failure_alert_severities_total{{pipeline_id="{epid}",'
+                    f'alert_severity="{eseverity}"}} {value}'
+                )
+
+        append_metric_header(
+            lines,
             help_text="Last-run runtime gauges",
             metric_type="gauge",
             name=f"{ns}_pipeline_runtime_last",

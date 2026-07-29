@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agora.core.data_plane import DataPlane
+    from agora.core.delivery import DeliveryCapability
     from agora.core.runtime import RuntimePlan
     from agora.core.types import DeliveryConfig
 
@@ -91,6 +92,7 @@ class PipelineExplain:
     sink_downgrade_count: int
     sinks: tuple[SinkWriteExplain, ...]
     acceleration: AccelerationExplain
+    delivery: DeliveryCapability
 
     @classmethod
     def from_runtime_plan(
@@ -100,6 +102,8 @@ class PipelineExplain:
         plan: RuntimePlan,
         source_limit: int | None = None,
         config: DeliveryConfig | None = None,
+        source: object | None = None,
+        writer: object | None = None,
     ) -> PipelineExplain:
         from agora.core.explain._builders import build_pipeline_explain
 
@@ -108,6 +112,8 @@ class PipelineExplain:
             plan=plan,
             source_limit=source_limit,
             config=config,
+            source=source,
+            writer=writer,
         )
 
     def to_dict(self) -> dict[str, Any]:

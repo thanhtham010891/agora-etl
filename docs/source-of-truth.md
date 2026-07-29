@@ -12,6 +12,7 @@ is canonical.
 |---|---|---|---|
 | Core package quickstart and install | `agora-etl` README | [Quickstart](guides/quickstart.md) | README is the shortest onboarding path for `agora-etl`. |
 | Core runtime semantics and guarantees | [Runtime Guarantees](guides/runtime-guarantees.md) | [Architecture](architecture.md), [Failure Handling](guides/failure-handling.md), [Checkpointing](guides/checkpointing.md) | If wording differs anywhere else, the runtime guarantees page wins. |
+| Upgrade, rollback, checkpoint migration, and API deprecation | [Upgrading and Compatibility](guides/upgrading.md) | [Checkpointing](guides/checkpointing.md), [Plugin Contract](plugins/contract.md), [Manifest Contract](plugins/manifest.md) | This page owns the release procedure; source-specific recovery rules still apply. |
 | Core/package boundary | [docs/index.md](index.md) | `agora-etl` README, [Plugins](plugins/index.md) | Use this to answer “core or plugin?” questions. |
 | Plugin ecosystem overview | [Plugins](plugins/index.md) | `agora-etl-plugins` README | The plugin landing page is canonical for family navigation. |
 | Plugin maturity and support boundaries | [Plugin Production Readiness](plugins/production-readiness.md) | plugin family pages, `agora-etl-plugins` README | Release/support claims should map back here. |

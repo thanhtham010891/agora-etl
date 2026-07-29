@@ -159,6 +159,7 @@ async def _cmd_show(store: Any, pipeline_id: str, *, as_json: bool) -> int:
     console.item("source", checkpoint.source)
     console.item("value", _render_value(checkpoint.value))
     console.item("recorded_at", checkpoint.recorded_at.isoformat())
+    _render_source_identity(checkpoint)
     return 0
 
 
@@ -225,6 +226,8 @@ async def _cmd_inspect(store: Any, pipeline_id: str, *, as_json: bool) -> int:
     else:
         console.item("value type", type(value).__name__)
         console.item("value", str(value))
+
+    _render_source_identity(checkpoint)
 
     if insight is not None:
         console.blank()
@@ -370,7 +373,27 @@ def _checkpoint_payload(checkpoint: Any) -> dict[str, Any]:
         "recorded_at": checkpoint.recorded_at.isoformat(),
         "value": value,
         "value_kind": value_kind,
+        "source_identity": (
+            checkpoint.source_identity.to_dict() if checkpoint.source_identity is not None else None
+        ),
+        "source_identity_status": (
+            "present" if checkpoint.source_identity is not None else "legacy_or_unavailable"
+        ),
     }
+
+
+def _render_source_identity(checkpoint: Any) -> None:
+    """Render resume-target identity without hiding legacy checkpoint state."""
+    identity = checkpoint.source_identity
+    if identity is None:
+        console.warn(
+            "Checkpoint has no source identity (legacy or non-file source). "
+            "Built-in file sources fail closed by default until this checkpoint is reset."
+        )
+        return
+    console.item("source identity", identity.uri)
+    console.item("source identity size", str(identity.size_bytes))
+    console.item("source identity mtime_ns", str(identity.modified_time_ns))
 
 
 __all__ = ["CheckpointCommand"]

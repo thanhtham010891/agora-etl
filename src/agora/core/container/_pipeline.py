@@ -50,6 +50,9 @@ def build_pipeline_from_container(container: AgoraContainer) -> BoundPipeline[An
         if container.has("_performance_profile")
         else "balanced"
     )
+    delivery_policy = (
+        container.resolve("_delivery_policy") if container.has("_delivery_policy") else None
+    )
 
     return BoundPipeline(
         source=source,
@@ -62,6 +65,7 @@ def build_pipeline_from_container(container: AgoraContainer) -> BoundPipeline[An
         config=DeliveryConfig(
             acceleration_mode=acceleration_mode,
             performance_profile=performance_profile,
+            delivery_policy=delivery_policy,
             dlq=dlq_sink,
             dlq_failure_policy=dlq_failure_policy,
             tracer=tracer,

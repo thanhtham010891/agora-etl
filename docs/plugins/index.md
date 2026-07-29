@@ -63,7 +63,7 @@ The public first-party plugin distribution is
 
 Current official coverage includes Redis, Kafka, PostgreSQL, BigQuery, S3,
 Anthropic completion support, cron scheduling, and distributed worker
-coordination. The published plugin `0.4.x` line targets `agora-etl>=0.4.5,<1`;
+coordination. The published plugin `0.4.x` line targets `agora-etl>=0.4.6,<1`;
 these docs are aligned with the current `agora-etl` `0.4.x` production line.
 
 Install examples:

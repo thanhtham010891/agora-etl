@@ -20,6 +20,7 @@ nav:
       - Failure Handling: guides/failure-handling.md
       - Checkpointing: guides/checkpointing.md
       - Recovery Matrix: guides/recovery-matrix.md
+      - Upgrading and Compatibility: guides/upgrading.md
       - Scheduling: guides/scheduling.md
       - Testing: guides/testing.md
       - Observability: guides/observability.md
@@ -91,6 +92,7 @@ nav:
   - Change Log:
       - Overview: change-log/index.md
       - Releases:
+          - 0.4.6: change-log/0.4.6.md
           - 0.4.5: change-log/0.4.5.md
           - 0.4.4: change-log/0.4.4.md
           - 0.4.3: change-log/0.4.3.md

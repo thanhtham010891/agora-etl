@@ -154,6 +154,55 @@ summary = await (
 )
 ```
 
+## Redis Streams delivery profiles
+
+`RedisStreamSource` is at-least-once: with `ack_on_success=True`, an entry is
+acknowledged only after its downstream delivery callback succeeds. A crash
+after a target write and before `XACK` can therefore replay the entry. The
+target must make that replay safe.
+
+| Target | Replay-safe recipe | Boundary |
+|---|---|---|
+| PostgreSQL | Preserve a stable producer event ID; use `PostgresSink(upsert=True, conflict_key="event_id")` backed by a unique constraint. | A replay updates the same logical row; there is no distributed Redis/PostgreSQL transaction. |
+| Redis `set` | Use a deterministic `key_fn` derived from the stable event ID and explicitly set `replay_safe_key_contract=True`. | `SET` overwrites the same key on replay; that contract is accepted only for `set`. |
+| Redis `lpush` / `rpush` / `xadd` | Do not claim replay safety without a separate application deduplication mechanism. | Retry markers do not deduplicate a process-crash replay. |
+
+For generic `RedisSink(mode="set")`, Agora cannot prove that an arbitrary
+`key_fn` is deterministic. It therefore reports `replay_safe=False` until the
+application explicitly attests to a stable delivery key:
+
+```python
+RedisSink(
+    url="redis://localhost:6379",
+    key_fn=lambda record: f"orders:{record['event_id']}",
+    mode="set",
+    replay_safe_key_contract=True,
+)
+```
+
+Set that flag only when the key is derived from an immutable event identity.
+
+Require this contract before a run when the pipeline must not use an unsafe
+target:
+
+```python
+from agora import DeliveryConfig
+from agora.core.delivery import DeliveryPolicy
+
+config = DeliveryConfig(
+    delivery_policy=DeliveryPolicy(
+        require_replay_safe=True,
+        require_idempotent_sinks=True,
+    )
+)
+```
+
+The source acceptance report now also rejects `ack_on_success=False` by
+default. Override that threshold only when acknowledgement is explicitly
+coordinated outside Agora and the resulting loss/replay policy is documented.
+For poison entries, inspect the pending list and DLQ before retrying; do not
+acknowledge a failed entry merely to clear consumer-group lag.
+
 ## DLQ and replay
 
 `RedisDLQSink` stores each DLQ record as a Redis hash and maintains ordered and

@@ -5,7 +5,11 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from agora.core.checkpoint import is_checkpoint_capable
+from agora.core.checkpoint import (
+    SourceIdentityMismatchError,
+    checkpoint_source_identity,
+    is_checkpoint_capable,
+)
 from agora.core.context import PipelineContext
 from agora.core.fencing import bind_run_fence
 from agora.core.metrics import PipelineMetrics
@@ -60,6 +64,7 @@ def make_delivery_engine(
         checkpoint_failure_policy=config.checkpoint_failure_policy,
         checkpoint_key=config.checkpoint_key or spec.pipeline_id,
         checkpoint_every=config.checkpoint_every,
+        checkpoint_source_identity=lambda: checkpoint_source_identity(spec.source),
         batch_flush_interval_ms=config.batch_flush_interval_ms,
     )
 
@@ -91,6 +96,11 @@ async def restore_checkpoint(spec: PipelineRuntimeSpec, ctx: PipelineContext) ->
             if span is not None:
                 span.set_attribute("checkpoint.loaded", checkpoint is not None)
             await spec.source.prepare_resume(checkpoint)
+    except SourceIdentityMismatchError:
+        # This is an explicit source-level recovery decision. Do not let the
+        # broader checkpoint I/O policy silently weaken a fail-closed identity
+        # guard into an unsafe cursor resume.
+        raise
     except Exception:
         ctx.metrics.runtime.checkpoint_failure_count += 1
         if spec.config.checkpoint_failure_policy == CheckpointFailurePolicy.LOG_AND_CONTINUE:

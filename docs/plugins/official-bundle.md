@@ -16,7 +16,7 @@ backend implementations and official helpers.
 
 | Package | Supported line |
 |---|---|
-| `agora-etl` | `>=0.4.5,<1` |
+| `agora-etl` | `>=0.4.6,<1` |
 | `agora-etl-plugins` | `0.4.x` |
 | Python | `3.11`, `3.12`, `3.13` |
 

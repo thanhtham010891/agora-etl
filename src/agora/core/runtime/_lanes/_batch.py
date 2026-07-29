@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from agora.core.batch import is_arrow_native_sink
-from agora.core.runtime._delivery import CheckpointState, RecordDeliveryError, RunState
+from agora.core.runtime._delivery import (
+    CheckpointState,
+    RecordDeliveryError,
+    RunState,
+)
+from agora.core.runtime._delivery_support import _CheckpointSaveError
 from agora.core.runtime._hot_metrics import HotPathMetrics, RustHotPathMetrics
 from agora.core.types import SinkFailurePolicy
 
@@ -358,7 +363,8 @@ class BatchLaneStrategy:
             source_error = exc
 
         if isinstance(
-            source_error, (RecordDeliveryError, asyncio.CancelledError, KeyboardInterrupt)
+            source_error,
+            (RecordDeliveryError, _CheckpointSaveError, asyncio.CancelledError, KeyboardInterrupt),
         ):
             await self._cancel_pending_batch_tasks(state, pending_batches, stage=stage)
             raise source_error
@@ -476,7 +482,8 @@ class BatchLaneStrategy:
             source_error = exc
 
         if isinstance(
-            source_error, (RecordDeliveryError, asyncio.CancelledError, KeyboardInterrupt)
+            source_error,
+            (RecordDeliveryError, _CheckpointSaveError, asyncio.CancelledError, KeyboardInterrupt),
         ):
             await self._cancel_pending_batch_tasks(state, pending_batches, stage=stage)
             raise source_error

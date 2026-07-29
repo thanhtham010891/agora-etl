@@ -64,6 +64,9 @@ class RuntimeMetrics:
     checkpoint_save_time_ms: float = 0.0
     checkpoint_failure_count: int = 0
     dlq_failure_count: int = 0
+    failure_classification_counts: dict[str, int] = field(default_factory=dict)
+    failure_alert_severity_counts: dict[str, int] = field(default_factory=dict)
+    last_failure_decision: dict[str, Any] | None = None
     writer_flush_count: int = 0
     writer_flush_max_batch_size: int = 0
     writer_flush_time_ms: float = 0.0
@@ -90,9 +93,30 @@ class RuntimeMetrics:
     def copy(self) -> RuntimeMetrics:
         from dataclasses import replace
 
-        return replace(self)
+        return replace(
+            self,
+            failure_classification_counts=dict(self.failure_classification_counts),
+            failure_alert_severity_counts=dict(self.failure_alert_severity_counts),
+            last_failure_decision=(
+                None if self.last_failure_decision is None else dict(self.last_failure_decision)
+            ),
+        )
 
-    def to_dict(self) -> dict[str, int | bool | float | str | tuple[str, ...] | dict[str, Any]]:
+    def record_failure_decision(self, decision: dict[str, Any]) -> None:
+        """Record the decision that governed retry, DLQ, and alert behavior."""
+        classification = str(decision["classification"])
+        severity = str(decision["alert_severity"])
+        self.failure_classification_counts[classification] = (
+            self.failure_classification_counts.get(classification, 0) + 1
+        )
+        self.failure_alert_severity_counts[severity] = (
+            self.failure_alert_severity_counts.get(severity, 0) + 1
+        )
+        self.last_failure_decision = dict(decision)
+
+    def to_dict(
+        self,
+    ) -> dict[str, int | bool | float | str | tuple[str, ...] | dict[str, Any] | None]:
         return {
             "execution_lane": self.execution_lane,
             "source_data_plane": self.source_data_plane,
@@ -148,6 +172,11 @@ class RuntimeMetrics:
             "checkpoint_save_time_ms": self.checkpoint_save_time_ms,
             "checkpoint_failure_count": self.checkpoint_failure_count,
             "dlq_failure_count": self.dlq_failure_count,
+            "failure_classification_counts": dict(self.failure_classification_counts),
+            "failure_alert_severity_counts": dict(self.failure_alert_severity_counts),
+            "last_failure_decision": (
+                None if self.last_failure_decision is None else dict(self.last_failure_decision)
+            ),
             "writer_flush_count": self.writer_flush_count,
             "writer_flush_max_batch_size": self.writer_flush_max_batch_size,
             "writer_flush_time_ms": self.writer_flush_time_ms,

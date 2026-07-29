@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from agora.core.checkpoint import CheckpointStore
+    from agora.core.delivery import DeliveryPolicy
     from agora.core.dlq import DLQRecord
     from agora.core.sink import BaseSink
     from agora.core.tracing import PipelineTracer
@@ -67,6 +68,7 @@ class DeliveryConfig:
     checkpoint_key: str | None = None
     checkpoint_every: int = 1
     checkpoint_failure_policy: CheckpointFailurePolicy = CheckpointFailurePolicy.FAIL_CLOSED
+    delivery_policy: DeliveryPolicy | None = None
     batch_size: int = 1
     batch_flush_interval_ms: int | None = None
     sink_failure_policy: SinkFailurePolicy = SinkFailurePolicy.FAIL_CLOSED

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
+from agora.core.checkpoint import SourceIdentityMismatchPolicy
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
@@ -61,6 +62,9 @@ class ParquetSource(FileSource[T], Generic[T]):
         on_record_error: SourceRecordFailurePolicy = SourceRecordFailurePolicy.FAIL_CLOSED,
         *,
         use_arrow_batches: bool = False,
+        source_identity_mismatch_policy: SourceIdentityMismatchPolicy | str = (
+            SourceIdentityMismatchPolicy.FAIL_CLOSED
+        ),
     ) -> None:
         self._path = Path(path)
         self._row_mapper = row_mapper
@@ -79,6 +83,7 @@ class ParquetSource(FileSource[T], Generic[T]):
         self.supports_prefetch: bool = False
         self.supports_rust_prefetch: bool = True
         self.prefetch_limit: int = 10  # larger buffer for Parquet — to_pylist() is CPU-heavy
+        self._configure_source_identity_policy(source_identity_mismatch_policy)
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         emitted_plane = (
@@ -92,10 +97,11 @@ class ParquetSource(FileSource[T], Generic[T]):
         )
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
-        if checkpoint is None:
+        if not self._accept_checkpoint_identity(checkpoint):
             self._resume_row_number = 0
             return
 
+        assert checkpoint is not None
         value = checkpoint.value if isinstance(checkpoint.value, dict) else {}
         self._resume_row_number = int(value.get("row_number", 0))
 

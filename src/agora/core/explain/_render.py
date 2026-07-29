@@ -17,6 +17,8 @@ def render_pipeline_explain(explain: PipelineExplain) -> str:
         f"writer_plane={explain.writer_input_data_plane.value}",
     ]
     parts.append(f"lane_reason={explain.lane_reason!r}")
+    parts.append(f"delivery={explain.delivery.guarantee.value}")
+    parts.append(f"replay_safe={explain.delivery.replay_safe}")
     if explain.source_limit is not None:
         parts.append(f"source_limit={explain.source_limit}")
     if explain.arrow_chain_eligible:

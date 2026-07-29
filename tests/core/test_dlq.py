@@ -186,6 +186,40 @@ async def test_pipeline_routes_sink_write_errors_to_dlq_without_dropping_run() -
     assert dlq_record.record == {"id": 1}
     assert dlq_record.original_record == {"id": 1}
     assert dlq_record.processed_record == {"id": 1}
+    assert dlq_record.details["failure"]["classification"] == "unknown"
+    assert dlq_record.details["failure"]["alert_severity"] == "error"
+    assert summary.runtime.failure_classification_counts == {"unknown": 1}
+    assert summary.runtime.failure_alert_severity_counts == {"error": 1}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_misroute_transient_sink_error_to_record_dlq() -> None:
+    dlq = _CollectDLQSink()
+
+    class _TimeoutSink:
+        sink_name = "timeout_sink"
+
+        async def open(self) -> None:
+            return None
+
+        async def write(self, record: dict) -> None:
+            del record
+            raise TimeoutError("backend unavailable")
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    with pytest.raises(TimeoutError, match="backend unavailable"):
+        await (
+            Pipeline(IterableSource([{"id": 1}]))
+            .build(_TimeoutSink(), config=DeliveryConfig(dlq=dlq))  # type: ignore[arg-type]
+            .run()
+        )
+
+    assert dlq.records == []
 
 
 @pytest.mark.asyncio

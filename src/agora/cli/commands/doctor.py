@@ -549,6 +549,82 @@ def check_config_pipeline_build(
     )
 
 
+def check_delivery_policy(
+    config_path: str,
+    *,
+    pipeline_name: str | None = None,
+    profile_name: str | None = None,
+    environment_name: str | None = None,
+) -> CheckResult:
+    """Evaluate configured delivery requirements without starting the pipeline."""
+    try:
+        ctx = _load_doctor_config_context(
+            config_path,
+            pipeline_name=pipeline_name,
+            profile_name=profile_name,
+            environment_name=environment_name,
+        )
+    except _ConfigParseDependencyMissingError as exc:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.WARN,
+            message="Cannot parse config: tomllib/tomli not available",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.FAIL,
+            message=f"Cannot read config file: {config_path}",
+            detail=str(exc),
+        )
+
+    if ctx.resolved is None:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.PASS,
+            message="Skipping delivery policy for generic TOML config",
+        )
+
+    try:
+        from agora.core.container import AgoraContainer
+
+        pipeline = AgoraContainer.from_config(ctx.resolved.pipeline_config).build_pipeline()
+        delivery = pipeline.explain().delivery
+    except Exception as exc:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.FAIL,
+            message="Selected pipeline delivery semantics could not be resolved",
+            detail=str(exc),
+        )
+
+    payload = delivery.to_dict()
+    if not delivery.policy.enforced:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.PASS,
+            message="No strict delivery policy configured",
+            data=payload,
+        )
+    if delivery.policy_mismatches:
+        return CheckResult(
+            name="Delivery policy",
+            status=Status.FAIL,
+            message="Configured delivery policy does not match the selected pipeline",
+            detail="\n".join(
+                f"{mismatch.code}: {mismatch.message}" for mismatch in delivery.policy_mismatches
+            ),
+            data=payload,
+        )
+    return CheckResult(
+        name="Delivery policy",
+        status=Status.PASS,
+        message="Configured delivery policy is satisfied",
+        data=payload,
+    )
+
+
 def check_recovery_posture(
     config_path: str,
     *,
@@ -1233,6 +1309,14 @@ class DoctorCommand(BaseCommand):
                     environment_name=args.environment,
                 )
             )
+            report.add(
+                check_delivery_policy(
+                    args.config,
+                    pipeline_name=args.pipeline,
+                    profile_name=args.profile,
+                    environment_name=args.environment,
+                )
+            )
             for readiness_result in _check_all_plugin_readiness(
                 args.config,
                 pipeline_name=args.pipeline,
@@ -1283,6 +1367,7 @@ __all__ = [
     "check_config_import_refs",
     "check_config_pipeline_build",
     "check_config_pipeline_resolution",
+    "check_delivery_policy",
     "check_dlq_replay_support",
     "check_entrypoint_plugins",
     "check_env_vars",

@@ -315,6 +315,67 @@ Sink write failures are classified as schema drift, constraint violation, type
 mismatch, or unknown. When a poison DLQ sink is configured, failed buffered rows
 can be routed with that classification metadata.
 
+## Kafka → PostgreSQL delivery profile
+
+Use `KafkaPostgresRuntime` only when the pipeline deliberately needs this
+composed path. It supplies a Kafka topic/partition/offset-derived delivery key
+and configures the PostgreSQL sink for upsert by that key.
+
+| Boundary | Contract | Operator implication |
+|---|---|---|
+| Kafka read | Manual consumer-offset discipline | A message can be read again until its offset is acknowledged. |
+| PostgreSQL write | `upsert=True` with a unique `conflict_key` containing the delivery key | Replaying the same Kafka message updates the same logical row. |
+| PostgreSQL write safety | `write_safety_policy="strict"` | A changed row shape fails instead of silently dropping delivery-key data. |
+| Offset acknowledgement | Follows successful downstream handling | A crash after the database write but before acknowledgement can replay the message. |
+| Transaction boundary | No distributed Kafka/PostgreSQL transaction | The profile is at-least-once, never a general exactly-once claim. |
+
+The default key is `kafka_delivery_key`; it is derived from Kafka metadata, so
+each partition/offset maps to one target-row identity. The target table must
+back the configured conflict key with a real unique constraint or primary key.
+
+For a generic `PostgresSink`, an upsert alone is not proof that a custom
+`row_mapper` emits a stable conflict key. Its delivery report remains
+non-replay-safe until the application explicitly supplies
+`replay_safe_key_contract=True` after establishing that invariant; the option
+is valid only with `upsert=True`. The
+Kafka → PostgreSQL runtime proves this invariant through its generated delivery
+key and separate acceptance gate.
+
+The default runtime also exposes the structured delivery context as
+`kafka_metadata`. Persist that field only to a compatible JSON/JSONB column and
+serialize it in the row mapper. If the target schema intentionally stores only
+the delivery key and projected business columns, disable that optional field
+explicitly rather than relying on a lenient write:
+
+```python
+from agora_plugins.postgres import KafkaPostgresDeliveryConfig
+
+delivery = KafkaPostgresDeliveryConfig(metadata_field=None)
+```
+
+The delivery key remains required for the idempotent recipe; disabling metadata
+does not weaken the unique-key/upsert requirement.
+
+The acceptance gate verifies this recipe as well as runtime health:
+
+```python
+health, snapshot, report = await runtime.ensure_ready()
+assert report.passed
+```
+
+If the report contains `sink.delivery_key_conflict`, `sink.upsert`, or
+`sink.write_safety_policy`, do not treat replay as idempotent. Correct the
+target constraint/configuration first, then resume the consumer group. An
+explicit threshold override is appropriate only when a separate duplicate
+handling mechanism is documented and operated by the deployment.
+
+For poison records, configure `KafkaPostgresPoisonDLQConfig` with a
+`PostgresDLQSink`. Inspect and repair the failed payload/schema before replay;
+the DLQ record is retained until a replayed record has been handled
+successfully. Do not reset offsets as a substitute for repairing an unsafe
+delivery recipe: doing so can create repeated side effects in sinks that do
+not enforce the delivery key.
+
 ## Observability
 
 PostgreSQL components expose:
@@ -324,6 +385,15 @@ PostgreSQL components expose:
 - sink latency histograms for connect, pool acquire, and flush
 - Prometheus text rendering through `PostgresPrometheusExporter`
 - acceptance reports with threshold objects
+
+For the advanced `KafkaPostgresRuntime`, the default acceptance gate also
+checks the delivery recipe, not only liveness: `upsert=True`, a PostgreSQL
+`conflict_key` containing `kafka_delivery_key`, and `write_safety_policy="strict"`.
+Those conditions make Kafka replay idempotent at the PostgreSQL row boundary;
+they do **not** create a transaction coupling Kafka acknowledgement and the
+database write, so the runtime remains at-least-once. Disable a condition only
+with an explicit `KafkaPostgresEnterpriseAcceptanceThresholds` override and
+document the resulting duplicate-handling policy.
 
 ## Production checklist
 

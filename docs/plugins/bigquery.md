@@ -54,6 +54,12 @@ Entry-points installed by the package:
   safe cursor strategy: set `checkpoint_column_is_unique=True` for a genuinely
   unique cursor, or provide `checkpoint_tiebreaker_column` and order by both
   fields. A merely monotonic timestamp is not sufficient.
+- A table checkpoint also records a secret-free identity of the resolved table,
+  query shape, cursor/order fields, project, and location. Resuming with a
+  different identity fails closed by default rather than applying the old
+  cursor to another dataset. Set `source_identity_mismatch_policy="reset"` to
+  start that input from the beginning, or `"allow"` only when preserving its
+  cursor has been independently shown safe.
 - `BigQuerySource(query=...)` is always full-rerun.
 - `BigQuerySink` writes through batch load jobs; v1 does not promise merge,
   upsert, or schema auto-evolution.
@@ -63,6 +69,17 @@ Entry-points installed by the package:
   supported out of the box. It does not provide exactly-once delivery: an
   ambiguous append timeout followed by replay can duplicate rows. Use a stable
   business key and downstream deduplication when duplicates matter.
+
+### File/Parquet → BigQuery delivery profile
+
+The source side can validate file identity and resume safely at its cursor, but
+`BigQuerySink` load jobs and `BigQueryStorageWriteSink` append operations are
+not replay-safe upserts. Both therefore declare `replay_safe=False`; a
+pipeline with `DeliveryPolicy(require_replay_safe=True)` fails before opening
+the sink. Use this profile only when the target is duplicate-tolerant or when
+the table has a separately operated business-key dedup/merge step. Never treat
+load-job success, a default-stream append, or a stable input cursor as a
+distributed exactly-once transaction.
 
 ## Quickstart
 

@@ -18,6 +18,8 @@ import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from agora.core.failures import FailureDecision, classify_failure
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -35,6 +37,7 @@ class RetryPolicy(Generic[T]):
     jitter_ratio: float = 0.0
     retry_exceptions: tuple[type[Exception], ...] = ()
     retry_if: Callable[[Exception], bool] | None = None
+    failure_classifier: Callable[[Exception], FailureDecision] | None = None
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -48,11 +51,28 @@ class RetryPolicy(Generic[T]):
         if self.jitter_ratio < 0:
             raise ValueError("jitter_ratio must be >= 0")
 
-    def should_retry(self, exc: Exception, *, attempt: int) -> bool:
+    def failure_decision(self, exc: Exception) -> FailureDecision:
+        """Return the policy's machine-readable decision for *exc*."""
+        if self.failure_classifier is not None:
+            return self.failure_classifier(exc)
+        return classify_failure(exc)
+
+    def should_retry(
+        self,
+        exc: Exception,
+        *,
+        attempt: int,
+        decision: FailureDecision | None = None,
+    ) -> bool:
         """Return whether *exc* should be retried after *attempt*."""
         if attempt >= self.max_attempts:
             return False
-        if not isinstance(exc, self.retry_exceptions):
+        resolved_decision = decision or self.failure_decision(exc)
+        if self.failure_classifier is not None and not resolved_decision.retryable:
+            return False
+        if self.retry_exceptions and not isinstance(exc, self.retry_exceptions):
+            return False
+        if not self.retry_exceptions and self.failure_classifier is None:
             return False
         return self.retry_if(exc) if self.retry_if is not None else True
 
@@ -82,7 +102,9 @@ async def retry_async(
         try:
             return await operation()
         except Exception as exc:
-            if not policy.should_retry(exc, attempt=attempt):
+            decision = policy.failure_decision(exc)
+            _attach_failure_decision(exc, decision)
+            if not policy.should_retry(exc, attempt=attempt, decision=decision):
                 raise
 
             delay = policy.backoff_for(attempt=attempt)
@@ -93,3 +115,13 @@ async def retry_async(
             if delay > 0:
                 await asyncio.sleep(delay)
             attempt += 1
+
+
+def _attach_failure_decision(exc: Exception, decision: FailureDecision) -> None:
+    """Keep provider classification available when the error reaches DLQ code."""
+    try:
+        exc.failure_decision = decision  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        # A few extension exception types forbid attributes; classification still
+        # governed retry and callers can safely fall back to the core classifier.
+        return

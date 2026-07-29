@@ -17,6 +17,7 @@ from agora.core.runtime._delivery import (
     RunState,
     SourceRecord,
 )
+from agora.core.runtime._delivery_support import _CheckpointSaveError
 from agora.core.runtime._hot_metrics import HotPathMetrics, RustHotPathMetrics
 from agora.core.tracing import NoopTracer
 
@@ -307,7 +308,10 @@ class BufferedLaneStrategy:
 
     @staticmethod
     def _must_abort_pending_work(exc: BaseException | None) -> bool:
-        return isinstance(exc, (RecordDeliveryError, asyncio.CancelledError, KeyboardInterrupt))
+        return isinstance(
+            exc,
+            (RecordDeliveryError, _CheckpointSaveError, asyncio.CancelledError, KeyboardInterrupt),
+        )
 
     async def _abort_pending_work(
         self,

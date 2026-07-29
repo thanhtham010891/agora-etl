@@ -26,9 +26,10 @@ import pytest
 from agora.cli.commands.checkpoint import (
     CheckpointCommand,
     _build_store,
+    _checkpoint_payload,
     _run_checkpoint_command,
 )
-from agora.core.checkpoint import Checkpoint, InMemoryCheckpointStore
+from agora.core.checkpoint import Checkpoint, InMemoryCheckpointStore, SourceIdentity
 
 # ======================================================================
 # Helpers
@@ -68,6 +69,33 @@ async def _seed_checkpoint(
     )
     await store.save(pipeline_id, cp)
     return cp
+
+
+def test_checkpoint_payload_includes_source_identity() -> None:
+    checkpoint = Checkpoint(
+        pipeline_id="orders",
+        run_id="run-identity",
+        source="csv",
+        value={"row_number": 4},
+        source_identity=SourceIdentity(
+            uri="file:///tmp/orders.csv",
+            size_bytes=42,
+            modified_time_ns=1234,
+            device=1,
+            inode=2,
+        ),
+    )
+
+    payload = _checkpoint_payload(checkpoint)
+
+    assert payload["source_identity_status"] == "present"
+    assert payload["source_identity"] == {
+        "uri": "file:///tmp/orders.csv",
+        "size_bytes": 42,
+        "modified_time_ns": 1234,
+        "device": 1,
+        "inode": 2,
+    }
 
 
 # ======================================================================

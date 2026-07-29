@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agora.core.batch import BatchFailure
-    from agora.core.checkpoint import Checkpoint, CheckpointStore, CheckpointValue
+    from agora.core.checkpoint import Checkpoint, CheckpointStore, CheckpointValue, SourceIdentity
     from agora.core.context import PipelineContext
     from agora.core.dlq import DLQRecord
     from agora.core.middleware import MiddlewareFailure
@@ -87,6 +87,7 @@ class DeliveryEngine:
     checkpoint_failure_policy: CheckpointFailurePolicy
     checkpoint_key: str
     checkpoint_every: int
+    checkpoint_source_identity: Callable[[], SourceIdentity | None] | None = None
     batch_flush_interval_ms: int | None = None
     _checkpoints: CheckpointManager = field(init=False, repr=False)
     _dlq: DLQWriter = field(init=False, repr=False)
@@ -98,6 +99,7 @@ class DeliveryEngine:
             checkpoint_failure_policy=self.checkpoint_failure_policy,
             checkpoint_key=self.checkpoint_key,
             checkpoint_every=self.checkpoint_every,
+            source_identity=self.checkpoint_source_identity,
         )
         self._dlq = DLQWriter(
             source_name=self.source_name,

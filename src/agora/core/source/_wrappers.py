@@ -16,7 +16,7 @@ from agora.core.source._contracts import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 
-    from agora.core.checkpoint import Checkpoint, CheckpointValue
+    from agora.core.checkpoint import Checkpoint, CheckpointValue, SourceIdentity
 
 T = TypeVar("T")
 
@@ -81,6 +81,12 @@ class LimitedSource(BaseSource[T]):
 
     def current_checkpoint(self) -> CheckpointValue:
         return self._source.current_checkpoint()
+
+    def checkpoint_source_identity(self) -> SourceIdentity | None:
+        """Preserve an upstream source identity through a limit wrapper."""
+        from agora.core.checkpoint import checkpoint_source_identity
+
+        return checkpoint_source_identity(self._source)
 
     def runtime_metrics(self) -> SourceRuntimeMetrics:
         return self._source.runtime_metrics()

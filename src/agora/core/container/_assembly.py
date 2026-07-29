@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agora.core.component_factory import config_component_factory
+from agora.core.delivery import DeliveryPolicy
 from agora.core.errors import ConfigError
 from agora.core.tracing import InMemoryTracer, NoopTracer
 from agora.core.tracing._opentelemetry import build_configured_opentelemetry_tracer
@@ -27,6 +28,7 @@ def populate_container_from_config(container: AgoraContainer, config: dict[str, 
     build_dlq(container, config)
     build_tracing(container, config, pipeline_id)
     build_performance(container, config)
+    build_delivery_policy(container, config)
     container.register_singleton("_pipeline_id", pipeline_id)
 
     container._logger.info(
@@ -115,6 +117,14 @@ def build_performance(container: AgoraContainer, config: dict[str, Any]) -> None
     profile = str(performance_cfg.get("profile", "balanced")).strip().lower()
     container.register_singleton("_acceleration_mode", acceleration_mode)
     container.register_singleton("_performance_profile", profile)
+
+
+def build_delivery_policy(container: AgoraContainer, config: dict[str, Any]) -> None:
+    """Register explicit delivery requirements from declarative configuration."""
+    policy_cfg = config.get("delivery_policy")
+    if not isinstance(policy_cfg, dict):
+        return
+    container.register_singleton("_delivery_policy", DeliveryPolicy(**policy_cfg))
 
 
 def build_tracer_from_config(

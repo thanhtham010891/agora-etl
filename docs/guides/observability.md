@@ -398,4 +398,20 @@ time() - agora_pipeline_last_run_timestamp_seconds{pipeline="events_ingest"} > 7
 
 # Records errored in last run
 agora_pipeline_records_errored_total{pipeline="events_ingest"} > 0
+
+# A checkpoint store failed: the last durable checkpoint may lag delivered data.
+increase(agora_pipeline_runtime_events_total{pipeline_id="events_ingest",event="checkpoint_failure"}[10m]) > 0
+
+# Page when failure policy has classified a new critical backend/configuration failure.
+increase(agora_pipeline_failure_alert_severities_total{pipeline_id="events_ingest",alert_severity="critical"}[10m]) > 0
+
+# Investigate repeated transient connectivity failures before they become backlog.
+increase(agora_pipeline_failure_classifications_total{pipeline_id="events_ingest",classification="connectivity"}[15m]) > 5
 ```
+
+Pair core pipeline alerts with the plugin metric surface for the selected
+backend: Kafka lag/commit-lag, Redis pending acknowledgements and poison-loop
+risk, PostgreSQL sink latency or replica replay lag, and DLQ age/replay
+counters. A non-zero checkpoint failure means the duplicate window is active;
+do not respond by clearing the checkpoint unless downstream duplicate handling
+has been verified.

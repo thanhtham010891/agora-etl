@@ -91,6 +91,8 @@ When a plugin has no `MANIFEST`:
 - No warning is emitted.
 
 See [Manifest Contract](manifest.md) for the full compatibility model.
+See [Upgrading and Compatibility](../guides/upgrading.md) for the operator
+procedure that combines core, plugin, checkpoint, and rollback decisions.
 
 ## Operational diagnostics
 
@@ -160,6 +162,8 @@ over ad hoc method probes:
   `render_prometheus_metrics()`
 - `agora.core.recovery.SourceRecoveryContractProvider` for
   `recovery_contract()`
+- `agora.core.delivery.SinkDeliveryCapabilityProvider` for an optional,
+  machine-readable declaration of sink replay and idempotency behavior
 - `agora.core.acceptance.AcceptanceGate` for acceptance/report evaluation
 - `agora.core.acceptance.AcceptanceReportProvider` for
   `acceptance_report()`
@@ -210,6 +214,17 @@ Implement `BaseSink[T]` from `agora.core.sink`. Required:
 - `write(record: T) -> None` — async
 
 Optional: `open()`, `close()`, `flush()`, `write_batch()`.
+
+To expose backend-specific semantics in `Pipeline.explain()`, a sink may also
+implement `delivery_capability() -> SinkDeliveryCapability` from
+`agora.core.delivery`. Declare `replay_safe=True` only when a delivery replay
+across the source-checkpoint crash window is safe. Producer retries or a
+transaction that does not include the Agora checkpoint are not sufficient.
+Sinks without this optional declaration are reported as `unknown`.
+
+Applications may enforce those declarations with `DeliveryPolicy`. A plugin
+must therefore keep the declaration conservative: a false `replay_safe=True`
+can cause an application to accept an unsafe source-to-sink recovery path.
 
 If a sink implements native batch writing, `write_batch()` may either:
 

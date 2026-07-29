@@ -146,6 +146,15 @@ class PerformanceConfig(BaseModel):
         return value
 
 
+class DeliveryPolicyConfig(BaseModel):
+    """Optional fail-closed requirements for resolved delivery semantics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    require_replay_safe: bool = False
+    require_idempotent_sinks: bool = False
+
+
 class PipelineConfig(BaseModel):
     """Validated root schema for one declarative pipeline."""
 
@@ -159,6 +168,7 @@ class PipelineConfig(BaseModel):
     schedule: ScheduleConfig | None = None
     tracing: TracingConfig | None = None
     performance: PerformanceConfig | None = None
+    delivery_policy: DeliveryPolicyConfig | None = None
     sinks: list[ComponentConfig] = Field(default_factory=list)
 
     @field_validator("pipeline_id")
@@ -659,6 +669,7 @@ __all__ = [
     "ConfigDocument",
     "DLQConfig",
     "DedupConfig",
+    "DeliveryPolicyConfig",
     "ImportRefConfig",
     "OverlayScope",
     "PerformanceConfig",

@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "A runnable Kafka, PostgreSQL, and Redis projection demo for Agora."
 requires-python = ">=3.11"
 dependencies = [
-    "agora-etl>=0.4.5,<1",
-    "agora-etl-plugins[kafka,postgres,redis]>=0.4.2,<1",
+    "agora-etl>=0.4.6,<1",
+    "agora-etl-plugins[kafka,postgres,redis]>=0.4.3,<1",
 ]
 
 [project.scripts]

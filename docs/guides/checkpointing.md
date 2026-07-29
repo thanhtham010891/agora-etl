@@ -37,6 +37,8 @@ agora checkpoint inspect nightly_events --store sqlite:/var/lib/myapp/checkpoint
 The output includes:
 
 - the raw saved value
+- the saved source identity, when the source supports one; JSON output reports
+  `source_identity_status` as `present` or `legacy_or_unavailable`
 - whether the source actually supports resume
 - the resume key (`row_number`, `line_number`, cursor, and so on)
 - the granularity of that key
@@ -137,6 +139,51 @@ pipeline = (
 ```
 
 `checkpoint_every=500` means the position is saved every 500 records. Lower values give finer resume granularity at the cost of more I/O. For most file sources, 500–1000 is a reasonable default. If your records are large and writes are slow, go higher.
+
+## File source identity
+
+Built-in `CsvSource`, `JsonLinesSource`, and `ParquetSource` bind every new
+checkpoint to a cheap filesystem identity: canonical file URI, device/inode,
+size, and modification timestamp. The resume cursor is used only when that
+identity still matches the current file.
+
+The default is fail-closed. Replacing, truncating, or editing the input file
+under an existing checkpoint key raises `SourceIdentityMismatchError` before
+any record is consumed. This avoids silently applying an old line/row offset to
+a new file.
+
+Existing checkpoints from releases before source identity support contain no
+identity and are also rejected by default. Choose a migration policy explicitly
+when that behavior is intended:
+
+```python
+from agora.core.checkpoint import SourceIdentityMismatchPolicy
+from agora.sources.file import CsvSource
+
+source = CsvSource(
+    "events.csv",
+    row_mapper=lambda row: row,
+    # Safest migration: re-read the replacement file from the beginning.
+    source_identity_mismatch_policy=SourceIdentityMismatchPolicy.RESET,
+)
+```
+
+- `fail_closed` (default): abort before streaming; reset the checkpoint or
+  correct the source.
+- `reset`: ignore the saved cursor and start from the beginning. The next
+  successful checkpoint binds to the current file identity.
+- `allow`: use the saved cursor despite a mismatch. This is an explicit
+  operator override and can silently skip or duplicate data; use only when the
+  old cursor is known to remain valid.
+
+`source_identity_mismatch_policy=fail_closed` is a source-level safety guard:
+it remains fail-closed even when `checkpoint_failure_policy` is
+`LOG_AND_CONTINUE`.
+
+The identity is a filesystem fingerprint, not a cryptographic content hash. It
+is designed to be O(1) at checkpoint time; applications needing a stronger
+content-integrity guarantee should use an immutable input path/version or add a
+custom source identity contract.
 
 ## Failure policy
 

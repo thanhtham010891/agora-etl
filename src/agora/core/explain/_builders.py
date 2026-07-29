@@ -13,6 +13,12 @@ from agora.core.acceleration import (
     normalize_acceleration_mode,
 )
 from agora.core.data_plane import DataPlane
+from agora.core.delivery import (
+    DeliveryCapability,
+    DeliveryGuarantee,
+    DeliveryPolicy,
+    build_delivery_capability,
+)
 from agora.core.explain._models import (
     AccelerationExplain,
     MiddlewareStageExplain,
@@ -31,6 +37,8 @@ def build_pipeline_explain(
     plan: RuntimePlan,
     source_limit: int | None = None,
     config: DeliveryConfig | None = None,
+    source: object | None = None,
+    writer: object | None = None,
 ) -> PipelineExplain:
     """Build a stable explain summary from a resolved runtime plan."""
     config = config or DeliveryConfig()
@@ -72,6 +80,32 @@ def build_pipeline_explain(
             for sink in plan.writer.sink_plans
         ),
         acceleration=_build_acceleration_explain(plan=plan, config=config),
+        delivery=_build_delivery_explain(source=source, writer=writer, config=config),
+    )
+
+
+def _build_delivery_explain(
+    *,
+    source: object | None,
+    writer: object | None,
+    config: DeliveryConfig,
+) -> DeliveryCapability:
+    if source is not None and writer is not None:
+        return build_delivery_capability(source=source, writer=writer, config=config)  # type: ignore[arg-type]
+    return DeliveryCapability(
+        guarantee=DeliveryGuarantee.AT_LEAST_ONCE,
+        source_checkpointing_enabled=False,
+        source_identity_supported=False,
+        checkpoint_failure_policy=config.checkpoint_failure_policy.value,
+        source_order_preserved=True,
+        checkpoint_advances_after_handled_outcome=True,
+        duplicate_delivery_possible=True,
+        transactional_checkpoint_coupling=False,
+        sinks=(),
+        replay_safe=False,
+        risk_flags=("source_or_sink_capability_not_available",),
+        policy=config.delivery_policy or DeliveryPolicy(),
+        policy_mismatches=(),
     )
 
 

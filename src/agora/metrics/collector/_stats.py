@@ -22,6 +22,8 @@ class RuntimeRunStats:
     total_checkpoint_save_count: int = 0
     total_checkpoint_failure_count: int = 0
     total_dlq_failure_count: int = 0
+    total_failure_classification_counts: dict[str, int] = field(default_factory=dict)
+    total_failure_alert_severity_counts: dict[str, int] = field(default_factory=dict)
     total_writer_flush_count: int = 0
     total_adaptive_scale_up_count: int = 0
     total_adaptive_scale_down_count: int = 0
@@ -40,6 +42,14 @@ class RuntimeRunStats:
         self.total_checkpoint_save_count += runtime.checkpoint_save_count
         self.total_checkpoint_failure_count += runtime.checkpoint_failure_count
         self.total_dlq_failure_count += runtime.dlq_failure_count
+        for classification, count in runtime.failure_classification_counts.items():
+            self.total_failure_classification_counts[classification] = (
+                self.total_failure_classification_counts.get(classification, 0) + count
+            )
+        for severity, count in runtime.failure_alert_severity_counts.items():
+            self.total_failure_alert_severity_counts[severity] = (
+                self.total_failure_alert_severity_counts.get(severity, 0) + count
+            )
         self.total_writer_flush_count += runtime.writer_flush_count
         self.total_adaptive_scale_up_count += runtime.adaptive_backpressure_scale_up_count
         self.total_adaptive_scale_down_count += runtime.adaptive_backpressure_scale_down_count
@@ -50,7 +60,7 @@ class RuntimeRunStats:
         self.last_runtime = runtime.copy()
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "total_source_prefetch_block_count": self.total_source_prefetch_block_count,
             "total_rust_prefetch_runs": self.total_rust_prefetch_runs,
             "total_rust_prefetch_wait_count": self.total_rust_prefetch_wait_count,
@@ -59,6 +69,8 @@ class RuntimeRunStats:
             "total_checkpoint_save_count": self.total_checkpoint_save_count,
             "total_checkpoint_failure_count": self.total_checkpoint_failure_count,
             "total_dlq_failure_count": self.total_dlq_failure_count,
+            "total_failure_classification_counts": dict(self.total_failure_classification_counts),
+            "total_failure_alert_severity_counts": dict(self.total_failure_alert_severity_counts),
             "total_writer_flush_count": self.total_writer_flush_count,
             "total_adaptive_scale_up_count": self.total_adaptive_scale_up_count,
             "total_adaptive_scale_down_count": self.total_adaptive_scale_down_count,
@@ -68,7 +80,7 @@ class RuntimeRunStats:
             "total_csv_arrow_downgrade_row_count": self.total_csv_arrow_downgrade_row_count,
         }
         if self.last_runtime is not None:
-            payload["last_run"] = self.last_runtime.to_dict()  # type: ignore[assignment]
+            payload["last_run"] = self.last_runtime.to_dict()
         return payload
 
 

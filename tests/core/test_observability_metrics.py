@@ -270,6 +270,8 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
         buffered_stage_max_in_flight=9,
         checkpoint_save_count=6,
         checkpoint_failure_count=1,
+        failure_classification_counts={"connectivity": 2, "schema": 1},
+        failure_alert_severity_counts={"critical": 2, "warning": 1},
         checkpoint_save_max_batch_size=4,
         checkpoint_save_time_ms=18.5,
         writer_flush_count=7,
@@ -305,6 +307,14 @@ async def test_prometheus_exporter_renders_runtime_observability_metrics() -> No
     )
     assert (
         'agora_pipeline_runtime_events_total{pipeline_id="orders",event="rust_prefetch_wait"} 6'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_failure_classifications_total{pipeline_id="orders",classification="connectivity"} 2'
+        in rendered
+    )
+    assert (
+        'agora_pipeline_failure_alert_severities_total{pipeline_id="orders",alert_severity="critical"} 2'
         in rendered
     )
     assert (

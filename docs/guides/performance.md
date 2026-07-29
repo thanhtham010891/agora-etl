@@ -81,6 +81,27 @@ installed `agora-etl-rs` version, compatibility, capabilities, and
 required-mode failures. Use `agora doctor --json --config agora.toml` for a
 machine-readable report.
 
+## Repeatable core benchmark
+
+Use the checked-in harness to compare core runtime profiles or Python and Rust
+paths on the same host:
+
+```bash
+cd packages/agora
+PYTHONPATH=src .venv/bin/python scripts/benchmark_agora.py \
+  --records 20000 --payload-bytes 128 --batch-size 500 \
+  --acceleration-mode auto --performance-profile throughput --pretty
+```
+
+It emits stable JSON with workload configuration, p50/p95 latency, throughput,
+logical payload rate, peak traced memory, and a per-run checksum. Repeat a
+comparison with `--acceleration-mode off`; preserve the JSON artifacts with the
+machine and Python/Rust versions used for the comparison.
+
+This is deliberately a synthetic Python-row dispatch workload with a
+batch-capable in-memory sink. It does not benchmark a connector, claim a
+delivery guarantee, or replace crash-window and backend integration gates.
+
 ## Fast-Path Checklist
 
 For high throughput runs:

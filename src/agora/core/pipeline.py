@@ -34,6 +34,7 @@ from agora.core._pipeline_support import (
     normalize_delivery_config,
     run_async_sync_bridge,
 )
+from agora.core.delivery import enforce_delivery_policy
 from agora.core.executor import PipelineExecutor, PipelineRuntimeSpec
 from agora.core.middleware import FilterMiddleware, MiddlewareChain
 from agora.core.types import DeliveryConfig
@@ -279,6 +280,12 @@ class BoundPipeline(Generic[T]):
         run_id: str | None = None,
         live_metrics_callback: Callable[[PipelineContext], Awaitable[None]] | None = None,
     ) -> PipelineRunSummary:
+        delivery = self.explain().delivery
+        enforce_delivery_policy(
+            delivery,
+            pipeline_id=self._pipeline_id,
+            source_name=self._source.source_name,
+        )
         previous_live_metrics_callback = self._live_metrics_callback
         if live_metrics_callback is not None:
             self._live_metrics_callback = live_metrics_callback

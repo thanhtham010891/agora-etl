@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import logstruct
 
+from agora.core.checkpoint import SourceIdentityMismatchPolicy
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
@@ -161,6 +162,9 @@ class CsvSource(FileSource[T], Generic[T]):
         *,
         emit_batches: bool = False,
         emit_batch_size: int = 5000,
+        source_identity_mismatch_policy: SourceIdentityMismatchPolicy | str = (
+            SourceIdentityMismatchPolicy.FAIL_CLOSED
+        ),
     ) -> None:
         self._path = Path(path)
         self._row_mapper = row_mapper
@@ -180,6 +184,7 @@ class CsvSource(FileSource[T], Generic[T]):
         self.supports_prefetch: bool = False  # linear path uses sync stream() directly
         self._emit_batch_size = max(emit_batch_size, 1)
         self._emit_batches = emit_batches
+        self._configure_source_identity_policy(source_identity_mismatch_policy)
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         emitted_plane = DataPlane.PYTHON_BATCHES if self._emit_batches else DataPlane.PYTHON_ROWS
@@ -191,10 +196,11 @@ class CsvSource(FileSource[T], Generic[T]):
         )
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
-        if checkpoint is None:
+        if not self._accept_checkpoint_identity(checkpoint):
             self._resume_row_number = 0
             return
 
+        assert checkpoint is not None
         value = checkpoint.value if isinstance(checkpoint.value, dict) else {}
         self._resume_row_number = int(value.get("row_number", 0))
 
@@ -439,6 +445,10 @@ class ArrowCsvSource(FileSource[Any]):
         path: Path,
         batch_size: int = 65_536,
         read_block_size: int | None = None,
+        *,
+        source_identity_mismatch_policy: SourceIdentityMismatchPolicy | str = (
+            SourceIdentityMismatchPolicy.FAIL_CLOSED
+        ),
     ) -> None:
         self._path = Path(path)
         self._batch_size = max(batch_size, 1)
@@ -452,12 +462,13 @@ class ArrowCsvSource(FileSource[Any]):
         self._arrow_batch_materialize_time_ms: float = 0.0
         self._arrow_total_load_time_ms: float = 0.0
         self._arrow_resolved_read_block_size: int = 0
+        self._configure_source_identity_policy(source_identity_mismatch_policy)
 
     def current_checkpoint(self) -> dict[str, int] | None:
         return {"rows": self._rows_read} if self._rows_read else None
 
     async def prepare_resume(self, checkpoint: Any) -> None:
-        return None
+        self._accept_checkpoint_identity(checkpoint)
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         return SourceDataPlaneSpec(

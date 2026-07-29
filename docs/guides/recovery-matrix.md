@@ -10,9 +10,9 @@ For the runtime promises this matrix relies on (when checkpoints advance, what g
 
 | Source | Checkpointable | Resume position | Notes |
 |---|---|---|---|
-| `JsonLinesSource` | Yes | Line number (`line_number`) | Skips lines `<= resume_line_number` on read. |
-| `CsvSource` | Yes | Row number (`row_number`) | Skips rows `<= resume_row_number`. Header is not counted. |
-| `ParquetSource` | Yes | Row number (`row_number`) | Skips rows `<= resume_row_number` across PyArrow batches. |
+| `JsonLinesSource` | Yes | Line number (`line_number`) | Skips lines `<= resume_line_number` on read; validates file identity before resume. |
+| `CsvSource` | Yes | Row number (`row_number`) | Skips rows `<= resume_row_number`; header is not counted; validates file identity before resume. |
+| `ParquetSource` | Yes | Row number (`row_number`) | Skips rows `<= resume_row_number` across PyArrow batches; validates file identity before resume. |
 | `HTTPSource` | No (by default) | Subclass-specific | Base class does not implement checkpoint hooks. Subclasses must opt in. |
 | `IterableSource` | No | Not supported | In-memory testing source. Re-emits from start every run. |
 
@@ -93,6 +93,8 @@ checkpoint state, recovery hints, DLQ summary, and replay guidance.
 - **Resume key:** `{"line_number": <int>}`.
 - **Granularity:** the line number of the last record _yielded_ to the pipeline (not the last record _written_ to the sink). The runtime decides when to persist this via `checkpoint_every`.
 - **First-run behavior:** `prepare_resume(None)` resets `_resume_line_number = 0` — streams from the first line.
+- **Identity guard:** checkpointed file URI, device/inode, size, and mtime must
+  match before its cursor is used; mismatches fail closed by default.
 - **Blank lines:** counted toward the line number but skipped (no record yielded).
 - **Parse errors:** under `SourceRecordFailurePolicy.FAIL_CLOSED` (default) raise `SourceRecordError` with the current checkpoint attached. Under `LOG_AND_CONTINUE`, the error is logged and the line is dropped — the line counter still advances.
 
@@ -101,6 +103,7 @@ checkpoint state, recovery hints, DLQ summary, and replay guidance.
 - **Resume key:** `{"row_number": <int>}`.
 - **Granularity:** data row number (header row is consumed by `DictReader` and does not count).
 - **First-run behavior:** same as `JsonLinesSource`.
+- **Identity guard:** same as `JsonLinesSource`.
 - **Blank rows:** when `skip_blank_lines=True` (default), a row where every value is empty is counted toward the row number but skipped.
 - **Parse errors:** same policy split as `JsonLinesSource`.
 
@@ -109,6 +112,7 @@ checkpoint state, recovery hints, DLQ summary, and replay guidance.
 - **Resume key:** `{"row_number": <int>}`.
 - **Granularity:** row number across the entire file. PyArrow batch boundaries are an internal optimization — they do not affect resume semantics.
 - **First-run behavior:** same as the other file sources.
+- **Identity guard:** same as `JsonLinesSource`.
 - **Performance note:** resume currently re-reads and discards rows up to the saved offset. There is no row-group seek. For large Parquet files with high `resume_row_number`, the cost of restart is proportional to that offset.
 
 ### HTTPSource
@@ -159,7 +163,9 @@ This matches the at-least-once delivery model from [Runtime Guarantees](runtime-
 - **No mid-batch resume for ParquetSource.** PyArrow's batch iterator is consumed sequentially; the source uses row-level skipping, not row-group seeking. Resume is correct, but not zero-cost on large files.
 - **No cross-source coordination.** Each source has its own checkpoint key. The runtime makes no attempt to align resume positions across sources in a multi-source job.
 - **No automatic checkpoint expiry or compaction.** The checkpoint store keeps the latest saved value per key indefinitely. Manage retention at the store level if needed.
-- **No checkpoint validation against source content.** If you swap the underlying file or feed without resetting the checkpoint key, the saved offset will be applied to the new content as-is.
+- **No cryptographic content validation.** File sources validate a cheap
+  filesystem fingerprint, not a full content hash. Use immutable source paths
+  or a custom source identity for stronger integrity requirements.
 
 ## Checkpoint failure handling
 
@@ -167,6 +173,11 @@ Two failure surfaces — both controlled by `CheckpointFailurePolicy`:
 
 - **`load()` failure** (during pipeline startup): under `FAIL_CLOSED` (default), the run aborts. Under `LOG_AND_CONTINUE`, the failure is logged and the source starts from the beginning as if no checkpoint existed.
 - **`save()` failure** (during the run): under `FAIL_CLOSED`, the run aborts. Under `LOG_AND_CONTINUE`, the failure is logged, the run continues, and `mark_saved` still advances internally so the runtime does not retry-storm the broken store on every record.
+
+  A completed sink write is never rolled back by this failure. Recovery replays
+  the full uncheckpointed window: one linear record or a flushed batch. Pending
+  buffered delivery is cancelled under `FAIL_CLOSED` before later writes or
+  checkpoints can commit.
 
 Corrupted checkpoint payloads (missing required fields, wrong type) raise `TypeError` with a descriptive message. This was the `0.1.7` fix for the silent `KeyError`.
 

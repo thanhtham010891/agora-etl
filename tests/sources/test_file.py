@@ -17,8 +17,14 @@ from typing import Any
 import pytest
 
 from agora import DeliveryConfig, Pipeline, SourceRecordFailurePolicy
-from agora.core.checkpoint import InMemoryCheckpointStore
+from agora.core.checkpoint import (
+    Checkpoint,
+    InMemoryCheckpointStore,
+    SourceIdentityMismatchError,
+    SourceIdentityMismatchPolicy,
+)
 from agora.core.source import SourceRecordError
+from agora.core.types import CheckpointFailurePolicy
 from agora.sources.file import CsvSource, JsonLinesSource, ParquetSource
 
 
@@ -40,6 +46,164 @@ class _SlowSink:
 
     async def close(self) -> None:
         return None
+
+
+class _CollectSink:
+    sink_name = "collect"
+
+    def __init__(self) -> None:
+        self.records: list[Any] = []
+
+    async def open(self) -> None:
+        return None
+
+    async def write(self, record: Any) -> None:
+        self.records.append(record)
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+def _checkpoint_for(source: Any, value: dict[str, int]) -> Checkpoint:
+    return Checkpoint(
+        pipeline_id="file_identity",
+        run_id="run-1",
+        source=source.source_name,
+        value=value,
+        source_identity=source.checkpoint_source_identity(),
+    )
+
+
+async def test_file_checkpoint_persists_source_identity(tmp_path: Path) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n", encoding="utf-8")
+    summary = await (
+        Pipeline(CsvSource(path=csv_file, row_mapper=lambda row: row))
+        .build(_CollectSink(), config=DeliveryConfig(checkpoint=InMemoryCheckpointStore()))  # type: ignore[arg-type]
+        .run(max_records=1)
+    )
+
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.source_identity is not None
+    assert summary.last_checkpoint.source_identity.uri == csv_file.resolve().as_uri()
+
+
+async def test_csv_resume_fails_closed_when_source_identity_changes(tmp_path: Path) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    source = CsvSource(path=csv_file, row_mapper=lambda row: row)
+    checkpoint = _checkpoint_for(source, {"row_number": 1})
+    csv_file.write_text("id,name\n4,Dora\n5,Evan\n", encoding="utf-8")
+
+    with pytest.raises(SourceIdentityMismatchError, match="differs from the current file"):
+        await source.prepare_resume(checkpoint)
+
+
+async def test_file_identity_fail_closed_overrides_checkpoint_log_and_continue(
+    tmp_path: Path,
+) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    store = InMemoryCheckpointStore()
+    await (
+        Pipeline(CsvSource(path=csv_file, row_mapper=lambda row: row))
+        .build(_CollectSink(), config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run(max_records=1)
+    )
+    csv_file.write_text("id,name\n3,Carol\n4,Dora\n", encoding="utf-8")
+
+    with pytest.raises(SourceIdentityMismatchError):
+        await (
+            Pipeline(CsvSource(path=csv_file, row_mapper=lambda row: row))
+            .build(
+                _CollectSink(),
+                config=DeliveryConfig(
+                    checkpoint=store,
+                    checkpoint_failure_policy=CheckpointFailurePolicy.LOG_AND_CONTINUE,
+                ),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+
+async def test_jsonl_resume_fails_closed_when_source_identity_changes(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"id": 1}\n{"id": 2}\n', encoding="utf-8")
+    source = JsonLinesSource(path=path, row_mapper=lambda row: row)
+    checkpoint = _checkpoint_for(source, {"line_number": 1})
+    path.write_text('{"id": 3}\n{"id": 4}\n', encoding="utf-8")
+
+    with pytest.raises(SourceIdentityMismatchError, match="differs from the current file"):
+        await source.prepare_resume(checkpoint)
+
+
+async def test_file_source_reset_policy_restarts_after_identity_mismatch(tmp_path: Path) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    source = CsvSource(path=csv_file, row_mapper=lambda row: row)
+    checkpoint = _checkpoint_for(source, {"row_number": 2})
+    csv_file.write_text("id,name\n4,Dora\n5,Evan\n", encoding="utf-8")
+
+    reset_source = CsvSource(
+        path=csv_file,
+        row_mapper=lambda row: row,
+        source_identity_mismatch_policy=SourceIdentityMismatchPolicy.RESET,
+    )
+    await reset_source.prepare_resume(checkpoint)
+    records = [record async for record in reset_source.stream()]
+
+    assert records == [{"id": "4", "name": "Dora"}, {"id": "5", "name": "Evan"}]
+
+
+async def test_file_source_allow_policy_keeps_cursor_after_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+    source = CsvSource(path=csv_file, row_mapper=lambda row: row)
+    checkpoint = _checkpoint_for(source, {"row_number": 1})
+    csv_file.write_text("id,name\n3,Carol\n4,Dora\n", encoding="utf-8")
+
+    allowed_source = CsvSource(
+        path=csv_file,
+        row_mapper=lambda row: row,
+        source_identity_mismatch_policy=SourceIdentityMismatchPolicy.ALLOW,
+    )
+    await allowed_source.prepare_resume(checkpoint)
+    records = [record async for record in allowed_source.stream()]
+
+    assert records == [{"id": "4", "name": "Dora"}]
+
+
+async def test_legacy_file_checkpoint_fails_closed_by_default(tmp_path: Path) -> None:
+    csv_file = tmp_path / "records.csv"
+    csv_file.write_text("id,name\n1,Alice\n", encoding="utf-8")
+    source = CsvSource(path=csv_file, row_mapper=lambda row: row)
+    legacy_checkpoint = Checkpoint(
+        pipeline_id="legacy",
+        run_id="run-1",
+        source="csv",
+        value={"row_number": 1},
+    )
+
+    with pytest.raises(SourceIdentityMismatchError, match="legacy checkpoint"):
+        await source.prepare_resume(legacy_checkpoint)
+
+
+async def test_parquet_resume_fails_closed_when_source_identity_changes(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    parquet = pytest.importorskip("pyarrow.parquet")
+    path = tmp_path / "records.parquet"
+    parquet.write_table(pa.table({"id": [1, 2]}), path)
+    source = ParquetSource(path=path, row_mapper=lambda row: row)
+    checkpoint = _checkpoint_for(source, {"row_number": 1})
+    parquet.write_table(pa.table({"id": [3, 4]}), path)
+
+    with pytest.raises(SourceIdentityMismatchError, match="differs from the current file"):
+        await source.prepare_resume(checkpoint)
 
 
 # ======================================================================

@@ -8,11 +8,18 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agora import (
+    BatchMiddleware,
     DeliveryConfig,
     IterableSource,
     Pipeline,
 )
-from agora.core.checkpoint import InMemoryCheckpointStore, SQLiteCheckpointStore
+from agora.core.checkpoint import (
+    Checkpoint,
+    InMemoryCheckpointStore,
+    SourceIdentity,
+    SQLiteCheckpointStore,
+)
+from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.middleware import Middleware
 from agora.core.source import BaseSource
 from agora.core.types import CheckpointFailurePolicy
@@ -102,6 +109,56 @@ class _BufferedPassThroughMiddleware(Middleware[int, int]):
                 future.set_result(record)
 
 
+class _ResumableBatchSource(BaseSource[int]):
+    """Batch-lane fixture whose checkpoint cursor is the committed batch index."""
+
+    source_name = "resumable_batch"
+    supports_checkpoint = True
+
+    def __init__(self, batches: list[list[int]]) -> None:
+        self._batches = batches
+        self._resume_batch_index = -1
+        self._last_batch_index = -1
+
+    def data_plane_spec(self) -> SourceDataPlaneSpec:
+        return SourceDataPlaneSpec(
+            source_name=self.source_name,
+            emitted_plane=DataPlane.PYTHON_BATCHES,
+            supports_batch_emit=True,
+            emits_arrow_batches=False,
+        )
+
+    async def prepare_resume(self, checkpoint) -> None:
+        self._resume_batch_index = (
+            -1 if checkpoint is None else int(checkpoint.value["batch_index"])
+        )
+
+    def current_checkpoint(self) -> dict[str, int] | None:
+        if self._last_batch_index < 0:
+            return None
+        return {"batch_index": self._last_batch_index}
+
+    async def stream_batches(self):  # type: ignore[override]
+        for index, batch in enumerate(self._batches):
+            if index <= self._resume_batch_index:
+                continue
+            self._last_batch_index = index
+            yield batch
+
+    async def stream(self):
+        async for batch in self.stream_batches():
+            for record in batch:
+                yield record
+
+
+class _BatchPassThroughMiddleware(BatchMiddleware[int, int]):
+    name = "batch_passthrough"
+
+    async def process_batch(self, records: list[int], ctx) -> list[int | None]:
+        del ctx
+        return list(records)
+
+
 @pytest.mark.asyncio
 async def test_pipeline_checkpoint_store_resumes_from_last_saved_position() -> None:
     store = InMemoryCheckpointStore()
@@ -185,6 +242,29 @@ async def test_sqlite_checkpoint_store_persists_resume_state(tmp_path: Path) -> 
     assert second_sink.records == [3]
     assert summary.last_checkpoint is not None
     assert summary.last_checkpoint.value == {"index": 2}
+
+
+async def test_checkpoint_store_round_trips_source_identity(tmp_path: Path) -> None:
+    source_file = tmp_path / "input.csv"
+    source_file.write_text("id\n1\n", encoding="utf-8")
+    identity = SourceIdentity.for_file(source_file)
+    store = SQLiteCheckpointStore(path=tmp_path / "source-identity.db")
+    checkpoint = Checkpoint(
+        pipeline_id="orders",
+        run_id="run-1",
+        source="csv",
+        value={"row_number": 1},
+        source_identity=identity,
+    )
+
+    try:
+        await store.save("orders", checkpoint)
+        loaded = await store.load("orders")
+    finally:
+        await store.close()
+
+    assert loaded is not None
+    assert loaded.source_identity == identity
 
 
 @pytest.mark.asyncio
@@ -307,6 +387,34 @@ class _FailingCheckpointStore:
         return None
 
 
+class _FailOnceCheckpointStore(InMemoryCheckpointStore):
+    """Inject one crash-window failure after a sink write, before persistence."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.save_calls = 0
+
+    async def save(self, key: str, checkpoint) -> None:
+        self.save_calls += 1
+        if self.save_calls == 1:
+            raise RuntimeError("injected checkpoint save failure")
+        await super().save(key, checkpoint)
+
+
+class _BlockingCheckpointStore(InMemoryCheckpointStore):
+    """Pause the precise crash window after a sink acknowledgement."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.save_started = asyncio.Event()
+        self.release_save = asyncio.Event()
+
+    async def save(self, key: str, checkpoint) -> None:
+        self.save_started.set()
+        await self.release_save.wait()
+        await super().save(key, checkpoint)
+
+
 class _CountingCheckpointStore(InMemoryCheckpointStore):
     def __init__(self) -> None:
         super().__init__()
@@ -423,6 +531,274 @@ async def test_pipeline_fails_closed_on_checkpoint_save_failure_by_default() -> 
             )
             .run()
         )
+
+
+@pytest.mark.asyncio
+async def test_linear_checkpoint_failure_replays_the_written_record_on_restart() -> None:
+    """A linear sink write is visible before a failed checkpoint can be retried."""
+    store = _FailOnceCheckpointStore()
+    first_sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="injected checkpoint save failure"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+            .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+            .run()
+        )
+
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert first_sink.records == [10]
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_batch_checkpoint_failure_replays_the_entire_written_batch_on_restart() -> None:
+    """A batch is not checkpointed until its complete sink flush is durable."""
+    store = _FailOnceCheckpointStore()
+    first_sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="injected checkpoint save failure"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+            .build(
+                first_sink,
+                config=DeliveryConfig(checkpoint=store, batch_size=2),
+            )  # type: ignore[arg-type]
+            .run()
+        )
+
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+        .build(
+            resumed_sink,
+            config=DeliveryConfig(checkpoint=store, batch_size=2),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert first_sink.records == [10, 20]
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 20, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_batch_lane_checkpoint_failure_stops_later_batches_and_replays_first_batch() -> None:
+    """The native batch lane must not advance beyond a failed checkpoint boundary."""
+    store = _FailOnceCheckpointStore()
+    first_sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="injected checkpoint save failure"):
+        await (
+            Pipeline(_ResumableBatchSource([[10, 20], [30, 40]]))
+            .pipe(_BatchPassThroughMiddleware())
+            .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+            .run()
+        )
+
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_ResumableBatchSource([[10, 20], [30, 40]]))
+        .pipe(_BatchPassThroughMiddleware())
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert first_sink.records == [10, 20]
+    assert resumed_sink.records == [10, 20, 30, 40]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 20, 10, 20, 30, 40]
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"batch_index": 1}
+
+
+@pytest.mark.asyncio
+async def test_buffered_checkpoint_failure_stops_later_delivery_and_replays_uncheckpointed_record() -> (
+    None
+):
+    """A fail-closed checkpoint error cancels buffered work before later writes."""
+    store = _FailOnceCheckpointStore()
+    first_sink = _CollectSink()
+
+    with pytest.raises(RuntimeError, match="injected checkpoint save failure"):
+        await (
+            Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+            .pipe(_BufferedPassThroughMiddleware(batch_size=3))
+            .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+            .run()
+        )
+
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]))
+        .pipe(_BufferedPassThroughMiddleware(batch_size=3))
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert first_sink.records == [10]
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_linear_cancellation_during_checkpoint_save_replays_written_record() -> None:
+    """Cancellation before persistence keeps the written record replayable."""
+    store = _BlockingCheckpointStore()
+    first_sink = _CollectSink()
+    pipeline_id = "linear_checkpoint_cancellation"
+    run = asyncio.create_task(
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert first_sink.records == [10]
+    assert await store.load(pipeline_id) is None
+
+    store.release_save.set()
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_writer_batch_cancellation_during_checkpoint_save_replays_written_batch() -> None:
+    """The writer-batch path keeps its complete unpersisted batch replayable."""
+    store = _BlockingCheckpointStore()
+    first_sink = _CollectSink()
+    pipeline_id = "writer_batch_checkpoint_cancellation"
+    run = asyncio.create_task(
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .build(
+            first_sink,
+            config=DeliveryConfig(checkpoint=store, batch_size=2),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert first_sink.records == [10, 20]
+    assert await store.load(pipeline_id) is None
+
+    store.release_save.set()
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .build(
+            resumed_sink,
+            config=DeliveryConfig(checkpoint=store, batch_size=2),
+        )  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 20, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_buffered_cancellation_during_checkpoint_save_replays_written_record() -> None:
+    """Buffered delivery cancels remaining work before its checkpoint boundary."""
+    store = _BlockingCheckpointStore()
+    first_sink = _CollectSink()
+    pipeline_id = "buffered_checkpoint_cancellation"
+    run = asyncio.create_task(
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .pipe(_BufferedPassThroughMiddleware(batch_size=3))
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert first_sink.records == [10]
+    assert await store.load(pipeline_id) is None
+
+    store.release_save.set()
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_CheckpointedSequenceSource([10, 20, 30]), id=pipeline_id)
+        .pipe(_BufferedPassThroughMiddleware(batch_size=3))
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert resumed_sink.records == [10, 20, 30]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 10, 20, 30]
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"index": 2}
+
+
+@pytest.mark.asyncio
+async def test_batch_lane_cancellation_during_checkpoint_save_replays_written_batch() -> None:
+    """Native batch delivery cannot advance past an unpersisted batch cursor."""
+    store = _BlockingCheckpointStore()
+    first_sink = _CollectSink()
+    pipeline_id = "batch_checkpoint_cancellation"
+    run = asyncio.create_task(
+        Pipeline(_ResumableBatchSource([[10, 20], [30, 40]]), id=pipeline_id)
+        .pipe(_BatchPassThroughMiddleware())
+        .build(first_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert first_sink.records == [10, 20]
+    assert await store.load(pipeline_id) is None
+
+    store.release_save.set()
+    resumed_sink = _CollectSink()
+    summary = await (
+        Pipeline(_ResumableBatchSource([[10, 20], [30, 40]]), id=pipeline_id)
+        .pipe(_BatchPassThroughMiddleware())
+        .build(resumed_sink, config=DeliveryConfig(checkpoint=store))  # type: ignore[arg-type]
+        .run()
+    )
+
+    assert resumed_sink.records == [10, 20, 30, 40]
+    assert [*first_sink.records, *resumed_sink.records] == [10, 20, 10, 20, 30, 40]
+    assert summary.runtime.execution_lane == "batch"
+    assert summary.last_checkpoint is not None
+    assert summary.last_checkpoint.value == {"batch_index": 1}
 
 
 @pytest.mark.asyncio

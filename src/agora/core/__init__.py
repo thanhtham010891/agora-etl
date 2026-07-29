@@ -14,14 +14,33 @@ from agora.core.acceptance import (
 from agora.core.checkpoint import (
     Checkpoint,
     CheckpointableSource,
+    CheckpointIdentityProvider,
     CheckpointStore,
     CheckpointValue,
     InMemoryCheckpointStore,
+    SourceIdentity,
+    SourceIdentityMismatchError,
+    SourceIdentityMismatchPolicy,
     SQLiteCheckpointStore,
+    checkpoint_source_identity,
 )
 from agora.core.container import AgoraContainer
 from agora.core.context import PipelineContext
 from agora.core.data_plane import DataPlane, SinkDataPlaneSpec, SourceDataPlaneSpec
+from agora.core.delivery import (
+    DeliveryCapability,
+    DeliveryGuarantee,
+    DeliveryPolicy,
+    DeliveryPolicyMismatch,
+    DeliveryPolicyMismatchError,
+    IdempotencyMode,
+    SinkDeliveryCapability,
+    SinkDeliveryCapabilityProvider,
+    build_delivery_capability,
+    delivery_policy_mismatches,
+    enforce_delivery_policy,
+    sink_delivery_capability,
+)
 from agora.core.discovery import discover_plugins
 from agora.core.dlq import DLQRecord, DLQSink
 from agora.core.dlq_policy import DLQPayloadPolicy
@@ -36,10 +55,13 @@ from agora.core.errors import (
 )
 from agora.core.explain import MiddlewareStageExplain, PipelineExplain, SinkWriteExplain
 from agora.core.failures import (
+    AlertSeverity,
     FailureClassification,
+    FailureDecision,
     PoisonRecordClassification,
     PoisonRecordInfo,
     PoisonRecordPolicy,
+    classify_failure,
 )
 from agora.core.health import ComponentHealthSnapshot, HealthCheckable
 from agora.core.metrics import (
@@ -109,6 +131,7 @@ _PIPELINE_EXPORTS = (
 
 _RECOVERY_EXPORTS = (
     "Checkpoint",
+    "CheckpointIdentityProvider",
     "CheckpointFailurePolicy",
     "CheckpointStore",
     "CheckpointValue",
@@ -120,14 +143,33 @@ _RECOVERY_EXPORTS = (
     "DedupStoreFailurePolicy",
     "InMemoryCheckpointStore",
     "OnError",
+    "AlertSeverity",
+    "FailureDecision",
     "FailureClassification",
     "PoisonRecordClassification",
     "PoisonRecordInfo",
     "PoisonRecordPolicy",
+    "classify_failure",
     "SQLiteCheckpointStore",
+    "SourceIdentity",
+    "SourceIdentityMismatchError",
+    "SourceIdentityMismatchPolicy",
+    "checkpoint_source_identity",
     "SourceRecoveryContractProvider",
     "SourceRecoveryContractSnapshot",
     "SourceRecoveryMode",
+    "DeliveryCapability",
+    "DeliveryGuarantee",
+    "DeliveryPolicy",
+    "DeliveryPolicyMismatch",
+    "DeliveryPolicyMismatchError",
+    "IdempotencyMode",
+    "SinkDeliveryCapability",
+    "SinkDeliveryCapabilityProvider",
+    "build_delivery_capability",
+    "delivery_policy_mismatches",
+    "enforce_delivery_policy",
+    "sink_delivery_capability",
 )
 
 _PLUGIN_EXPORTS = (
@@ -195,6 +237,7 @@ __all__ = [  # noqa: RUF022
     "sink_data_plane_spec",
     "source_data_plane_spec",
     "Checkpoint",
+    "CheckpointIdentityProvider",
     "CheckpointFailurePolicy",
     "CheckpointStore",
     "CheckpointValue",
@@ -206,14 +249,33 @@ __all__ = [  # noqa: RUF022
     "DedupStoreFailurePolicy",
     "InMemoryCheckpointStore",
     "OnError",
+    "AlertSeverity",
+    "FailureDecision",
     "FailureClassification",
     "PoisonRecordClassification",
     "PoisonRecordInfo",
     "PoisonRecordPolicy",
+    "classify_failure",
     "SQLiteCheckpointStore",
+    "SourceIdentity",
+    "SourceIdentityMismatchError",
+    "SourceIdentityMismatchPolicy",
+    "checkpoint_source_identity",
     "SourceRecoveryContractProvider",
     "SourceRecoveryContractSnapshot",
     "SourceRecoveryMode",
+    "DeliveryCapability",
+    "DeliveryGuarantee",
+    "DeliveryPolicy",
+    "DeliveryPolicyMismatch",
+    "DeliveryPolicyMismatchError",
+    "IdempotencyMode",
+    "SinkDeliveryCapability",
+    "SinkDeliveryCapabilityProvider",
+    "build_delivery_capability",
+    "delivery_policy_mismatches",
+    "enforce_delivery_policy",
+    "sink_delivery_capability",
     "AGORA_CORE_API_COMPATIBILITY",
     "AGORA_CORE_API_VERSION",
     "AGORA_PLUGIN_MANIFEST_VERSION",

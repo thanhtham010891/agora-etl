@@ -21,6 +21,7 @@ from agora.core.runtime import (
     DeliveryEngine,
     ExecutionCoordinator,
     RecordDeliveryError,
+    _CheckpointSaveError,
     make_checkpoint_state,
 )
 from agora.core.source import SourceRecordError
@@ -119,7 +120,7 @@ class PipelineExecutor:
         state.run_error = exc
         if isinstance(exc, FenceLostError):
             return
-        if isinstance(exc, RecordDeliveryError):
+        if isinstance(exc, (RecordDeliveryError, _CheckpointSaveError)):
             return
 
         state.metrics.records_errored += 1
@@ -151,7 +152,7 @@ class PipelineExecutor:
     ) -> None:
         if state.run_error is not None:
             exc = state.run_error
-            if isinstance(exc, (RecordDeliveryError, SourceRecordError)):
+            if isinstance(exc, (RecordDeliveryError, SourceRecordError, _CheckpointSaveError)):
                 original: BaseException = exc.original
             else:
                 original = exc

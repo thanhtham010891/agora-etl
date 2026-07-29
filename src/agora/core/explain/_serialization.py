@@ -79,4 +79,5 @@ def pipeline_explain_to_dict(explain: PipelineExplain) -> dict[str, Any]:
         "sink_downgrade_count": explain.sink_downgrade_count,
         "sinks": [sink.to_dict() for sink in explain.sinks],
         "acceleration": explain.acceleration.to_dict(),
+        "delivery": explain.delivery.to_dict(),
     }

@@ -12,7 +12,7 @@ PYTEST := $(VENV)/bin/pytest
 MYPY   := $(VENV)/bin/mypy
 MKDOCS := $(VENV)/bin/mkdocs
 
-.PHONY: help setup install lint format fix check docs-check test test-core test-all contracts-runtime contracts-plugin contracts-baseline contracts preservation ci clean
+.PHONY: help setup install lint format fix check docs-check test test-core test-all contracts-runtime contracts-plugin contracts-baseline contracts preservation benchmark-core ci clean
 
 help:  ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
@@ -72,6 +72,9 @@ preservation:  ## Run all preservation suites, including baseline compatibility 
 
 test-all:  ## Run all tests including integration (requires external services)
 	PYTHONPATH=src $(PYTEST) tests/ -v
+
+benchmark-core:  ## Run the repeatable synthetic core-runtime benchmark
+	PYTHONPATH=src $(PYTHON) scripts/benchmark_agora.py --pretty
 
 ci:  ## Full CI check: lint + format + type check + tests (mirrors GitHub Actions)
 	$(MAKE) check

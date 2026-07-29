@@ -20,6 +20,7 @@ from agora.core.acceleration import (
     normalize_acceleration_mode,
     read_jsonl_arrow_batches,
 )
+from agora.core.checkpoint import SourceIdentityMismatchPolicy
 from agora.core.data_plane import DataPlane, SourceDataPlaneSpec
 from agora.core.source import SourceRecordError, SourceRuntimeMetrics
 from agora.core.types import SourceRecordFailurePolicy
@@ -66,6 +67,9 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         *,
         emit_batches: bool = False,
         emit_batch_size: int = 5000,
+        source_identity_mismatch_policy: SourceIdentityMismatchPolicy | str = (
+            SourceIdentityMismatchPolicy.FAIL_CLOSED
+        ),
     ) -> None:
         self._path = Path(path)
         self._row_mapper = row_mapper
@@ -81,6 +85,7 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         self.supports_prefetch: bool = False  # linear path uses sync stream() directly
         self._emit_batch_size = max(emit_batch_size, 1)
         self._emit_batches = emit_batches
+        self._configure_source_identity_policy(source_identity_mismatch_policy)
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         emitted_plane = DataPlane.PYTHON_BATCHES if self._emit_batches else DataPlane.PYTHON_ROWS
@@ -92,10 +97,11 @@ class JsonLinesSource(FileSource[T], Generic[T]):
         )
 
     async def prepare_resume(self, checkpoint: Checkpoint | None) -> None:
-        if checkpoint is None:
+        if not self._accept_checkpoint_identity(checkpoint):
             self._resume_line_number = 0
             return
 
+        assert checkpoint is not None
         value = checkpoint.value if isinstance(checkpoint.value, dict) else {}
         self._resume_line_number = int(value.get("line_number", 0))
 
@@ -320,17 +326,21 @@ class ArrowJsonLinesSource(FileSource[Any]):
         batch_size: int = 65_536,
         *,
         acceleration_mode: AccelerationMode | str = AccelerationMode.AUTO,
+        source_identity_mismatch_policy: SourceIdentityMismatchPolicy | str = (
+            SourceIdentityMismatchPolicy.FAIL_CLOSED
+        ),
     ) -> None:
         self._path = Path(path)
         self._batch_size = max(batch_size, 1)
         self._rows_read: int = 0
         self._acceleration_mode = normalize_acceleration_mode(acceleration_mode)
+        self._configure_source_identity_policy(source_identity_mismatch_policy)
 
     def current_checkpoint(self) -> dict[str, int] | None:
         return {"rows": self._rows_read} if self._rows_read else None
 
     async def prepare_resume(self, checkpoint: Any) -> None:
-        return None
+        self._accept_checkpoint_identity(checkpoint)
 
     def data_plane_spec(self) -> SourceDataPlaneSpec:
         return SourceDataPlaneSpec(

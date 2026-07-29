@@ -6,8 +6,9 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from agora.core.checkpoint import Checkpoint, CheckpointStore, CheckpointValue
+from agora.core.checkpoint import Checkpoint, CheckpointStore, CheckpointValue, SourceIdentity
 from agora.core.dlq import DLQRecord
+from agora.core.failures import classify_failure
 from agora.core.fencing import assert_run_fence_active
 from agora.core.types import CheckpointFailurePolicy, DLQFailurePolicy
 
@@ -17,6 +18,14 @@ if TYPE_CHECKING:
     from agora.core.context import PipelineContext
     from agora.core.runtime._delivery import CheckpointState
     from agora.core.sink import BaseSink
+
+
+class _CheckpointSaveError(RuntimeError):
+    """Internal terminal marker preserving the original checkpoint-store error."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
 
 
 @dataclass(slots=True)
@@ -48,7 +57,21 @@ class DLQWriter:
         middleware: str | None = None,
         sink: str | None = None,
     ) -> bool:
+        decision = classify_failure(exc)
+        decision_data = decision.to_dict()
+        _observe_failure_decision(ctx, decision_data)
+        log_decision = getattr(ctx.log, "info", ctx.log.warning)
+        log_decision(
+            "pipeline_failure_decision",
+            stage=stage,
+            classification=decision.classification.value,
+            retryable=decision.retryable,
+            dlq_eligible=decision.dlq_eligible,
+            alert_severity=decision.alert_severity.value,
+        )
         if self.dlq_sink is None:
+            return False
+        if not decision.dlq_eligible:
             return False
 
         try:
@@ -79,7 +102,12 @@ class DLQWriter:
                                 checkpoint if checkpoint is not None else self.current_checkpoint()
                             )
                         ),
-                        details=self._redact(getattr(exc, "dlq_details", None)),
+                        details=self._redact(
+                            _merge_failure_details(
+                                decision.to_dict(),
+                                getattr(exc, "dlq_details", None),
+                            )
+                        ),
                         middleware=middleware,
                         sink=sink,
                         original_record=self._redact(original_record),
@@ -87,12 +115,31 @@ class DLQWriter:
                     )
                 )
             return True
-        except Exception:
+        except Exception as exc:
             ctx.metrics.runtime.dlq_failure_count += 1
             ctx.log.exception("pipeline_dlq_write_error", stage=stage, error=str(exc))
             if self.dlq_failure_policy == DLQFailurePolicy.RAISE:
                 raise
             return False
+
+
+def _merge_failure_details(
+    decision: dict[str, Any],
+    existing_details: Any,
+) -> dict[str, Any]:
+    """Keep legacy plugin details while reserving a stable failure envelope."""
+    if isinstance(existing_details, dict):
+        return {**existing_details, "failure": decision}
+    if existing_details is None:
+        return {"failure": decision}
+    return {"failure": decision, "provider_details": existing_details}
+
+
+def _observe_failure_decision(ctx: PipelineContext, decision: dict[str, Any]) -> None:
+    """Update runtime metrics when the active context exposes the public hook."""
+    record = getattr(ctx.metrics.runtime, "record_failure_decision", None)
+    if callable(record):
+        record(decision)
 
 
 @dataclass(slots=True)
@@ -104,6 +151,7 @@ class CheckpointManager:
     checkpoint_failure_policy: CheckpointFailurePolicy
     checkpoint_key: str
     checkpoint_every: int
+    source_identity: Callable[[], SourceIdentity | None] | None = None
 
     def prepare(
         self,
@@ -123,6 +171,7 @@ class CheckpointManager:
             run_id=ctx.run_id,
             source=self.source_name,
             value=checkpoint_value,
+            source_identity=self.source_identity() if self.source_identity is not None else None,
         )
 
     async def persist(
@@ -145,7 +194,7 @@ class CheckpointManager:
                 batch_size=batch_size,
             ):
                 await self.checkpoint_store.save(self.checkpoint_key, checkpoint)
-        except Exception:
+        except Exception as exc:
             ctx.metrics.runtime.checkpoint_failure_count += 1
             if self.checkpoint_failure_policy == CheckpointFailurePolicy.LOG_AND_CONTINUE:
                 ctx.log.exception(
@@ -155,7 +204,7 @@ class CheckpointManager:
                 )
                 checkpoint_state.mark_saved(checkpoint.value)
                 return
-            raise
+            raise _CheckpointSaveError(exc) from exc
         checkpoint_state.mark_saved(checkpoint.value)
         ctx.metrics.runtime.checkpoint_save_time_ms += (time.monotonic() - t0) * 1000
         ctx.metrics.last_checkpoint = checkpoint
@@ -193,6 +242,7 @@ class CheckpointManager:
             run_id=ctx.run_id,
             source=self.source_name,
             value=checkpoint_value,
+            source_identity=self.source_identity() if self.source_identity is not None else None,
         )
         await self.persist(
             ctx,

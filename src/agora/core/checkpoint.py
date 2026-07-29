@@ -6,13 +6,15 @@ import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, TypeVar, runtime_checkable
 
+from agora.core.errors import AgoraError
 from agora.state.backend import MemoryBackend, SQLiteBackend, StateValue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
-    from pathlib import Path
 
     from agora.state.backend import StateBackend
 
@@ -21,6 +23,74 @@ T_co = TypeVar("T_co", covariant=True)
 
 CheckpointValue = StateValue
 """Serializable checkpoint value."""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceIdentity:
+    """Cheap filesystem fingerprint persisted beside a file resume cursor."""
+
+    uri: str
+    size_bytes: int
+    modified_time_ns: int
+    device: int | None = None
+    inode: int | None = None
+
+    @classmethod
+    def for_file(cls, path: str | Path) -> SourceIdentity:
+        """Build an O(1) filesystem identity without reading file contents."""
+        resolved = Path(path).expanduser().resolve()
+        stat = resolved.stat()
+        return cls(
+            uri=resolved.as_uri(),
+            size_bytes=stat.st_size,
+            modified_time_ns=stat.st_mtime_ns,
+            device=getattr(stat, "st_dev", None),
+            inode=getattr(stat, "st_ino", None),
+        )
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        return {
+            "uri": self.uri,
+            "size_bytes": self.size_bytes,
+            "modified_time_ns": self.modified_time_ns,
+            "device": self.device,
+            "inode": self.inode,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SourceIdentity:
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"Checkpoint source_identity is corrupted: expected dict, got {type(value)!r}"
+            )
+        required = ("uri", "size_bytes", "modified_time_ns")
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise TypeError(
+                f"Checkpoint source_identity is corrupted: missing required fields {missing!r}"
+            )
+        try:
+            return cls(
+                uri=str(value["uri"]),
+                size_bytes=int(value["size_bytes"]),
+                modified_time_ns=int(value["modified_time_ns"]),
+                device=int(value["device"]) if value.get("device") is not None else None,
+                inode=int(value["inode"]) if value.get("inode") is not None else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Checkpoint source_identity is corrupted: invalid field type") from exc
+
+
+class SourceIdentityMismatchPolicy(StrEnum):
+    """How a file source reacts when the saved resume target changed."""
+
+    FAIL_CLOSED = "fail_closed"
+    RESET = "reset"
+    ALLOW = "allow"
+
+
+class SourceIdentityMismatchError(AgoraError):
+    """Raised when a file checkpoint cannot safely resume its current source."""
 
 
 @dataclass(frozen=True)
@@ -32,6 +102,7 @@ class Checkpoint:
     source: str
     value: CheckpointValue
     recorded_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    source_identity: SourceIdentity | None = None
 
 
 class CheckpointStore(ABC):
@@ -70,11 +141,33 @@ class CheckpointableSource(Protocol[T_co]):
         ...
 
 
+@runtime_checkable
+class CheckpointIdentityProvider(Protocol):
+    """Optional source contract for binding a checkpoint to its input."""
+
+    def checkpoint_source_identity(self) -> SourceIdentity | None:
+        """Return the identity that must match before this checkpoint resumes."""
+        ...
+
+
 def is_checkpoint_capable(source: object) -> TypeGuard[CheckpointableSource[Any]]:
     """Return True when *source* explicitly supports checkpoint resume."""
     return isinstance(source, CheckpointableSource) and bool(
         getattr(source, "supports_checkpoint", False)
     )
+
+
+def checkpoint_source_identity(source: object) -> SourceIdentity | None:
+    """Get an explicitly provided source identity, when available."""
+    if not isinstance(source, CheckpointIdentityProvider):
+        return None
+    identity = source.checkpoint_source_identity()
+    if identity is not None and not isinstance(identity, SourceIdentity):
+        raise TypeError(
+            "checkpoint_source_identity() must return SourceIdentity or None, "
+            f"got {type(identity)!r}"
+        )
+    return identity
 
 
 class BackendCheckpointStore(CheckpointStore):
@@ -100,6 +193,7 @@ class BackendCheckpointStore(CheckpointStore):
                 f"Checkpoint data for key {key!r} is corrupted: missing required fields {missing!r}"
             )
         recorded_at = value.get("recorded_at")
+        source_identity = value.get("source_identity")
         return Checkpoint(
             pipeline_id=str(value["pipeline_id"]),
             run_id=str(value["run_id"]),
@@ -110,6 +204,9 @@ class BackendCheckpointStore(CheckpointStore):
                 if isinstance(recorded_at, str)
                 else datetime.now(UTC)
             ),
+            source_identity=(
+                SourceIdentity.from_dict(source_identity) if source_identity is not None else None
+            ),
         )
 
     async def save(self, key: str, checkpoint: Checkpoint) -> None:
@@ -119,6 +216,11 @@ class BackendCheckpointStore(CheckpointStore):
             "source": checkpoint.source,
             "value": checkpoint.value,
             "recorded_at": checkpoint.recorded_at.isoformat(),
+            "source_identity": (
+                checkpoint.source_identity.to_dict()
+                if checkpoint.source_identity is not None
+                else None
+            ),
         }
         await asyncio.to_thread(self._backend.set, self._full_key(key), payload)
 
