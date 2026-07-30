@@ -163,7 +163,7 @@ target must make that replay safe.
 
 | Target | Replay-safe recipe | Boundary |
 |---|---|---|
-| PostgreSQL | Preserve a stable producer event ID; use `PostgresSink(upsert=True, conflict_key="event_id")` backed by a unique constraint. | A replay updates the same logical row; there is no distributed Redis/PostgreSQL transaction. |
+| PostgreSQL | Prefer `build_redis_postgres_runtime()`; it persists a `stream:message_id` delivery key with `upsert=True` and a unique conflict key. | A replay updates the same logical row; there is no distributed Redis/PostgreSQL transaction. |
 | Redis `set` | Use a deterministic `key_fn` derived from the stable event ID and explicitly set `replay_safe_key_contract=True`. | `SET` overwrites the same key on replay; that contract is accepted only for `set`. |
 | Redis `lpush` / `rpush` / `xadd` | Do not claim replay safety without a separate application deduplication mechanism. | Retry markers do not deduplicate a process-crash replay. |
 
@@ -202,6 +202,54 @@ default. Override that threshold only when acknowledgement is explicitly
 coordinated outside Agora and the resulting loss/replay policy is documented.
 For poison entries, inspect the pending list and DLQ before retrying; do not
 acknowledge a failed entry merely to clear consumer-group lag.
+
+### Certified Redis Streams → PostgreSQL profile
+
+Use the composed runtime when Redis message identity, rather than a producer
+event ID, is the intended idempotency key. It injects
+`redis_delivery_key="<stream>:<message_id>"`, flushes PostgreSQL, then flushes
+the queued Redis acknowledgement as `XACK`. Per-record flush is mandatory:
+buffered writes cannot be acknowledged early because a process crash would
+otherwise lose an unpersisted message.
+
+Install both backend extras for this profile:
+
+```bash
+pip install "agora-etl-plugins[redis,postgres]"
+```
+
+```python
+from agora_plugins.postgres import build_redis_postgres_runtime
+from agora_plugins.redis.sources import RedisStreamSource
+
+source = RedisStreamSource(
+    url="redis://localhost:6379",
+    stream="orders",
+    group="orders-writers",
+    consumer="worker-1",
+    ack_on_success=True,
+)
+runtime = build_redis_postgres_runtime(
+    source=source,
+    dsn="postgresql://app:secret@localhost:5432/app",
+    table="order_projection",
+    transform=lambda fields: {"order_id": fields["order_id"]},
+)
+
+await runtime.open()
+try:
+    assert (await runtime.ensure_ready()).passed
+    await runtime.drain()
+finally:
+    await runtime.close()
+```
+
+The profile remains at-least-once: a crash after PostgreSQL commits and before
+`XACK` replays the message, while the delivery-key upsert updates the same row.
+The certified builder rejects a missing delivery key or `upsert=False`. Do not
+disable `ack_on_success` or strict write safety without an independently
+operated duplicate-handling policy. Metadata is opt-in; if a target persists
+it, the row mapper must serialize it for the target column type.
 
 ## DLQ and replay
 

@@ -332,6 +332,10 @@ and configures the PostgreSQL sink for upsert by that key.
 The default key is `kafka_delivery_key`; it is derived from Kafka metadata, so
 each partition/offset maps to one target-row identity. The target table must
 back the configured conflict key with a real unique constraint or primary key.
+`build_kafka_postgres_sink()` declares its sink replay-safe only when
+`upsert=True` and the configured conflict key contains that delivery key. A
+custom conflict key without it remains non-replay-safe in the delivery report
+and must not be treated as the certified profile.
 
 For a generic `PostgresSink`, an upsert alone is not proof that a custom
 `row_mapper` emits a stable conflict key. Its delivery report remains
@@ -375,6 +379,24 @@ the DLQ record is retained until a replayed record has been handled
 successfully. Do not reset offsets as a substitute for repairing an unsafe
 delivery recipe: doing so can create repeated side effects in sinks that do
 not enforce the delivery key.
+
+## Redis Streams → PostgreSQL delivery profile
+
+For a Redis consumer-group source whose stream entry ID is the intended
+idempotency identity, use `build_redis_postgres_runtime()` from the official
+bundle installed with both `redis` and `postgres` extras. It stores
+`redis_delivery_key="<stream>:<message_id>"`, requires that key in the
+PostgreSQL upsert conflict key, flushes the row, and only then flushes `XACK`.
+This is at-least-once rather than a distributed Redis/PostgreSQL transaction:
+a crash after the database commit and before `XACK` replays the same entry and
+updates the same delivery-key row.
+
+The profile rejects `upsert=False`, a conflict key without its delivery key,
+and disabled per-record PostgreSQL flushing. Its acceptance report also checks
+Redis source readiness, `ack_on_success=True`, PostgreSQL connectivity, strict
+write safety, and sink replay capability after both components are open.
+Delivery metadata is opt-in; a row mapper that keeps it must serialize it for
+the target JSON/JSONB column.
 
 ## Observability
 
